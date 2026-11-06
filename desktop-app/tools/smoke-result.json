@@ -1,0 +1,15 @@
+{
+  "electron": "45.2.3",
+  "node": "24.22.2",
+  "modules": {
+    "sqlite": "FAIL: Setting key not supported for in-memory or temporary databases.",
+    "canvas": true,
+    "office": true,
+    "pdfjs": true,
+    "tesseract": {
+      "createWorker": "function",
+      "langPath": true
+    },
+    "store": "ok"
+  }
+}

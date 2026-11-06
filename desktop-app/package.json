@@ -1,0 +1,89 @@
+{
+  "name": "local-development-intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "description": "نظام محلي لإدارة بيانات التنمية والتحليل القطاعي",
+  "author": "Local Development Intelligence",
+  "main": "src/main/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "start:desktop": "electron .",
+    "dev:desktop": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron . --dev-server=http://127.0.0.1:5173\"",
+    "build": "vite build",
+    "test": "node --test",
+    "prepare:win": "npm install --no-save --ignore-scripts --include=optional --os=win32 --cpu=x64",
+    "dist:win": "npm run build && npm run prepare:win && electron-builder --win nsis --x64",
+    "dist:win:dir": "npm run build && npm run prepare:win && electron-builder --win dir --x64",
+    "dist:win:zip": "npm run build && npm run prepare:win && electron-builder --win zip --x64"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "1.1.0",
+    "@tesseract.js-data/ara": "1.0.0",
+    "better-sqlite3-multiple-ciphers": "13.0.3",
+    "exceljs": "4.4.0",
+    "lucide-react": "^0.468.0",
+    "mammoth": "1.13.0",
+    "pdfjs-dist": "6.5.438",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tesseract.js": "7.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.0.0",
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0",
+    "vite": "8.3.6",
+    "wait-on": "^8.0.0"
+  },
+  "build": {
+    "appId": "org.local.development-intelligence",
+    "productName": "نظام التنمية المحلية",
+    "directories": {
+      "output": "release"
+    },
+    "asar": true,
+    "npmRebuild": false,
+    "asarUnpack": [
+      "node_modules/better-sqlite3-multiple-ciphers/**",
+      "node_modules/tesseract.js-core/**",
+      "node_modules/tesseract.js/src/worker-script/node/**",
+      "node_modules/@tesseract.js-data/**",
+      "node_modules/@napi-rs/**",
+      "node_modules/pdfjs-dist/**",
+      "node_modules/tesseract.js/**"
+    ],
+    "files": [
+      "dist/**",
+      "src/main/**",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "Local-Development-Intelligence-${version}-${arch}.${ext}",
+      "signAndEditExecutable": true
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "shortcutName": "نظام التنمية المحلية"
+    }
+  },
+  "optionalDependencies": {
+    "@napi-rs/canvas-linux-arm64-gnu": "^1.1.0",
+    "@napi-rs/canvas-win32-x64-msvc": "^1.1.0"
+  }
+}

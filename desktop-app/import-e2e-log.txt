@@ -1,0 +1,6 @@
+2026-11-06T17:26:58.433Z spawned pid=8756
+2026-11-06T17:26:59.702Z unlock {"success":true}
+2026-11-06T17:27:03.635Z dialog(data.xlsx) DIALOG_SUBMITTED in 2430ms
+2026-11-06T17:27:08.787Z import {"batchId":1,"count":40392}
+2026-11-06T17:27:12.757Z dialog(export.xlsx) DIALOG_SUBMITTED in 2437ms
+2026-11-06T17:27:12.758Z export {"canceled":false,"filePath":"C:\\dev\\_cache\\import-test\\بيانات-التنمية-المحلية.xlsx"}

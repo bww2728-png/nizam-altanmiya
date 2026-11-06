@@ -1,0 +1,14 @@
+{
+  "asar": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\local-development-intelligence\\resources\\app.asar",
+  "importers": "loaded",
+  "pdf": {
+    "items": 1,
+    "pages": 1,
+    "first": "Example"
+  },
+  "ocr": {
+    "text": "التنمية المحلية",
+    "confidence": 93
+  },
+  "passed": true
+}

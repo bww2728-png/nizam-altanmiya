@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "desktop-testing-electron": {
+      "source": "agents-inc/skills",
+      "sourceType": "github",
+      "skillPath": "src/skills/desktop-testing-electron/SKILL.md",
+      "computedHash": "23b39ac4d64baebc973c1ab5687fbbf60df8b3800d0f6b53fdcfa04ed8f700d5"
+    }
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "input": "C:\\dev\\_cache\\import-test\\data.xlsx",
+  "source": "C:\\dev\\nizam-altanmiya\\نظام المديريات V3.3 - قاعدة البيانات الشاملة نهشل.xlsx",
+  "exportPath": "C:\\dev\\_cache\\import-test\\export.xlsx",
+  "steps": [],
+  "lockScreen": true,
+  "statusBefore": {
+    "unlocked": false,
+    "hasDatabase": false
+  },
+  "unlock": {
+    "success": true
+  },
+  "import": {
+    "canceled": false,
+    "batchId": 1,
+    "fileName": "data.xlsx",
+    "itemCount": 40392,
+    "pages": 16,
+    "truncated": false,
+    "warnings": []
+  },
+  "pendingSample": [
+    {
+      "id": 1,
+      "field": "البيانات الأساسية",
+      "value": "اسم المديرية",
+      "location": "ورقة «ملخص المديريات V3.3»، الخلية A2"
+    },
+    {
+      "id": 2,
+      "field": "البيانات الأساسية",
+      "value": "طبيعة المديرية",
+      "location": "ورقة «ملخص المديريات V3.3»، الخلية B2"
+    },
+    {
+      "id": 3,
+      "field": "البيانات الأساسية",
+      "value": "عدد السكان",
+      "location": "ورقة «ملخص المديريات V3.3»، الخلية C2"
+    }
+  ],
+  "update": {
+    "success": true
+  },
+  "accept": {
+    "accepted": 1,
+    "rejected": 0,
+    "conflicts": 0,
+    "ignored": 0
+  },
+  "approvedCount": 1,
+  "approvedSample": [
+    {
+      "field": "البيانات الأساسية",
+      "value": "اسم المديرية",
+      "governorate": "صنعاء",
+      "source": "ورقة «ملخص المديريات V3.3»، الخلية A2"
+    }
+  ],
+  "export": {
+    "canceled": false,
+    "filePath": "C:\\dev\\_cache\\import-test\\بيانات-التنمية-المحلية.xlsx"
+  },
+  "exportedFile": "C:\\dev\\_cache\\import-test\\بيانات-التنمية-المحلية.xlsx",
+  "exportedRows": 1,
+  "exportedHeader": [
+    "المحافظة",
+    "المديرية",
+    "العزلة",
+    "التجمع/القرية",
+    "نوع السجل",
+    "معرّف السجل",
+    "الحقل"
+  ],
+  "exportedFirstRow": [
+    "صنعاء",
+    "همدان",
+    "بعي",
+    "بيت زيد",
+    "ملخص المديريات V3.3",
+    "e2e-record-1",
+    "البيانات الأساسية"
+  ],
+  "passed": true
+}
