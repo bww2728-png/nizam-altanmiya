@@ -26,8 +26,12 @@ function analyze(rows, options = {}) {
     throw new Error(`أوزان غير صالحة: ${weightCheck.errors.join(' ')}`);
   }
 
-  const kThreshold = Number.isFinite(Number(options.kThreshold)) ? Number(options.kThreshold) : CALIBRATION.kThreshold;
-  const deprivationLine = Number.isFinite(Number(options.deprivationLine)) ? Number(options.deprivationLine) : CALIBRATION.deprivationLine;
+  const kThreshold = options.kThreshold !== undefined && options.kThreshold !== null && Number.isFinite(Number(options.kThreshold))
+    ? Number(options.kThreshold)
+    : CALIBRATION.kThreshold;
+  const deprivationLine = options.deprivationLine !== undefined && options.deprivationLine !== null && Number.isFinite(Number(options.deprivationLine))
+    ? Number(options.deprivationLine)
+    : CALIBRATION.deprivationLine;
 
   // 1. Indicators and completeness per row.
   const analysed = rows.map((row) => {
@@ -92,18 +96,25 @@ function analyze(rows, options = {}) {
   // 5. Rankings and the comparison between the two modes.
   const replicaRanking = rankReplica(analysed);
   const calibratedRanking = rankCalibrated(analysed);
-  const comparison = compareRanks(analysed);
+  const comparison = compareRanks(analysed, { kThreshold });
 
   // 6. Sensitivity — weight perturbation for mode B, sample perturbation for mode A.
   const sensitivity = analyzeSensitivity(analysed, { weights, mode: 'calibrated', kThreshold });
   const sampleSensitivity = analyzeSampleSensitivity(analysed, weights);
+  // `detail` is produced in row order, so match it by position. Matching by name
+  // would attach one directorate's shift to a same-name district elsewhere.
+  const sampleShiftByRow = new Map();
+  sampleSensitivity.detail.forEach((item, index) => {
+    const row = analysed[index];
+    if (row) sampleShiftByRow.set(row, item.maxShift);
+  });
   for (const row of analysed) {
     const entry = sensitivity.perRow.get(row);
     row.sensitivity = entry
       ? {
         minRank: entry.minRank, maxRank: entry.maxRank, rankRange: entry.rankRange,
         distinctRanks: entry.distinctRanks, fragile: entry.fragile, scenarios: entry.scenarios,
-        sampleMaxShift: sampleSensitivity.detail.find((item) => item.districtName === row.districtName)?.maxShift ?? 0,
+        sampleMaxShift: sampleShiftByRow.get(row) ?? 0,
       }
       : null;
   }
@@ -126,6 +137,7 @@ function analyze(rows, options = {}) {
     calibratedBlocked: calibratedRanking.blocked.length,
     severeCount: analysed.filter((row) => row.calibrated.severe).length,
     fragileCount: analysed.filter((row) => row.sensitivity?.fragile).length,
+    sampleSensitivityTruncated: Boolean(sampleSensitivity.truncated),
     averageWeightCoverage: analysed.length
       ? analysed.reduce((sum, row) => sum + (row.calibrated.weightCoverage ?? 0), 0) / analysed.length
       : 0,

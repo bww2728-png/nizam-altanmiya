@@ -95,17 +95,19 @@ function rankCalibrated(rows) {
 }
 
 /** Direction of agreement between the two modes across the whole sample. */
-function compareRanks(rows) {
+function compareRanks(rows, options = {}) {
   const comparable = rows.filter((row) => row.replica?.rank && row.calibrated?.rank);
-  const pairs = comparable.map((row) => ({
+  const pairs = comparable.map((row, index) => ({
+    index,
     districtName: row.districtName,
+    governorate: row.governorate ?? '',
     replicaRank: row.replica.rank,
     calibratedRank: row.calibrated.rank,
     delta: row.replica.rank - row.calibrated.rank,
   }));
   const changed = pairs.filter((pair) => pair.delta !== 0);
   const maxShift = pairs.reduce((max, pair) => Math.max(max, Math.abs(pair.delta)), 0);
-  return { pairs, changed, maxShift, comparable: comparable.length, kThreshold: CALIBRATION.kThreshold };
+  return { pairs, changed, maxShift, comparable: comparable.length, kThreshold: options.kThreshold ?? CALIBRATION.kThreshold };
 }
 
 module.exports = { rankReplica, rankCalibrated, compareRanks, compareText };

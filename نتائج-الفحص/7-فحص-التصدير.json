@@ -1,0 +1,44 @@
+{
+  "generatedAt": "2026-11-06T22:45:43.889Z",
+  "group": "export",
+  "total": 6,
+  "passed": 6,
+  "checks": [
+    {
+      "group": "export",
+      "name": "التكافؤ الرقمي مع القالب (AZ = 0.200)",
+      "ok": true,
+      "detail": "0.2"
+    },
+    {
+      "group": "export",
+      "name": "المعايرة تحجب أزال وبيت الفقيه",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "group": "export",
+      "name": "PDF يُنتج بمحرك الطباعة",
+      "ok": true,
+      "detail": "98565 bytes"
+    },
+    {
+      "group": "export",
+      "name": "ملف Excel يحتوي الأوراق الست",
+      "ok": true,
+      "detail": "قاعدة البيانات الشاملة · الترتيب والأولويات · فجوات البيانات · الحساسية · الأوزان والمعايرة · سجل التدقيق"
+    },
+    {
+      "group": "export",
+      "name": "ورقة القالب تحتوي البيانات والمركب",
+      "ok": true,
+      "detail": "row=3"
+    },
+    {
+      "group": "export",
+      "name": "معاينة التقرير تُولَّد للفحص البصري",
+      "ok": true,
+      "detail": "1002x825"
+    }
+  ]
+}

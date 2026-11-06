@@ -149,7 +149,7 @@ function mapHeaderRow(cells) {
 
   return {
     columnMap,
-    matched: Object.entries(taken).map(([key, info]) => ({ key, ...info })),
+    matched: [...taken.entries()].map(([key, info]) => ({ key, ...info })),
     unmatched,
     duplicates,
   };

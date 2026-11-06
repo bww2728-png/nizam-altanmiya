@@ -17,6 +17,8 @@ const { defaultWeights, sumWeights, replicaComposite, calibratedComposite } = re
  */
 
 const PERTURBATION = 0.2;
+/** Deleting one row at a time is O(n²); above this size we refuse rather than freeze. */
+const SAMPLE_SENSITIVITY_MAX = 400;
 
 function renormalize(weights) {
   const total = sumWeights(weights);
@@ -144,6 +146,19 @@ function analyzeSensitivity(rows, options = {}) {
  * audit gap #3 and needs no assumptions.
  */
 function analyzeSampleSensitivity(rows, weights) {
+  if (rows.length > SAMPLE_SENSITIVITY_MAX) {
+    // Leave-one-out on a large population costs seconds per row; report the limit
+    // explicitly instead of stalling the UI or shipping a misleading zero.
+    return {
+      droppedCount: rows.length,
+      maxShift: 0,
+      unstable: false,
+      truncated: true,
+      limit: SAMPLE_SENSITIVITY_MAX,
+      note: `حساسية العيّنة لم تُحسب لأن عدد المديريات (${rows.length}) يتجاوز حد ${SAMPLE_SENSITIVITY_MAX}.`,
+      detail: [],
+    };
+  }
   const base = replicaComposite(rows, { weights });
   rows.forEach((row, index) => { row.__base = base.results[index].composite; });
   const baseRanks = rankByComposite(rows, (row) => row.__base);
@@ -157,26 +172,31 @@ function analyzeSampleSensitivity(rows, weights) {
     for (const [row, rank] of subsetRanks) perRow.get(row)?.push(rank);
     for (const row of subset) delete row.__subset;
   }
+  for (const row of rows) delete row.__base;
 
   const detail = [];
-  for (const row of rows) {
+  rows.forEach((row, index) => {
     const rank = baseRanks.get(row) ?? null;
     const observed = perRow.get(row) ?? [];
     const minRank = observed.length ? Math.min(...observed) : null;
     const maxRank = observed.length ? Math.max(...observed) : null;
     detail.push({
+      index,
       districtName: row.districtName,
+      governorate: row.governorate ?? '',
       rank,
       minRank, maxRank,
       maxShift: minRank === null ? 0 : Math.max(Math.abs(minRank - rank), Math.abs(maxRank - rank)),
     });
-  }
+  });
 
   const worst = detail.reduce((max, entry) => Math.max(max, entry.maxShift), 0);
   return {
     droppedCount: rows.length,
     maxShift: worst,
     unstable: worst > 0,
+    truncated: false,
+    limit: SAMPLE_SENSITIVITY_MAX,
     detail,
   };
 }
@@ -187,4 +207,5 @@ module.exports = {
   buildWeightScenarios,
   renormalize,
   PERTURBATION,
+  SAMPLE_SENSITIVITY_MAX,
 };

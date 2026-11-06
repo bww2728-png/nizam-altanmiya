@@ -37,7 +37,7 @@ test('two-row header is detected and every column is mapped by name', () => {
     'البيانات الأساسية', 'البيانات الأساسية', 'البيانات الأساسية', 'التعليم', 'الصحة', 'البنية التحتية',
     'الطرق المزفلتة %', 'إيرادات المديرية', 'اسم المديرية', 'عدد المدارس', 'منشآت حكومية', 'نسبة المياه %',
   ];
-  const { columnMap, unmatched, duplicates } = mapHeaderRow(cells);
+  const { columnMap, matched, unmatched, duplicates } = mapHeaderRow(cells);
   assert.equal(columnMap.districtName, 9);
   assert.equal(columnMap.schools, 10);
   assert.equal(columnMap.govFacilities, 11);
@@ -45,6 +45,9 @@ test('two-row header is detected and every column is mapped by name', () => {
   assert.equal(columnMap.pavedRoads, 7);
   assert.equal(columnMap.revenue, 8);
   assert.equal(duplicates.length, 0);
+  // `matched` is the report the UI shows; it must list the mapped fields.
+  assert.equal(matched.length, Object.keys(columnMap).length);
+  assert.ok(matched.every((entry) => columnMap[entry.key] === entry.column));
   // Group headers have no canonical meaning and must be reported, not guessed.
   assert.equal(unmatched.length, 6);
 });
