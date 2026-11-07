@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, AlertTriangle, ArrowDownToLine, Check, ChevronDown, CircleHelp, Database, FileSpreadsheet, FileText, FolderUp, Gauge, Home, LockKeyhole, LogOut, MapPinned, RefreshCw, Search, ShieldCheck, Table2, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDownToLine, Check, ChevronDown, CircleHelp, Database, FileSpreadsheet, FileText, FolderUp, Gauge, Home, LockKeyhole, LogOut, MapPinned, PenLine, RefreshCw, Search, ShieldCheck, Table2, X } from 'lucide-react';
 import './styles.css';
 import brandBanner from './assets/brand-banner.jpg';
 import logoBadge from './assets/logo-badge.png';
 import AnalysisPage from './analysis/AnalysisPage.jsx';
+import DataEntryPage from './data-entry/DataEntryPage.jsx';
 
 const TAGLINES = ['تطوير مستدام', 'تنمية محلية', 'تمكين مجتمعي', 'إزدهار وطني'];
 
@@ -201,6 +202,7 @@ function App() {
   const navItems = [
     { id: 'overview', label: 'نظرة عامة', icon: Home },
     { id: 'analysis', label: 'تحليل الأولويات', icon: Gauge },
+    { id: 'entry', label: 'إدخال البيانات', icon: PenLine },
     { id: 'review', label: 'مراجعة الاستخراج', icon: Check, badge: (overview?.pending || 0) + (overview?.conflicts || 0) },
     { id: 'imports', label: 'سجل الاستيراد', icon: FolderUp },
     { id: 'data', label: 'البيانات المعتمدة', icon: Table2 },
@@ -256,6 +258,8 @@ function App() {
         </>}
 
         {active === 'analysis' && <AnalysisPage onToast={setToast} onError={setError} />}
+
+        {active === 'entry' && <DataEntryPage onToast={setToast} onError={setError} />}
 
         {active === 'review' && <>
           <div className="page-heading"><div><p className="eyebrow">حوكمة البيانات</p><h1>مراجعة الاستخراج</h1><p>تأكد من القيمة ومفتاحها الجغرافي قبل اعتمادها في قاعدة البيانات.</p></div><button className="primary-button" onClick={importFile} disabled={loading}><FolderUp size={17} />استيراد ملف</button></div>

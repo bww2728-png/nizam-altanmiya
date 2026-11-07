@@ -109,9 +109,17 @@ async function readDirectorateWorkbook(filePath) {
       const text = cellText(raw);
       if (text !== '') hasAnyValue = true;
       const parsed = parseFieldValue(raw === null ? null : (typeof raw === 'object' && raw.result !== undefined ? raw.result : raw), field);
-      values[key] = parsed.state === 'ok' ? parsed.value : null;
+      // Only a value that parsed cleanly may touch the database. An empty or
+      // placeholder cell must NOT arrive as an explicit `null`, otherwise
+      // re-importing a partial workbook would silently wipe values that were
+      // entered manually or came from an earlier, fuller file. Clearing a value
+      // is an explicit action on the manual-entry screen, not a side effect of
+      // an empty Excel cell.
+      if (parsed.state === 'ok') {
+        values[key] = parsed.value;
+        sources[key] = cell.address;
+      }
       rawValues[key] = text;
-      if (parsed.state === 'ok') sources[key] = cell.address;
       for (const warning of parsed.warnings) {
         rowWarnings.push({ key, code: warning.code, raw: text, value: parsed.value });
       }
@@ -138,7 +146,7 @@ async function readDirectorateWorkbook(filePath) {
       id: `template:${rowNumber}`,
       rowNumber,
       districtName,
-      governorate: values.governorate ?? rawValues.governorate ?? '',
+      governorate: values.governorate ?? '',
       values,
       rawValues,
       sources,

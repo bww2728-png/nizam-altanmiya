@@ -67,7 +67,7 @@ test('reading the real template finds the right sheet, header row and 39 input c
   assert.equal(shaar.values.population, 43739);
   assert.ok(Math.abs(shaar.values.waterCoverage - 0.197) < 1e-12);
   assert.equal(shaar.values.revenue, 75643312);
-  assert.equal(shaar.values.frontLine, null, 'an empty cell must stay null, never zero');
+  assert.ok(shaar.values.frontLine === null || shaar.values.frontLine === undefined, 'an empty cell must stay missing, never zero');
   assert.equal(shaar.sources.population, 'C3', 'each value keeps its cell address');
 
   assert.equal(azal.districtName, 'مديرية أزال');

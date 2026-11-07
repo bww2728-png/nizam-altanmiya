@@ -24,6 +24,10 @@ contextBridge.exposeInMainWorld('localApp', {
   auditLog: (request) => ipcRenderer.invoke('analysis:audit', request),
   fieldCatalogue: () => ipcRenderer.invoke('analysis:fields'),
   directorates: (request) => ipcRenderer.invoke('analysis:directorates', request),
+  getDirectorate: (id) => ipcRenderer.invoke('analysis:directorate:get', id),
+  saveDirectorate: (request) => ipcRenderer.invoke('analysis:directorate:save', request),
+  deleteDirectorate: (id) => ipcRenderer.invoke('analysis:directorate:delete', id),
+  readOcrEntry: () => ipcRenderer.invoke('analysis:ocr-read'),
   exportAnalysisExcel: () => ipcRenderer.invoke('analysis:export-excel'),
   exportAnalysisPdf: () => ipcRenderer.invoke('analysis:export-pdf'),
   onImportProgress: (listener) => {

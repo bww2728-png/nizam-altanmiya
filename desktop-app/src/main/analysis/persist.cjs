@@ -12,9 +12,13 @@
 
 const { DIRECTORATE_COLUMNS } = require('./store-schema.cjs');
 const { INPUT_FIELDS, DECISION_FIELD } = require('./schema.cjs');
+const { parseFieldValue } = require('./parse.cjs');
 
 const FIELD_BY_KEY = new Map(INPUT_FIELDS.map((field) => [field.key, field]));
 const COLUMN_ENTRIES = Object.entries(DIRECTORATE_COLUMNS);
+
+/** Provenance label for every value typed on the manual-entry screen. */
+const MANUAL_SOURCE = 'إدخال يدوي';
 
 /** Directories beyond this count are refused loudly rather than truncated. */
 const ANALYSIS_ROW_CAP = 50000;
@@ -139,6 +143,9 @@ function saveProvenance(database, directorateId, record, rawValues, sources, met
   const run = database.transaction((entries) => {
     for (const [key] of entries) {
       if (key === 'reviewerDecision') continue;
+      // Provenance follows the same rule as the value itself: a field that was
+      // not applied must not overwrite the source record of a stored value.
+      if (record.values?.[key] === undefined) continue;
       const location = sources[key] ?? null;
       const text = rawValues[key] ?? null;
       if (location === null && text === null) continue;
@@ -215,7 +222,11 @@ function listDirectorates(database, filter = {}) {
   const clauses = [];
   const params = [];
   if (governorate) { clauses.push('governorate = ?'); params.push(governorate); }
-  if (search) { clauses.push('district LIKE ?'); params.push(`%${search}%`); }
+  if (search) {
+    const escaped = search.replace(/[\\%_]/g, '\\$&');
+    clauses.push("district LIKE ? ESCAPE '\\'");
+    params.push(`%${escaped}%`);
+  }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   params.push(limit);
   return database.prepare(`SELECT * FROM directorates ${where} ORDER BY governorate, district LIMIT ?`).all(...params);
@@ -488,7 +499,232 @@ function setSetting(database, key, value) {
   `).run(key, value === null || value === undefined ? null : String(value), nowIso());
 }
 
+/**
+ * Accept only a real positive numeric id. `Number(true) === 1` would otherwise
+ * let an IPC caller delete the first directorate by sending a boolean.
+ */
+function toPositiveId(value) {
+  const invalid = new Error('معرّف المديرية غير صالح.');
+  if (typeof value !== 'number' && typeof value !== 'string') throw invalid;
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric <= 0) throw invalid;
+  return numeric;
+}
+
+/**
+ * Read one directorate by its database id.
+ * @throws when the id is not a positive integer or the record is missing.
+ */
+function getDirectorate(database, id) {
+  const numeric = toPositiveId(id);
+  const record = database.prepare('SELECT * FROM directorates WHERE id = ?').get(numeric);
+  if (!record) throw new Error('المديرية المطلوبة غير موجودة.');
+  return record;
+}
+
+/**
+ * Coerce the manual-entry payload with the same parser used by the workbook
+ * reader, so a value typed by hand and the same value imported from Excel are
+ * stored identically (ratios 0..1, booleans 0|1, Arabic digits, percent signs).
+ *
+ * Empty inputs map to `null` (an explicit "clear"), and absent keys are omitted
+ * so a future partial update cannot wipe untouched columns.
+ *
+ * @returns {{clean:object, rawValues:object, issues:Array}}
+ */
+function normalizeManualValues(values = {}) {
+  const clean = {};
+  const rawValues = {};
+  const issues = [];
+
+  for (const field of INPUT_FIELDS) {
+    if (field.key === 'districtName' || field.key === 'governorate') continue;
+    if (!Object.prototype.hasOwnProperty.call(values, field.key)) continue;
+
+    const raw = values[field.key];
+    const blank = raw === null || raw === undefined || (typeof raw === 'string' && raw.trim() === '');
+    if (blank) {
+      clean[field.key] = null;
+      rawValues[field.key] = null;
+      continue;
+    }
+
+    const parsed = parseFieldValue(raw, field);
+    if (parsed.state === 'invalid') {
+      issues.push({ key: field.key, header: field.header, raw: String(raw) });
+      continue;
+    }
+    if (field.type === 'text' && parsed.state === 'ok' && parsed.value.length > 2000) {
+      issues.push({ key: field.key, header: field.header, raw: 'نص أطول من الحد المسموح (2000 حرف)' });
+      continue;
+    }
+    clean[field.key] = parsed.state === 'ok' ? parsed.value : null;
+    rawValues[field.key] = typeof raw === 'string' ? raw.trim() : String(raw);
+  }
+
+  return { clean, rawValues, issues };
+}
+
+/**
+ * Create or update one directorate from the manual-entry screen.
+ *
+ * The identity is `(governorate, district)` exactly as everywhere else, so a
+ * rename that collides with a stored record is refused instead of silently
+ * merging two directorates.
+ *
+ * @param {object} database
+ * @param {{id?:number, districtName:string, governorate?:string, values?:object}} request
+ * @returns {{id:number, created:boolean}}
+ */
+function saveManualDirectorate(database, request = {}) {
+  const rawId = request.id;
+  const id = rawId === undefined || rawId === null || rawId === '' ? null : toPositiveId(rawId);
+
+  const district = String(request.districtName ?? '').trim();
+  const governorate = String(request.governorate ?? '').trim();
+  if (!district) throw new Error('اسم المديرية مطلوب.');
+  if (district.length > 200) throw new Error('اسم المديرية أطول من الحد المسموح (200 حرف).');
+  if (governorate.length > 200) throw new Error('اسم المحافظة أطول من الحد المسموح (200 حرف).');
+
+  const { clean, rawValues, issues } = normalizeManualValues(request.values ?? {});
+  if (issues.length) {
+    throw new Error(`قيم غير صالحة: ${issues.map((issue) => `«${issue.header}» (${issue.raw})`).join('، ')}`);
+  }
+
+  const write = database.transaction(() => {
+    const timestamp = nowIso();
+    let targetId = id;
+    let created = false;
+    let identityChanged = false;
+
+    if (targetId === null) {
+      const clash = database
+        .prepare('SELECT id FROM directorates WHERE governorate = ? AND district = ?')
+        .get(governorate, district);
+      if (clash) {
+        throw new Error(`توجد مديرية مسجّلة بالاسم «${district}» في «${governorate || 'بلا محافظة'}». عدّلها بدل إضافتها مجددًا.`);
+      }
+    } else {
+      const existing = getDirectorate(database, targetId);
+      identityChanged = existing.governorate !== governorate || existing.district !== district;
+      const clash = database
+        .prepare('SELECT id FROM directorates WHERE governorate = ? AND district = ? AND id <> ?')
+        .get(governorate, district, targetId);
+      if (clash) throw new Error(`توجد مديرية أخرى بالاسم «${district}» في «${governorate || 'بلا محافظة'}».`);
+    }
+
+    const columns = [];
+    const params = [];
+    for (const [key, column] of COLUMN_ENTRIES) {
+      if (column === 'governorate' || column === 'district' || key === 'reviewerDecision') continue;
+      if (!Object.prototype.hasOwnProperty.call(clean, key)) continue;
+      columns.push(column);
+      params.push(toColumnValue(key, clean[key]));
+    }
+
+    if (targetId === null) {
+      const insertColumns = ['governorate', 'district', ...columns, 'source_file', 'source_sheet', 'source_row', 'updated_at'];
+      const insertParams = [governorate, district, ...params, MANUAL_SOURCE, MANUAL_SOURCE, null, timestamp];
+      const placeholders = insertColumns.map(() => '?').join(', ');
+      const info = database
+        .prepare(`INSERT INTO directorates (${insertColumns.join(', ')}) VALUES (${placeholders})`)
+        .run(...insertParams);
+      targetId = Number(info.lastInsertRowid);
+      created = true;
+    } else {
+      const assignments = ['governorate = ?', 'district = ?', ...columns.map((column) => `${column} = ?`), 'updated_at = ?'];
+      const updateParams = [governorate, district, ...params, timestamp];
+      if (identityChanged) {
+        // A renamed record no longer mirrors the workbook row it came from, so
+        // it must stop advertising that file as its source. Otherwise a later
+        // template re-import would recreate the old identity as a second row.
+        assignments.push('source_file = ?', 'source_sheet = ?', 'source_row = ?');
+        updateParams.push(MANUAL_SOURCE, MANUAL_SOURCE, null);
+      }
+      database
+        .prepare(`UPDATE directorates SET ${assignments.join(', ')} WHERE id = ?`)
+        .run(...updateParams, targetId);
+    }
+
+    // Keep provenance truthful: a cleared field loses its old source row, while a
+    // stored value keeps the text the operator actually typed.
+    const upsertSource = database.prepare(`
+      INSERT INTO directorate_sources (directorate_id, field_key, value_text, source_file, source_location, captured_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(directorate_id, field_key) DO UPDATE SET
+        value_text = excluded.value_text,
+        source_file = excluded.source_file,
+        source_location = excluded.source_location,
+        captured_at = excluded.captured_at
+    `);
+    const clearSource = database.prepare('DELETE FROM directorate_sources WHERE directorate_id = ? AND field_key = ?');
+    for (const [key] of COLUMN_ENTRIES) {
+      if (key === 'reviewerDecision') continue;
+      if (!Object.prototype.hasOwnProperty.call(clean, key)) continue;
+      if (clean[key] === null) {
+        clearSource.run(targetId, key);
+        continue;
+      }
+      upsertSource.run(targetId, key, rawValues[key] ?? null, MANUAL_SOURCE, null, timestamp);
+    }
+
+    if (identityChanged) {
+      // The identity is not part of `clean`, so refresh its provenance explicitly.
+      upsertSource.run(targetId, 'districtName', district, MANUAL_SOURCE, null, timestamp);
+      upsertSource.run(targetId, 'governorate', governorate, MANUAL_SOURCE, null, timestamp);
+    }
+
+    database
+      .prepare('INSERT INTO access_log (action, entity, entity_id, fields, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(
+        created ? 'manual-create' : 'manual-update',
+        'directorates',
+        String(targetId),
+        String(columns.length),
+        `district=${district};governorate=${governorate}`,
+        timestamp,
+      );
+
+    return { id: targetId, created };
+  });
+
+  return write();
+}
+
+/**
+ * Hard-delete one directorate and its provenance rows.
+ * Historical analysis runs keep their own snapshot, so past reports stay valid.
+ */
+function deleteDirectorate(database, id) {
+  const numeric = toPositiveId(id);
+
+  const write = database.transaction(() => {
+    const record = database
+      .prepare('SELECT id, governorate, district FROM directorates WHERE id = ?')
+      .get(numeric);
+    if (!record) throw new Error('المديرية المطلوبة غير موجودة.');
+
+    // SQLite may reuse a deleted rowid. Detach historical results first so a new
+    // directorate that later gets the same id cannot inherit an old report.
+    database.prepare('UPDATE analysis_results SET directorate_id = NULL WHERE directorate_id = ?').run(numeric);
+    database.prepare('DELETE FROM directorate_sources WHERE directorate_id = ?').run(numeric);
+    database.prepare('DELETE FROM directorates WHERE id = ?').run(numeric);
+    database
+      .prepare('INSERT INTO access_log (action, entity, entity_id, fields, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('manual-delete', 'directorates', String(numeric), '', `district=${record.district};governorate=${record.governorate}`, nowIso());
+
+    return { id: numeric, district: record.district, governorate: record.governorate };
+  });
+
+  return write();
+}
+
 module.exports = {
+  getDirectorate,
+  saveManualDirectorate,
+  deleteDirectorate,
+  normalizeManualValues,
+  MANUAL_SOURCE,
   upsertDirectorate,
   upsertDirectorates,
   listDirectorates,

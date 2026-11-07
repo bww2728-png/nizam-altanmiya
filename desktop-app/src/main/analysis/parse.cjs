@@ -30,7 +30,8 @@ function normalizeDigits(value) {
     .replace(/[۰-۹]/g, (digit) => String(EXTENDED_ARABIC_INDIC.indexOf(digit)))
     // Superscript/subscript digits appear in headers such as «نسمة/كم²».
     .replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]/g, (digit) => String('⁰¹²³⁴⁵⁶⁷⁸⁹'.indexOf(digit)))
-    .replace(/[₀₁₂₃₄₅₆₇₈₉]/g, (digit) => String('₀₁₂₃₄₅₆₇₈₉'.indexOf(digit)));
+    .replace(/[₀₁₂₃₄₅₆₇₈₉]/g, (digit) => String('₀₁₂₃₄₅₆₇₈₉'.indexOf(digit)))
+    .replace(/\u066B/g, '.');
 }
 
 /** Removes tashkeel/tatweel so labels compare reliably ("المديريّة" == "المديرية"). */

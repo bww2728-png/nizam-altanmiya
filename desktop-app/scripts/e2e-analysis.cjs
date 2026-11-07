@@ -62,6 +62,35 @@ async function clickByText(window, selector, text) {
   })()`);
 }
 
+async function clickRowAction(window, district, action) {
+  return window.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('.analysis-table tbody tr')]
+      .find((node) => (node.textContent || '').includes(${JSON.stringify(district)}));
+    if (!row) return false;
+    const button = [...row.querySelectorAll('button')]
+      .find((node) => (node.textContent || '').includes(${JSON.stringify(action)}));
+    if (!button) return false;
+    button.click();
+    return true;
+  })()`);
+}
+
+async function setFieldByLabel(window, label, value) {
+  return window.webContents.executeJavaScript(`(() => {
+    const field = [...document.querySelectorAll('.entry-field')]
+      .find((node) => (node.querySelector('span')?.textContent || '').includes(${JSON.stringify(label)}));
+    if (!field) return false;
+    const control = field.querySelector('input, select');
+    if (!control) return false;
+    const proto = control.tagName === 'SELECT' ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+    setter.call(control, ${JSON.stringify(value)});
+    control.dispatchEvent(new Event('input', { bubbles: true }));
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`);
+}
+
 async function screenshot(window, fileName) {
   const image = await window.webContents.capturePage();
   fs.writeFileSync(path.join(EVIDENCE, fileName), image.toPNG());
@@ -228,6 +257,57 @@ app.whenReady().then(async () => {
     preview.destroy();
     check('export', 'معاينة التقرير تُولَّد للفحص البصري', previewShot.getSize().width > 500, `${previewShot.getSize().width}x${previewShot.getSize().height}`);
 
+    // ---------- 6. Manual entry ----------
+    await clickByText(window, '.nav-item', 'إدخال البيانات');
+    await waitFor(window, `Boolean(document.querySelector('.data-entry-page'))`);
+    await sleep(300);
+    check('manual', 'صفحة الإدخال اليدوي تُعرض من التنقل', await window.webContents.executeJavaScript(`Boolean(document.querySelector('.data-entry-page .entry-actions'))`));
+    check('manual', 'زر الإدخال بالـOCR متاح', await window.webContents.executeJavaScript(`[...document.querySelectorAll('.entry-actions button')].some((node) => node.textContent.includes('OCR'))`));
+
+    const addClicked = await clickByText(window, '.entry-actions button', 'إضافة مديرية');
+    await waitFor(window, `Boolean(document.querySelector('.entry-form-panel'))`);
+    check('manual', 'نموذج الإضافة يعرض كل المجموعات', addClicked && await window.webContents.executeJavaScript(`document.querySelectorAll('.entry-group').length === 5`));
+
+    const filledIdentity = await setFieldByLabel(window, 'اسم المديرية', 'مديرية إدخال آلي');
+    const filledGovernorate = await setFieldByLabel(window, 'المحافظة', 'إب');
+    const filledPopulation = await setFieldByLabel(window, 'عدد السكان', '12345');
+    const savedManual = filledIdentity && filledGovernorate && filledPopulation
+      ? await clickByText(window, '.entry-footer button', 'حفظ المديرية')
+      : false;
+    check('manual', 'تعبئة الحقول وحفظ مديرية جديدة', savedManual);
+    await waitFor(window, `!document.querySelector('.entry-form-panel')`, 10000);
+    await sleep(400);
+
+    const createdState = await window.webContents.executeJavaScript(`(async () => {
+      const list = await window.localApp.directorates({ search: 'مديرية إدخال آلي', limit: 10 });
+      return { total: list.total, row: list.rows[0] ?? null };
+    })()`);
+    check('manual', 'المديرية الجديدة تُحفظ في القاعدة', createdState.total === 4 && createdState.row?.district === 'مديرية إدخال آلي', JSON.stringify(createdState.row));
+    check('manual', 'القيمة الرقمية تُخزَّن كرقم', createdState.row?.population === 12345, String(createdState.row?.population));
+    check('manual', 'المصدر يُسجَّل كإدخال يدوي', createdState.row?.source_file === 'إدخال يدوي', createdState.row?.source_file);
+
+    const editClicked = await clickRowAction(window, 'مديرية إدخال آلي', 'تعديل');
+    await waitFor(window, `Boolean(document.querySelector('.entry-form-panel'))`);
+    await sleep(200);
+    const changed = editClicked ? await setFieldByLabel(window, 'عدد السكان', '54321') : false;
+    const editSaved = changed ? await clickByText(window, '.entry-footer button', 'حفظ المديرية') : false;
+    await waitFor(window, `!document.querySelector('.entry-form-panel')`, 10000);
+    await sleep(300);
+    const editedState = await window.webContents.executeJavaScript(`(async () => {
+      const list = await window.localApp.directorates({ search: 'مديرية إدخال آلي', limit: 10 });
+      return list.rows[0] ?? null;
+    })()`);
+    check('manual', 'تعديل مديرية قائمة يحدّث القيمة', editSaved && editedState?.population === 54321, String(editedState?.population));
+
+    await window.webContents.executeJavaScript(`(() => { window.confirm = () => true; return true; })()`);
+    const deleteClicked = await clickRowAction(window, 'مديرية إدخال آلي', 'حذف');
+    await sleep(800);
+    const finalState = await window.webContents.executeJavaScript(`(async () => {
+      const list = await window.localApp.directorates({ limit: 10 });
+      return { total: list.total, names: list.rows.map((row) => row.district) };
+    })()`);
+    check('manual', 'حذف المديرية يعيد العدد إلى ثلاثة', deleteClicked && finalState.total === 3 && !finalState.names.includes('مديرية إدخال آلي'), JSON.stringify(finalState));
+
     database.close();
   } catch (error) {
     check('analysis', 'اكتمال التجربة دون استثناء', false, error.message);
@@ -239,6 +319,7 @@ app.whenReady().then(async () => {
       writeGroup('5-فحص-الفجوات-والحساسية-والأوزان.json', 'tabs');
       writeGroup('6-فحص-استيراد-القالب.json', 'import');
       writeGroup('7-فحص-التصدير.json', 'export');
+      writeGroup('8-فحص-الإدخال-اليدوي.json', 'manual');
 
       const failed = results.filter((item) => !item.ok);
       const lines = [
@@ -250,7 +331,8 @@ app.whenReady().then(async () => {
         'الملفات المرفقة:',
         '  1-واجهة-الدخول.png        لقطة شاشة الدخول بلا كلمة مرور',
         '  2-شاشة-التحليل.png        لقطة شاشة شاشة التحليل بعد التشغيل',
-        '  3..7  ملفات JSON           نتائج كل مجموعة فحص مع التفاصيل',
+        '  3..8  ملفات JSON           نتائج كل مجموعة فحص مع التفاصيل',
+        '  8-فحص-الإدخال-اليدوي.json فحص الإضافة والتعديل والحذف',
         '  6-تقرير-التحليل.pdf        التقرير الفعلي المولّد من المحرك',
         '  7-نتائج-التحليل.xlsx       ملف Excel بست أوراق',
         '  9-معاينة-التقرير.png       معاينة بصرية لصفحات التقرير',

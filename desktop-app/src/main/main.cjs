@@ -13,6 +13,7 @@ const persist = require('./analysis/persist.cjs');
 const { serializeAnalysis } = require('./analysis/serialize.cjs');
 const { exportAnalysisWorkbook } = require('./analysis/exporter.cjs');
 const { exportAnalysisPdf } = require('./analysis/pdf.cjs');
+const { recognizeEntryFile } = require('./analysis/ocr-entry.cjs');
 
 let mainWindow;
 let database;
@@ -314,6 +315,64 @@ function registerHandlers() {
   ipcMain.handle('analysis:directorates', (_event, request = {}) => {
     const db = requireDatabase();
     return { total: persist.countDirectorates(db), rows: persist.listDirectorates(db, request) };
+  });
+
+  ipcMain.handle('analysis:directorate:get', (_event, id) => {
+    const db = requireDatabase();
+    return persist.rowFromDirectorate(persist.getDirectorate(db, id));
+  });
+
+  ipcMain.handle('analysis:directorate:save', (_event, request = {}) => {
+    const db = requireDatabase();
+    const saved = persist.saveManualDirectorate(db, request);
+    // Any manual change invalidates the in-memory run used by exports.
+    lastAnalysis = null;
+    return saved;
+  });
+
+  ipcMain.handle('analysis:directorate:delete', (_event, id) => {
+    const db = requireDatabase();
+    const removed = persist.deleteDirectorate(db, id);
+    lastAnalysis = null;
+    return removed;
+  });
+
+  ipcMain.handle('analysis:ocr-read', async () => {
+    const db = requireDatabase();
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'اختر صورة أو PDF لقراءتها بالـOCR',
+      properties: ['openFile'],
+      filters: [{ name: 'صور وPDF', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tif', 'tiff', 'pdf'] }],
+    });
+    if (canceled || !filePaths.length) return { canceled: true };
+    const recognized = await recognizeEntryFile(filePaths[0]);
+    const parsed = recognized.parsed ?? {};
+    persist.logAccess(db, {
+      action: 'ocr-entry',
+      entity: 'file',
+      entityId: filePaths[0],
+      detail: `fields=${Object.keys(parsed.fields ?? {}).length}`,
+    });
+    const text = String(recognized.text ?? '');
+    const textLimit = 50000;
+    return {
+      canceled: false,
+      fileName: recognized.fileName,
+      fileType: recognized.fileType,
+      fileSize: recognized.fileSize,
+      confidence: recognized.confidence,
+      pages: recognized.pages,
+      pagesRead: recognized.pagesRead ?? recognized.pages,
+      truncated: Boolean(recognized.truncated || parsed.truncated),
+      warnings: recognized.warnings ?? [],
+      text: text.slice(0, textLimit),
+      textTruncated: text.length > textLimit,
+      parsed: {
+        fields: parsed.fields ?? {},
+        unmatched: parsed.unmatched ?? [],
+        warnings: parsed.warnings ?? [],
+      },
+    };
   });
 
   ipcMain.handle('analysis:export-excel', async () => {

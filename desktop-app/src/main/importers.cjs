@@ -6,6 +6,19 @@ const mammoth = require('mammoth');
 const MAX_FILE_BYTES = 40 * 1024 * 1024;
 const MAX_ITEMS = 50000;
 const SUPPORTED_EXTENSIONS = new Set(['.xlsx', '.pdf', '.docx']);
+/** Image formats accepted by the manual-entry OCR reader. */
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff']);
+
+/** A stuck WASM worker must fail the IPC call instead of hanging the UI forever. */
+const OCR_TIMEOUT_MS = 120000;
+
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 function cleanText(value) {
   return String(value ?? '').replace(/\u0000/g, '').trim();
@@ -192,7 +205,7 @@ async function ocrPdfPage(page, pdfjs, worker) {
   const viewport = page.getViewport({ scale });
   const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
   await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-  const result = await worker.recognize(canvas.toBuffer('image/png'));
+  const result = await withTimeout(worker.recognize(canvas.toBuffer('image/png')), OCR_TIMEOUT_MS, 'تجاوز التعرف الضوئي المهلة الزمنية. جرّب صورة أوضح أو أصغر.');
   return { text: cleanText(result.data.text), confidence: Math.max(0, Math.min(1, result.data.confidence / 100)) };
 }
 
@@ -270,6 +283,114 @@ async function extractPdf(filePath) {
   }
 }
 
+/**
+ * OCR for a single image file. Used by the manual-entry screen, where the user
+ * photographs or scans a paper form and then reviews every recognised value.
+ */
+async function extractImageText(filePath) {
+  const worker = await createOcrWorker();
+  try {
+    const buffer = await fs.readFile(filePath);
+    const result = await withTimeout(worker.recognize(buffer), OCR_TIMEOUT_MS, 'تجاوز التعرف الضوئي المهلة الزمنية. جرّب صورة أوضح أو أصغر.');
+    return {
+      text: cleanText(result.data.text),
+      confidence: Math.max(0, Math.min(1, result.data.confidence / 100)),
+      pages: 1,
+      warnings: ['تم استخدام OCR العربي محليًا؛ راجع كل قيمة قبل الحفظ.'],
+    };
+  } finally {
+    await worker.terminate();
+  }
+}
+
+/**
+ * Raw OCR/text-layer reading of a PDF for the manual-entry screen. Unlike
+ * `extractPdf` it keeps whole lines instead of splitting them into review
+ * candidates, because the entry parser needs the original "label: value" shape.
+ */
+async function extractPdfRawText(filePath) {
+  const pdfjs = await getPdfModule();
+  const pdfjsRoot = path.resolve(path.dirname(require.resolve('pdfjs-dist/legacy/build/pdf.mjs')), '../..');
+  const assetDir = (name) => path.join(pdfjsRoot, name).replaceAll(path.sep, '/') + '/';
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(await fs.readFile(filePath)),
+    useSystemFonts: true,
+    standardFontDataUrl: assetDir('standard_fonts'),
+    cMapUrl: assetDir('cmaps'),
+    cMapPacked: true,
+  });
+  let document;
+  try {
+    document = await loadingTask.promise;
+  } catch (error) {
+    try { await loadingTask.destroy(); } catch { /* best effort */ }
+    throw error;
+  }
+  let worker;
+  const chunks = [];
+  const confidences = [];
+  let recognizedPages = 0;
+  try {
+    const pageLimit = Math.min(document.numPages, 100);
+    for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const textContent = await page.getTextContent();
+      let lines = pdfTextLines(textContent.items);
+      let pageConfidence = 0.95;
+      if (lines.join(' ').replace(/\s/g, '').length < 4) {
+        worker ||= await createOcrWorker();
+        const recognition = await ocrPdfPage(page, pdfjs, worker);
+        lines = recognition.text.split(/\r?\n/).map(cleanText).filter(Boolean);
+        pageConfidence = recognition.confidence;
+        recognizedPages += 1;
+      }
+      if (lines.length) chunks.push(lines.join('\n'));
+      confidences.push(pageConfidence);
+    }
+    const warnings = [];
+    if (recognizedPages) warnings.push(`تم استخدام OCR العربي محليًا في ${recognizedPages} صفحة؛ راجع كل نتيجة قبل الاعتماد.`);
+    const pagesRead = Math.min(document.numPages, pageLimit);
+    if (document.numPages > pagesRead) {
+      warnings.push(`قُرئت أول ${pagesRead} صفحة من ${document.numPages}؛ أكمل البيانات من الصفحات المتبقية يدويًا.`);
+    }
+    return {
+      text: chunks.join('\n'),
+      confidence: confidences.length ? Math.min(...confidences) : 0,
+      pages: document.numPages,
+      pagesRead,
+      truncated: document.numPages > pagesRead,
+      warnings,
+    };
+  } finally {
+    if (worker) await worker.terminate();
+    await loadingTask.destroy();
+  }
+}
+
+/**
+ * Text/OCR reader shared by the manual-entry screen. Accepts images and PDFs,
+ * enforces the same local size limits as the generic importer, and never writes
+ * anything: recognition is only a proposal the user must review.
+ */
+async function extractEntryText(filePath) {
+  const resolvedPath = path.resolve(filePath);
+  const extension = path.extname(resolvedPath).toLowerCase();
+  if (!IMAGE_EXTENSIONS.has(extension) && extension !== '.pdf') {
+    throw new Error('الإدخال بالـOCR يدعم الصور (PNG/JPG/WEBP/BMP/TIFF) وملفات PDF فقط.');
+  }
+  const stats = await fs.stat(resolvedPath);
+  if (!stats.isFile() || stats.size === 0) throw new Error('الملف فارغ أو غير صالح.');
+  if (stats.size > MAX_FILE_BYTES) throw new Error('حجم الملف يتجاوز الحد المحلي البالغ 40 ميغابايت.');
+  const result = extension === '.pdf' ? await extractPdfRawText(resolvedPath) : await extractImageText(resolvedPath);
+  return {
+    fileName: path.basename(resolvedPath),
+    fileType: extension.slice(1),
+    fileSize: stats.size,
+    extractedAt: new Date().toISOString(),
+    ...result,
+  };
+}
+
 async function extractFile(filePath) {
   const resolvedPath = path.resolve(filePath);
   const extension = path.extname(resolvedPath).toLowerCase();
@@ -290,4 +411,4 @@ async function extractFile(filePath) {
   };
 }
 
-module.exports = { extractFile, extractExcel, extractWord, extractPdf, MAX_ITEMS, MAX_FILE_BYTES };
+module.exports = { extractFile, extractExcel, extractWord, extractPdf, extractEntryText, MAX_ITEMS, MAX_FILE_BYTES, IMAGE_EXTENSIONS };
