@@ -1,0 +1,451 @@
+{
+  "generatedAt": "2026-11-07T16:35:15.460Z",
+  "labelHeaderScores": [
+    {
+      "header": "اسم المديرية",
+      "score": 1
+    },
+    {
+      "header": "المحافظة",
+      "score": 1
+    },
+    {
+      "header": "عدد السكان",
+      "score": 1
+    },
+    {
+      "header": "نسبة تغطية المياه",
+      "score": 0.98
+    },
+    {
+      "header": "نسبة الفقر والحرمان",
+      "score": 1
+    },
+    {
+      "header": "خط النار",
+      "score": 0.98
+    },
+    {
+      "header": "عدد المدارس",
+      "score": 1
+    },
+    {
+      "header": "إيرادات المديرية",
+      "score": 1
+    },
+    {
+      "header": "تكلفة المشروع",
+      "score": 0.98
+    },
+    {
+      "header": "نسبة البطالة",
+      "score": 1
+    },
+    {
+      "header": "حالة المشروع",
+      "score": 1
+    },
+    {
+      "header": "الطلاب الملتحقون",
+      "score": 0.98
+    },
+    {
+      "header": "المسافة لمراكز الخدمات",
+      "score": 0.98
+    },
+    {
+      "header": "المرافق الحكومية",
+      "score": 0.98
+    }
+  ],
+  "parserOnly": {
+    "fieldAccuracy": 100,
+    "matched": 14
+  },
+  "results": [
+    {
+      "label": "A-نظيف-300dpi.png",
+      "file": "A-نظيف-300dpi.png",
+      "ms": 5029,
+      "engineConfidence": 91,
+      "fieldsFound": 13,
+      "correct": 12,
+      "total": 14,
+      "fieldAccuracy": 85.7,
+      "falsePositives": [],
+      "unmatched": 1,
+      "warnings": 3,
+      "details": [
+        {
+          "header": "اسم المديرية",
+          "printed": "مديرية الشعر",
+          "expected": "مديرية الشعر",
+          "found": "مديريةالشعر",
+          "headerScore": 1,
+          "ok": false
+        },
+        {
+          "header": "المحافظة",
+          "printed": "إب",
+          "expected": "إب",
+          "found": "إب",
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "عدد السكان",
+          "printed": "43,739",
+          "expected": 43739,
+          "found": 43739,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "نسبة تغطية المياه",
+          "printed": "19.7%",
+          "expected": 0.197,
+          "found": null,
+          "headerScore": null,
+          "ok": false
+        },
+        {
+          "header": "نسبة الفقر والحرمان",
+          "printed": "55",
+          "expected": 0.55,
+          "found": 0.55,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "خط النار",
+          "printed": "نعم",
+          "expected": 1,
+          "found": 1,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "عدد المدارس",
+          "printed": "13",
+          "expected": 13,
+          "found": 13,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "إيرادات المديرية",
+          "printed": "75,643,312",
+          "expected": 75643312,
+          "found": 75643312,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "تكلفة المشروع",
+          "printed": "250,000,000",
+          "expected": 250000000,
+          "found": 250000000,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "نسبة البطالة",
+          "printed": "12.5",
+          "expected": 0.125,
+          "found": 0.125,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "حالة المشروع",
+          "printed": "قائم",
+          "expected": "قائم",
+          "found": "قائم",
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "الطلاب الملتحقون",
+          "printed": "8,420",
+          "expected": 8420,
+          "found": 8420,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "المسافة لمراكز الخدمات",
+          "printed": "12",
+          "expected": 12,
+          "found": 12,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "المرافق الحكومية",
+          "printed": "7",
+          "expected": 7,
+          "found": 7,
+          "headerScore": 0.98,
+          "ok": true
+        }
+      ],
+      "textSample": "نموذج بياناتمديرية\n اسم المديرية: مديريةالشعر\n المحافظة:إب\n\n عدد السكان:43,739\n\n نسبة تغطية المياه:9619.7\n نسبة الفقر والحرمان:55\n\n خط النار:نعم\n\n عدد المدارس:13\n\n إيرادات المديرية:75,643,312\n تكلفة المشروع:250,000,000\n نسبة البطالة:12.5\n\n حالة المشروع:قائم\n\n الطلاب الملتحقون:8,420\n المسافة لمراكز الخدمات:12\n المرافق الحكومية:7"
+    },
+    {
+      "label": "B-نصف-الدقة-150dpi.png",
+      "file": "B-نصف-الدقة-150dpi.png",
+      "ms": 3094,
+      "engineConfidence": 90,
+      "fieldsFound": 13,
+      "correct": 12,
+      "total": 14,
+      "fieldAccuracy": 85.7,
+      "falsePositives": [],
+      "unmatched": 1,
+      "warnings": 3,
+      "details": [
+        {
+          "header": "اسم المديرية",
+          "printed": "مديرية الشعر",
+          "expected": "مديرية الشعر",
+          "found": "مديريةالشعر",
+          "headerScore": 1,
+          "ok": false
+        },
+        {
+          "header": "المحافظة",
+          "printed": "إب",
+          "expected": "إب",
+          "found": "إب",
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "عدد السكان",
+          "printed": "43,739",
+          "expected": 43739,
+          "found": 43739,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "نسبة تغطية المياه",
+          "printed": "19.7%",
+          "expected": 0.197,
+          "found": null,
+          "headerScore": null,
+          "ok": false
+        },
+        {
+          "header": "نسبة الفقر والحرمان",
+          "printed": "55",
+          "expected": 0.55,
+          "found": 0.55,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "خط النار",
+          "printed": "نعم",
+          "expected": 1,
+          "found": 1,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "عدد المدارس",
+          "printed": "13",
+          "expected": 13,
+          "found": 13,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "إيرادات المديرية",
+          "printed": "75,643,312",
+          "expected": 75643312,
+          "found": 75643312,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "تكلفة المشروع",
+          "printed": "250,000,000",
+          "expected": 250000000,
+          "found": 250000000,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "نسبة البطالة",
+          "printed": "12.5",
+          "expected": 0.125,
+          "found": 0.125,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "حالة المشروع",
+          "printed": "قائم",
+          "expected": "قائم",
+          "found": "قائم",
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "الطلاب الملتحقون",
+          "printed": "8,420",
+          "expected": 8420,
+          "found": 8420,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "المسافة لمراكز الخدمات",
+          "printed": "12",
+          "expected": 12,
+          "found": 12,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "المرافق الحكومية",
+          "printed": "7",
+          "expected": 7,
+          "found": 7,
+          "headerScore": 0.98,
+          "ok": true
+        }
+      ],
+      "textSample": "نموذج بياناتمديرية\n اسم المديرية: مديريةالشعر\n المحافظة:إب\n\n عدد السكان:43,739\n\n نسبة تغطية المياه:1619.7\n نسبة الفقر والحرمان:55\n\n خط النار:نعم\n\n عدد المدارس:13\n\n إيرادات المديرية:75,643,312\n تكلفة المشروع:250,000,000\n نسبة البطالة:12.5\n\n حالة المشروع:قائم\n\n الطلاب الملتحقون:8,420\n المسافة لمراكز الخدمات:12\n المرافق الحكومية:7"
+    },
+    {
+      "label": "C-مائل-3-درجات.png",
+      "file": "C-مائل-3-درجات.png",
+      "ms": 3150,
+      "engineConfidence": 91,
+      "fieldsFound": 13,
+      "correct": 12,
+      "total": 14,
+      "fieldAccuracy": 85.7,
+      "falsePositives": [],
+      "unmatched": 1,
+      "warnings": 3,
+      "details": [
+        {
+          "header": "اسم المديرية",
+          "printed": "مديرية الشعر",
+          "expected": "مديرية الشعر",
+          "found": "مديريةالشعر",
+          "headerScore": 1,
+          "ok": false
+        },
+        {
+          "header": "المحافظة",
+          "printed": "إب",
+          "expected": "إب",
+          "found": "إب",
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "عدد السكان",
+          "printed": "43,739",
+          "expected": 43739,
+          "found": 43739,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "نسبة تغطية المياه",
+          "printed": "19.7%",
+          "expected": 0.197,
+          "found": null,
+          "headerScore": null,
+          "ok": false
+        },
+        {
+          "header": "نسبة الفقر والحرمان",
+          "printed": "55",
+          "expected": 0.55,
+          "found": 0.55,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "خط النار",
+          "printed": "نعم",
+          "expected": 1,
+          "found": 1,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "عدد المدارس",
+          "printed": "13",
+          "expected": 13,
+          "found": 13,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "إيرادات المديرية",
+          "printed": "75,643,312",
+          "expected": 75643312,
+          "found": 75643312,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "تكلفة المشروع",
+          "printed": "250,000,000",
+          "expected": 250000000,
+          "found": 250000000,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "نسبة البطالة",
+          "printed": "12.5",
+          "expected": 0.125,
+          "found": 0.125,
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "حالة المشروع",
+          "printed": "قائم",
+          "expected": "قائم",
+          "found": "قائم",
+          "headerScore": 1,
+          "ok": true
+        },
+        {
+          "header": "الطلاب الملتحقون",
+          "printed": "8,420",
+          "expected": 8420,
+          "found": 8420,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "المسافة لمراكز الخدمات",
+          "printed": "12",
+          "expected": 12,
+          "found": 12,
+          "headerScore": 0.98,
+          "ok": true
+        },
+        {
+          "header": "المرافق الحكومية",
+          "printed": "7",
+          "expected": 7,
+          "found": 7,
+          "headerScore": 0.98,
+          "ok": true
+        }
+      ],
+      "textSample": "نموذج بياناتمديرية\n اسم المديرية: مديريةالشعر\n المحافظة:إب\n\n عدد السكان:43,739\n\n نسبة تغطية المياه:9619.7\n نسبة الفقر والحرمان:55\n\n خط النار:نعم\n\n عدد المدارس:13\n\n إيرادات المديرية:75,643,312\n تكلفة المشروع:250,000,000\n نسبة البطالة:12.5\n\n حالة المشروع:قائم\n\n الطلاب الملتحقون:8,420\n المسافة لمراكز الخدمات:12\n المرافق الحكومية:7"
+    }
+  ]
+}
