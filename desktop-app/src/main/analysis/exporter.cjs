@@ -176,10 +176,7 @@ async function buildAnalysisWorkbook(analysis, context = {}) {
 
   // 5. Weights & calibration.
   const weights = analysis.meta?.weights ?? {};
-  addDataSheet(workbook, 'الأوزان والمعايرة', [
-    { header: 'البند', key: 'item', width: 40 },
-    { header: 'القيمة', key: 'value', width: 30 },
-  ], [
+  const weightsRows = [
     { item: 'ملف القالب المرجعي', value: analysis.meta?.template?.fileName ?? '' },
     { item: 'إصدار القالب', value: analysis.meta?.template?.version ?? '' },
     { item: 'عتبة الانحدار (k)', value: analysis.meta?.kThreshold ?? CALIBRATION.kThreshold },
@@ -187,7 +184,20 @@ async function buildAnalysisWorkbook(analysis, context = {}) {
     { item: 'أدنى تغطية أوزان مسموحة', value: analysis.meta?.minWeightCoverage ?? CALIBRATION.minWeightCoverage },
     { item: 'زمن التوليد', value: analysis.meta?.generatedAt ?? '' },
     ...INDICATORS.map((indicator) => ({ item: `وزن: ${indicator.header}`, value: weights[indicator.code] ?? '' })),
-  ]);
+  ];
+  // An export must say what it left out, otherwise a masked report is
+  // indistinguishable from a report where those fields were simply empty.
+  const protectedFields = Array.isArray(context.protectedFields) ? context.protectedFields : [];
+  if (context.accessProfile === 'shared') {
+    weightsRows.push({ item: 'وضع الوصول', value: 'وضع المشاركة — حقول مقيّدة/حساسة محجوبة' });
+    weightsRows.push({ item: 'الحقول المحجوبة', value: protectedFields.length ? protectedFields.join('، ') : 'لا شيء' });
+  } else {
+    weightsRows.push({ item: 'وضع الوصول', value: 'مالك الجهاز — كل الحقول ظاهرة' });
+  }
+  addDataSheet(workbook, 'الأوزان والمعايرة', [
+    { header: 'البند', key: 'item', width: 40 },
+    { header: 'القيمة', key: 'value', width: 30 },
+  ], weightsRows);
 
   // 6. Audit trail.
   addDataSheet(workbook, 'سجل التدقيق', [

@@ -15,6 +15,15 @@ const { parseFieldValue } = require('./parse.cjs');
 const MAX_LINES = 4000;
 const MAX_TEXT = 400000;
 
+/**
+ * Below these thresholds a proposal is marked `needsReview` instead of being
+ * presented as a normal value. They are deliberately conservative: a false
+ * "low confidence" costs one click, a false "high confidence" costs a wrong
+ * decision.
+ */
+const MIN_LINE_CONFIDENCE = 0.6;
+const MIN_HEADER_SCORE = 0.72;
+
 /** Separators that appear between a label and its value in real forms. */
 const SEPARATOR = /[:：؛\t=]/;
 
@@ -107,14 +116,15 @@ function looksLikeMultiField(value) {
 /**
  * Parses OCR text into `{ fields, unmatched, warnings }`.
  *
- * `fields[key] = { raw, value, score, method, header }` where `value` is already
- * typed (number / 0..1 ratio / 0|1 boolean / text). Invalid or unknown lines are
- * reported instead of guessed.
+ * `fields[key] = { raw, value, score, method, header, confidence, needsReview, reviewReasons }`
+ * where `value` is already typed (number / 0..1 ratio / 0|1 boolean / text).
+ * Invalid or unknown lines are reported instead of guessed.
  *
  * @param {string} text
+ * @param {{lineConfidence?:Array<number>, lineConfidenceByText?:Map<string,number>}} options
  * @returns {{lines:string[], fields:object, unmatched:Array, warnings:Array}}
  */
-function parseLabeledText(text) {
+function parseLabeledText(text, options = {}) {
   const original = String(text ?? '');
   const source = original.slice(0, MAX_TEXT);
   if (!source.trim()) return emptyProposal();
@@ -126,12 +136,22 @@ function parseLabeledText(text) {
   const lines = allLines.slice(0, MAX_LINES);
   const truncated = original.length > MAX_TEXT || allLines.length > MAX_LINES;
 
+  const lineConfidence = Array.isArray(options.lineConfidence) ? options.lineConfidence : [];
+  const byText = options.lineConfidenceByText instanceof Map ? options.lineConfidenceByText : null;
+  const confidenceOf = (line, index) => {
+    const direct = Number(lineConfidence[index]);
+    if (Number.isFinite(direct) && direct > 0) return Math.max(0, Math.min(1, direct));
+    if (byText && byText.has(line)) return Math.max(0, Math.min(1, Number(byText.get(line))));
+    return null;
+  };
+
   const fields = {};
   const unmatched = [];
   const warnings = [];
   const claimed = new Map();
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     const split = splitLabelValue(line);
     if (!split.value) {
       if (/[\u0600-\u06FF]/.test(line) && line.length > 1) unmatched.push({ raw: line, reason: 'no-value' });
@@ -159,10 +179,21 @@ function parseLabeledText(text) {
     const parsed = parseFieldValue(candidate, field);
 
     if (parsed.state === 'invalid') {
-      warnings.push({ key: match.key, header: field.header, raw: split.value, code: `invalid-${field.type}` });
+      warnings.push({ key: match.key, header: field.header, raw: split.value, line, code: `invalid-${field.type}` });
       continue;
     }
     if (parsed.state === 'empty') continue;
+
+    const engineConfidence = confidenceOf(line, index);
+    const reviewReasons = [];
+    if (engineConfidence !== null && engineConfidence < MIN_LINE_CONFIDENCE) reviewReasons.push('low-ocr-confidence');
+    if (match.score < MIN_HEADER_SCORE) reviewReasons.push('weak-label-match');
+    if (split.method === 'prefix') reviewReasons.push('label-guessed');
+    for (const warning of parsed.warnings) {
+      // A converted percentage is exactly the kind of silent change this screen
+      // must surface, so it forces review rather than riding along unnoticed.
+      reviewReasons.push(warning.code);
+    }
 
     fields[match.key] = {
       raw: split.value,
@@ -170,6 +201,9 @@ function parseLabeledText(text) {
       score: match.score,
       method: split.method,
       header: field.header,
+      confidence: engineConfidence,
+      needsReview: reviewReasons.length > 0,
+      reviewReasons,
     };
     claimed.set(match.key, true);
     for (const warning of parsed.warnings) {
@@ -181,22 +215,109 @@ function parseLabeledText(text) {
 }
 
 /**
+ * Cross-field sanity checks that catch the errors OCR makes most often: a
+ * decimal point that disappears ("43739" read as "4373.9"), a student count
+ * larger than the population, a coverage above 100%.
+ *
+ * Returns warnings only; it never changes a value.
+ */
+function crossFieldWarnings(fields) {
+  const issues = [];
+  const value = (key) => (fields[key] ? Number(fields[key].value) : null);
+  const population = value('population');
+  const enrolled = value('enrolledStudents');
+  const schools = value('schools');
+  const beneficiaries = value('expectedBeneficiaries');
+  const rural = value('ruralPopulation');
+
+  if (Number.isFinite(population) && population > 0) {
+    if (Number.isFinite(enrolled) && enrolled > population) {
+      issues.push({ key: 'enrolledStudents', code: 'enrolled-exceeds-population', detail: `الملتحقون (${enrolled}) أكبر من السكان (${population})` });
+    }
+    if (Number.isFinite(beneficiaries) && beneficiaries > population) {
+      issues.push({ key: 'expectedBeneficiaries', code: 'beneficiaries-exceed-population', detail: `المستفيدون (${beneficiaries}) أكبر من السكان (${population})` });
+    }
+    if (Number.isFinite(rural) && rural > population) {
+      issues.push({ key: 'ruralPopulation', code: 'rural-exceeds-population', detail: `سكان الريف (${rural}) أكبر من السكان (${population})` });
+    }
+    if (Number.isFinite(schools) && schools > population) {
+      issues.push({ key: 'schools', code: 'schools-exceed-population', detail: `المدارس (${schools}) أكبر من السكان (${population})` });
+    }
+  }
+  for (const [key, entry] of Object.entries(fields)) {
+    const field = FIELD_BY_KEY[key];
+    if (!field) continue;
+    if (field.type === 'ratio' && Number.isFinite(Number(entry.value)) && (entry.value < 0 || entry.value > 1)) {
+      issues.push({ key, code: 'ratio-out-of-range', detail: `${field.header} خارج المدى 0-1` });
+    }
+  }
+  return issues;
+}
+
+/**
  * Reads an image or PDF locally and returns both the raw text and the parsed,
  * reviewable proposal. Recognition never writes to the database.
  */
-async function recognizeEntryFile(filePath) {
+async function recognizeEntryFile(filePath, options = {}) {
   // Required lazily so unit tests can exercise parseLabeledText without loading
   // tesseract.js / pdfjs-dist / canvas.
   const { extractEntryText } = require('../importers.cjs');
-  const extracted = await extractEntryText(filePath);
-  return { ...extracted, parsed: parseLabeledText(extracted.text) };
+  const extracted = await extractEntryText(filePath, options);
+
+  const lineConfidenceByText = new Map();
+  for (const line of extracted.lines ?? []) {
+    const text = cleanLine(line?.text ?? '');
+    if (!text) continue;
+    const confidence = Number(line.confidence);
+    if (!Number.isFinite(confidence)) continue;
+    // First occurrence wins: the same label twice is already flagged as a
+    // duplicate line, and the earlier occurrence is the one that is used.
+    if (!lineConfidenceByText.has(text)) lineConfidenceByText.set(text, confidence);
+  }
+
+  const parsed = parseLabeledText(extracted.text, { lineConfidenceByText });
+
+  const crossField = crossFieldWarnings(parsed.fields);
+  const reasonsByKey = new Map();
+  for (const issue of crossField) {
+    const list = reasonsByKey.get(issue.key) ?? [];
+    list.push(issue.code);
+    reasonsByKey.set(issue.key, list);
+  }
+  for (const [key, entry] of Object.entries(parsed.fields)) {
+    const extra = reasonsByKey.get(key);
+    if (!extra) continue;
+    entry.reviewReasons = [...new Set([...(entry.reviewReasons ?? []), ...extra])];
+    entry.needsReview = true;
+  }
+  const fieldCount = Object.keys(parsed.fields).length;
+  const reviewCount = Object.values(parsed.fields).filter((entry) => entry.needsReview).length;
+
+  return {
+    ...extracted,
+    parsed: {
+      ...parsed,
+      crossField,
+      summary: {
+        fieldCount,
+        reviewCount,
+        // Nothing OCR produces may be auto-accepted: the UI has to show the
+        // proposals and let a human confirm them one by one.
+        autoAcceptable: false,
+        requiresReview: true,
+      },
+    },
+  };
 }
 
 module.exports = {
   parseLabeledText,
   splitLabelValue,
   stripUnitSuffix,
+  crossFieldWarnings,
   recognizeEntryFile,
   INPUT_FIELD_KEYS: INPUT_FIELDS.map((field) => field.key),
   MAX_LINES,
+  MIN_LINE_CONFIDENCE,
+  MIN_HEADER_SCORE,
 };

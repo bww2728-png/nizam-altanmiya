@@ -55,6 +55,34 @@
 }
 .ocr-chip b { color: #17324d; font-weight: 650; }
 .ocr-chip em { font-style: normal; color: #8a9aa7; font-size: 9px; }
+.ocr-chip { border-radius: 12px; align-items: flex-start; flex-wrap: wrap; }
+.ocr-chip input[type='checkbox'] { margin-top: 2px; accent-color: #1f7a6b; }
+.ocr-chip.is-selected { background: #e8f5f1; border-color: #a9d8cf; }
+.ocr-chip.needs-review { background: #fdf6ec; border-color: #f0dcc1; color: #8a5a1d; }
+.ocr-chip.needs-review.is-selected { background: #fbeedb; border-color: #e2b97e; }
+.ocr-chip-header { font-weight: 600; }
+.ocr-chip code { flex-basis: 100%; font-size: 9px; color: #6b7f90; direction: auto; }
+.ocr-chip-reasons { flex-basis: 100%; font-size: 9px; color: #a8611f; }
+.ocr-chip.needs-review .ocr-chip-reasons { color: #94551a; }
+
+.ocr-running { padding: 14px 18px; }
+.ocr-running-row { display: flex; align-items: center; gap: 12px; }
+.ocr-running-row div { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.ocr-running-row strong { font-size: 12px; color: #17324d; }
+.ocr-running-row span { font-size: 10px; color: #6b7f90; }
+.ocr-progress-track { height: 5px; border-radius: 999px; background: #eef2f5; margin-top: 10px; overflow: hidden; }
+.ocr-progress-track span { display: block; height: 100%; background: #2c8f7c; transition: width 240ms ease; }
+
+.ocr-preprocessing { display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 18px 0; font-size: 10px; color: #6b7f90; }
+.ocr-review-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin: 12px 18px 0; padding: 9px 12px; border-radius: 9px;
+  background: #f4f8fb; border: 1px solid #e2ebf2; font-size: 10.5px; color: #3f5c73;
+}
+.ocr-review-bar span { flex: 1; min-width: 220px; }
+.ocr-preview { margin: 10px 18px 0; font-size: 11px; color: #4d6478; }
+.ocr-preview summary { cursor: pointer; color: #2c6f92; }
+.ocr-preview img { display: block; max-width: 100%; margin-top: 8px; border: 1px solid #e4ebf0; border-radius: 8px; }
 .ocr-unmatched, .ocr-text { margin: 8px 18px 0; font-size: 11px; color: #4d6478; }
 .ocr-unmatched summary, .ocr-text summary { cursor: pointer; color: #2c6f92; }
 .ocr-unmatched ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 4px; }
@@ -72,3 +100,27 @@
   .entry-identity { grid-template-columns: 1fr; }
   .entry-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
 }
+/* Version history panel: one row per snapshot, restore is explicit. */
+.history-panel .panel-heading h2{display:flex;align-items:center;gap:7px}
+.history-empty{margin:12px 18px}
+.history-panel .table-scroll{margin:10px 18px 14px}
+
+/* Per-field reviewer decision inside an OCR chip. */
+.ocr-chip-actions{flex-basis:100%;display:flex;align-items:center;gap:6px;margin-top:2px}
+.ocr-chip-action{border:1px solid #cfe0da;background:#fff;color:#1d6f68;border-radius:999px;padding:1px 9px;font-size:9.5px}
+.ocr-chip-action:hover{background:#eaf5f1}
+.ocr-chip-action.is-on{background:#1f7a6b;border-color:#1f7a6b;color:#fff}
+.ocr-chip-action.reject{border-color:#e5c8c0;color:#a8402f}
+.ocr-chip-action.reject:hover{background:#fbeeea}
+.ocr-chip-action.reject.is-off{background:#a8402f;border-color:#a8402f;color:#fff}
+.ocr-chip-decision{font-style:normal;font-size:9px;color:#8a9aa7}
+.ocr-chip-decision.accepted{color:#1f7a6b}
+.ocr-chip-decision.rejected{color:#a8402f}
+
+/* Stored OCR drafts list. */
+.drafts-panel .panel-heading h2{font-size:12.5px}
+.drafts-list{list-style:none;margin:8px 18px 14px;padding:0;display:grid;gap:6px}
+.drafts-list li{display:flex;align-items:center;gap:10px;background:#f7fafb;border:1px solid #e6eef4;border-radius:8px;padding:7px 10px}
+.drafts-list li div{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.drafts-list strong{font-size:11px;color:#17324d;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.drafts-list span{font-size:9.5px;color:#7b8b98}

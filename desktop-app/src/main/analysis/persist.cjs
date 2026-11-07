@@ -23,6 +23,12 @@ const MANUAL_SOURCE = 'إدخال يدوي';
 /** Directories beyond this count are refused loudly rather than truncated. */
 const ANALYSIS_ROW_CAP = 50000;
 
+/** Setting key that remembers the calibration used by the last successful run. */
+const CALIBRATION_KEY = 'analysis.lastCalibration';
+
+/** How many point-in-time snapshots to keep per directorate. */
+const VERSION_KEEP = 20;
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -89,7 +95,10 @@ function upsertDirectorate(database, record, meta = {}) {
   const params = [governorate, district];
   for (const [key, column] of COLUMN_ENTRIES) {
     if (column === 'governorate' || column === 'district') continue;
-    if (key === 'reviewerDecision') continue; // decided in the review screen, not on import
+    // The decision column is normally written from the review screen, but a
+    // template import may carry it; it is only ever stored when the source file
+    // actually provided a value.
+    if (key === 'reviewerDecision' && values[key] === undefined) continue;
     if (values[key] === undefined) continue; // absent field: do not overwrite existing data
     columns.push(column);
     params.push(toColumnValue(key, values[key]));
@@ -113,13 +122,14 @@ function upsertDirectorate(database, record, meta = {}) {
     if (meta.fileName !== undefined) { assignments.push('source_file = ?'); updateParams.push(meta.fileName ?? null); }
     if (meta.sheetName !== undefined) { assignments.push('source_sheet = ?'); updateParams.push(meta.sheetName ?? null); }
     if (record.rowNumber !== undefined && record.rowNumber !== null) { assignments.push('source_row = ?'); updateParams.push(record.rowNumber); }
+    if (meta.warnings !== undefined) { assignments.push('import_warnings = ?'); updateParams.push(safeJson(meta.warnings, '[]')); }
     database.prepare(`UPDATE directorates SET ${assignments.join(', ')} WHERE id = ?`).run(...updateParams, existing.id);
     saveProvenance(database, existing.id, record, rawValues, sources, meta);
     return { id: existing.id, created: false };
   }
 
-  const insertColumns = [...columns, 'source_file', 'source_sheet', 'source_row'];
-  const insertParams = [...params, meta.fileName ?? null, meta.sheetName ?? null, record.rowNumber ?? null];
+  const insertColumns = [...columns, 'source_file', 'source_sheet', 'source_row', 'import_warnings'];
+  const insertParams = [...params, meta.fileName ?? null, meta.sheetName ?? null, record.rowNumber ?? null, safeJson(meta.warnings ?? [], '[]')];
   const placeholders = insertColumns.map(() => '?').join(', ');
   const info = database
     .prepare(`INSERT INTO directorates (${insertColumns.join(', ')}) VALUES (${placeholders})`)
@@ -142,7 +152,6 @@ function saveProvenance(database, directorateId, record, rawValues, sources, met
   const captured = nowIso();
   const run = database.transaction((entries) => {
     for (const [key] of entries) {
-      if (key === 'reviewerDecision') continue;
       // Provenance follows the same rule as the value itself: a field that was
       // not applied must not overwrite the source record of a stored value.
       if (record.values?.[key] === undefined) continue;
@@ -256,7 +265,7 @@ function rowFromDirectorate(record) {
     values,
     rawValues,
     sources: {},
-    warnings: [],
+    warnings: parseJson(record.import_warnings, []),
   };
 }
 
@@ -356,6 +365,16 @@ function saveRun(database, analysis, meta = {}) {
 
     database.prepare('INSERT INTO access_log (action, entity, entity_id, fields, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run('analysis-run', 'analysis_runs', String(runId), String(rows.length), `mode=${meta.mode ?? 'both'}`, createdAt);
+
+    // Remember the calibration of the run that was actually persisted. Exports
+    // rebuilt after a restart then reproduce exactly what the user saw instead of
+    // silently falling back to defaults.
+    setSetting(database, CALIBRATION_KEY, safeJson({
+      kThreshold: analysis.meta?.kThreshold ?? null,
+      deprivationLine: analysis.meta?.deprivationLine ?? null,
+      weights: analysis.meta?.weights ?? null,
+      savedAt: createdAt,
+    }, '{}'));
 
     return runId;
   });
@@ -465,6 +484,257 @@ function listAccess(database, limit = 200) {
     .all(Math.min(2000, Math.max(1, Number(limit) || 200)));
 }
 
+/**
+ * Append one read-audit entry: which channel returned which entity/fields to
+ * which session, and whether anything was masked or denied. Never throws.
+ */
+function logRead(database, entry = {}) {
+  try {
+    database.prepare(`
+      INSERT INTO audit_reads (session_id, channel, entity, entity_id, fields, result, row_count, detail, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      entry.sessionId === undefined ? null : String(entry.sessionId),
+      String(entry.channel ?? 'unknown'),
+      entry.entity ?? null,
+      entry.entityId === undefined || entry.entityId === null ? null : String(entry.entityId),
+      entry.fields === undefined || entry.fields === null ? null : String(entry.fields),
+      String(entry.result ?? 'ok'),
+      Number.isFinite(Number(entry.rowCount)) ? Number(entry.rowCount) : null,
+      entry.detail ?? null,
+      entry.createdAt ?? nowIso(),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function listReads(database, limit = 200) {
+  return database.prepare('SELECT * FROM audit_reads ORDER BY id DESC LIMIT ?')
+    .all(Math.min(2000, Math.max(1, Number(limit) || 200)));
+}
+
+/**
+ * Store a full point-in-time copy of one directorate (row + provenance) before
+ * it is mutated. Old snapshots beyond VERSION_KEEP are pruned per directorate so
+ * the trail cannot grow without bound.
+ *
+ * @returns {number|null} snapshot id
+ */
+function snapshotDirectorate(database, directorateId, action) {
+  const numeric = toPositiveId(directorateId);
+  const record = database.prepare('SELECT * FROM directorates WHERE id = ?').get(numeric);
+  if (!record) return null;
+  const sources = database.prepare(`
+    SELECT field_key, value_text, source_file, source_location, data_value_id
+    FROM directorate_sources WHERE directorate_id = ?
+  `).all(numeric);
+  const payload = JSON.stringify({ record, sources });
+  const info = database.prepare(
+    'INSERT INTO directorate_versions (directorate_id, action, payload_json, created_at) VALUES (?, ?, ?, ?)'
+  ).run(numeric, String(action ?? 'snapshot'), payload, nowIso());
+  try {
+    database.prepare(`
+      DELETE FROM directorate_versions
+      WHERE directorate_id = ? AND id NOT IN (
+        SELECT id FROM directorate_versions WHERE directorate_id = ? ORDER BY id DESC LIMIT ?
+      )
+    `).run(numeric, numeric, VERSION_KEEP);
+  } catch { /* pruning is best effort */ }
+  return Number(info.lastInsertRowid);
+}
+
+function listVersions(database, directorateId, limit = 50) {
+  const numeric = toPositiveId(directorateId);
+  return database.prepare(`
+    SELECT id, directorate_id, action, created_at,
+           json_extract(payload_json, '$.record.district') AS district,
+           json_extract(payload_json, '$.record.governorate') AS governorate
+    FROM directorate_versions WHERE directorate_id = ? ORDER BY id DESC LIMIT ?
+  `).all(numeric, Math.min(200, Math.max(1, Number(limit) || 50)));
+}
+
+/**
+ * Restore one directorate from a stored snapshot. The current state is itself
+ * snapshotted first, so a restore is undoable.
+ *
+ * @returns {{ id:number, restored:number, snapshotId:number|null }}
+ */
+function restoreDirectorateVersion(database, versionId) {
+  const numeric = toPositiveId(versionId);
+  const version = database.prepare('SELECT * FROM directorate_versions WHERE id = ?').get(numeric);
+  if (!version) throw new Error('اللقطة المطلوبة غير موجودة.');
+  const payload = parseJson(version.payload_json, null);
+  if (!payload?.record) throw new Error('اللقطة تالفة ولا يمكن استعادتها.');
+  const record = payload.record;
+  const sources = Array.isArray(payload.sources) ? payload.sources : [];
+
+  const write = database.transaction(() => {
+    const before = snapshotDirectorate(database, record.id, 'snapshot-before-restore');
+    const columns = Object.keys(record).filter((column) => column !== 'id');
+    if (!columns.length) throw new Error('اللقطة لا تحتوي أعمدة قابلة للاستعادة.');
+    const values = columns.map((column) => record[column]);
+    const exists = database.prepare('SELECT 1 AS ok FROM directorates WHERE id = ?').get(record.id);
+    if (exists) {
+      const assignments = columns.map((column) => `${column} = ?`).join(', ');
+      database.prepare(`UPDATE directorates SET ${assignments} WHERE id = ?`).run(...values, record.id);
+    } else {
+      // The snapshot may be of a deleted row: recreate it with its original id so
+      // historical results that reference it stay attached.
+      const placeholders = ['?', ...columns.map(() => '?')].join(', ');
+      database.prepare(`INSERT INTO directorates (id, ${columns.join(', ')}) VALUES (${placeholders})`).run(record.id, ...values);
+    }
+
+    database.prepare('DELETE FROM directorate_sources WHERE directorate_id = ?').run(record.id);
+    const insert = database.prepare(`
+      INSERT INTO directorate_sources (directorate_id, field_key, value_text, source_file, source_location, data_value_id, captured_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const source of sources) {
+      insert.run(record.id, source.field_key, source.value_text ?? null, source.source_file ?? null, source.source_location ?? null, source.data_value_id ?? null, nowIso());
+    }
+
+    logAccess(database, {
+      action: 'directorate-restore',
+      entity: 'directorates',
+      entityId: record.id,
+      detail: `version=${numeric}`,
+    });
+    return { id: record.id, restored: record.id, snapshotId: before };
+  });
+
+  return write();
+}
+
+/** Persist the calibration that produced the latest accepted run. */
+function setLastCalibration(database, calibration = {}) {
+  setSetting(database, CALIBRATION_KEY, safeJson({
+    kThreshold: calibration.kThreshold ?? null,
+    deprivationLine: calibration.deprivationLine ?? null,
+    weights: calibration.weights ?? null,
+    savedAt: nowIso(),
+  }, '{}'));
+}
+
+function getLastCalibration(database) {
+  return parseJson(getSetting(database, CALIBRATION_KEY, null), null);
+}
+
+/**
+ * Store one OCR recognition as a reviewable draft.
+ *
+ * Every proposal lands with `decision = 'pending'` — there is deliberately no
+ * auto-accept path — and keeps the engine's line confidence next to the header
+ * match score, because the two mean different things and the reviewer needs
+ * both to judge a value.
+ *
+ * @returns {{draftId:number, fields:number, reviewCount:number}}
+ */
+function saveOcrDraft(database, draft = {}) {
+  const createdAt = nowIso();
+  const parsed = draft.parsed ?? {};
+  const fields = parsed.fields ?? {};
+  const payload = safeJson({
+    fields,
+    unmatched: parsed.unmatched ?? [],
+    warnings: parsed.warnings ?? [],
+    crossField: parsed.crossField ?? [],
+    summary: parsed.summary ?? null,
+  }, '{}');
+
+  const write = database.transaction(() => {
+    const info = database.prepare(`
+      INSERT INTO ocr_drafts (file_name, file_type, file_size, text, confidence, fields_json, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+    `).run(
+      draft.fileName ?? null,
+      draft.fileType ?? null,
+      Number.isFinite(Number(draft.fileSize)) ? Number(draft.fileSize) : null,
+      String(draft.text ?? '').slice(0, 400000),
+      Number.isFinite(Number(draft.confidence)) ? Number(draft.confidence) : null,
+      payload,
+      createdAt,
+      createdAt,
+    );
+    const draftId = Number(info.lastInsertRowid);
+    const insertField = database.prepare(`
+      INSERT INTO ocr_field_confidence
+        (draft_id, field_key, header, raw_text, parsed_value, engine_confidence, header_score, decision, reviewed_value, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?)
+    `);
+    for (const [key, entry] of Object.entries(fields)) {
+      insertField.run(
+        draftId,
+        key,
+        entry.header ?? null,
+        entry.raw ?? null,
+        entry.value === null || entry.value === undefined ? null : String(entry.value),
+        Number.isFinite(Number(entry.confidence)) ? Number(entry.confidence) : null,
+        Number.isFinite(Number(entry.score)) ? Number(entry.score) : null,
+        createdAt,
+      );
+    }
+    return draftId;
+  });
+
+  const draftId = write();
+  const reviewCount = Object.values(fields).filter((entry) => entry.needsReview).length;
+  return { draftId, fields: Object.keys(fields).length, reviewCount };
+}
+
+function recordOcrDecision(database, request = {}) {
+  const draftId = toPositiveId(request.draftId);
+  const fieldKey = String(request.fieldKey ?? '').trim();
+  if (!fieldKey) throw new Error('مفتاح الحقل مطلوب لتسجيل قرار المراجعة.');
+  const decision = ['accepted', 'rejected', 'edited', 'pending'].includes(request.decision) ? request.decision : null;
+  if (!decision) throw new Error('قرار المراجعة غير معروف.');
+  const result = database.prepare(`
+    UPDATE ocr_field_confidence SET decision = ?, reviewed_value = ?
+    WHERE draft_id = ? AND field_key = ?
+  `).run(decision, request.value === undefined || request.value === null ? null : String(request.value), draftId, fieldKey);
+  if (!result.changes) throw new Error('الحقل غير موجود في هذه المسودة.');
+  database.prepare('UPDATE ocr_drafts SET updated_at = ? WHERE id = ?').run(nowIso(), draftId);
+  return { success: true };
+}
+
+function listOcrDrafts(database, limit = 50) {
+  return database.prepare(`
+    SELECT d.id, d.file_name, d.file_type, d.confidence, d.status, d.created_at, d.updated_at,
+           (SELECT COUNT(*) FROM ocr_field_confidence f WHERE f.draft_id = d.id) AS field_count,
+           (SELECT COUNT(*) FROM ocr_field_confidence f WHERE f.draft_id = d.id AND f.decision = 'pending') AS pending_count
+    FROM ocr_drafts d ORDER BY d.id DESC LIMIT ?
+  `).all(Math.min(500, Math.max(1, Number(limit) || 50)));
+}
+
+function getOcrDraft(database, draftId) {
+  const numeric = toPositiveId(draftId);
+  const draft = database.prepare('SELECT * FROM ocr_drafts WHERE id = ?').get(numeric);
+  if (!draft) throw new Error('مسودة القراءة غير موجودة.');
+  const fields = database.prepare('SELECT * FROM ocr_field_confidence WHERE draft_id = ? ORDER BY id').all(numeric);
+  return {
+    id: draft.id,
+    fileName: draft.file_name,
+    fileType: draft.file_type,
+    fileSize: draft.file_size,
+    confidence: draft.confidence,
+    status: draft.status,
+    createdAt: draft.created_at,
+    text: String(draft.text ?? '').slice(0, 50000),
+    payload: parseJson(draft.fields_json, {}),
+    fields: fields.map((field) => ({
+      fieldKey: field.field_key,
+      header: field.header,
+      rawText: field.raw_text,
+      parsedValue: field.parsed_value,
+      engineConfidence: field.engine_confidence,
+      headerScore: field.header_score,
+      decision: field.decision,
+      reviewedValue: field.reviewed_value,
+    })),
+  };
+}
+
 function getWeights(database) {
   const active = database.prepare('SELECT * FROM analysis_weights WHERE active = 1 ORDER BY id DESC LIMIT 1').get();
   if (!active) return null;
@@ -562,6 +832,22 @@ function normalizeManualValues(values = {}) {
     rawValues[field.key] = typeof raw === 'string' ? raw.trim() : String(raw);
   }
 
+  // The decision column (BC) is not part of INPUT_FIELDS but is a real column
+  // the review screen and the manual form both write.
+  if (Object.prototype.hasOwnProperty.call(values, DECISION_FIELD.key)) {
+    const raw = values[DECISION_FIELD.key];
+    const text = raw === null || raw === undefined ? '' : String(raw).trim();
+    if (!text) {
+      clean[DECISION_FIELD.key] = null;
+      rawValues[DECISION_FIELD.key] = null;
+    } else if (DECISION_FIELD.allowed.includes(text)) {
+      clean[DECISION_FIELD.key] = text;
+      rawValues[DECISION_FIELD.key] = text;
+    } else {
+      issues.push({ key: DECISION_FIELD.key, header: DECISION_FIELD.header, raw: text });
+    }
+  }
+
   return { clean, rawValues, issues };
 }
 
@@ -616,7 +902,7 @@ function saveManualDirectorate(database, request = {}) {
     const columns = [];
     const params = [];
     for (const [key, column] of COLUMN_ENTRIES) {
-      if (column === 'governorate' || column === 'district' || key === 'reviewerDecision') continue;
+      if (column === 'governorate' || column === 'district') continue;
       if (!Object.prototype.hasOwnProperty.call(clean, key)) continue;
       columns.push(column);
       params.push(toColumnValue(key, clean[key]));
@@ -632,6 +918,8 @@ function saveManualDirectorate(database, request = {}) {
       targetId = Number(info.lastInsertRowid);
       created = true;
     } else {
+      // Keep an undo point before the row changes.
+      snapshotDirectorate(database, targetId, 'snapshot-before-update');
       const assignments = ['governorate = ?', 'district = ?', ...columns.map((column) => `${column} = ?`), 'updated_at = ?'];
       const updateParams = [governorate, district, ...params, timestamp];
       if (identityChanged) {
@@ -659,7 +947,6 @@ function saveManualDirectorate(database, request = {}) {
     `);
     const clearSource = database.prepare('DELETE FROM directorate_sources WHERE directorate_id = ? AND field_key = ?');
     for (const [key] of COLUMN_ENTRIES) {
-      if (key === 'reviewerDecision') continue;
       if (!Object.prototype.hasOwnProperty.call(clean, key)) continue;
       if (clean[key] === null) {
         clearSource.run(targetId, key);
@@ -704,6 +991,10 @@ function deleteDirectorate(database, id) {
       .get(numeric);
     if (!record) throw new Error('المديرية المطلوبة غير موجودة.');
 
+    // Keep the row recoverable: deleting is a deliberate act, but not an
+    // irreversible one.
+    snapshotDirectorate(database, numeric, 'snapshot-before-delete');
+
     // SQLite may reuse a deleted rowid. Detach historical results first so a new
     // directorate that later gets the same id cannot inherit an old report.
     database.prepare('UPDATE analysis_results SET directorate_id = NULL WHERE directorate_id = ?').run(numeric);
@@ -737,6 +1028,19 @@ module.exports = {
   listRuns,
   logAccess,
   listAccess,
+  logRead,
+  listReads,
+  snapshotDirectorate,
+  listVersions,
+  restoreDirectorateVersion,
+  setLastCalibration,
+  getLastCalibration,
+  saveOcrDraft,
+  recordOcrDecision,
+  listOcrDrafts,
+  getOcrDraft,
+  CALIBRATION_KEY,
+  VERSION_KEEP,
   getWeights,
   setWeights,
   listWeights,

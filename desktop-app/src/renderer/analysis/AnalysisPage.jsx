@@ -366,17 +366,127 @@ function PrioritiesTab({ analysis, fields }) {
 
 function DistrictDetail({ row, fields }) {
   const indicators = INDICATORS_META.filter((meta) => typeof row.indicators[meta.code] === 'number');
-  const restricted = (fields ?? []).filter((field) => field.sensitivity && field.sensitivity !== 'public'
-    && row.values?.[field.key] !== null && row.values?.[field.key] !== undefined && row.values?.[field.key] !== '');
+  // Compact IPC payloads do not carry `values`; the main process sends only the
+  // keys of protected fields that are actually present, which is all this panel
+  // needs (and keeps the sensitive values out of the renderer entirely).
+  const restricted = (fields ?? []).filter((field) => {
+    if (!field.sensitivity || field.sensitivity === 'public') return false;
+    if (Array.isArray(row.restrictedPresent)) return row.restrictedPresent.includes(field.key);
+    const value = row.values?.[field.key];
+    return value !== null && value !== undefined && value !== '';
+  });
   const sensitivityLabel = { restricted: 'مقيّد', sensitive: 'حساس' };
+
+  // Provenance is loaded on demand: the list payload stays small, and a row that
+  // is never opened never triggers a read of its restricted source records.
+  const [detail, setDetail] = useState(null);
+  const [detailError, setDetailError] = useState('');
+  useEffect(() => {
+    let alive = true;
+    setDetail(null);
+    setDetailError('');
+    if (!row.dbId) return undefined;
+    window.localApp.getDirectorate(row.dbId)
+      .then((value) => { if (alive) setDetail(value); })
+      .catch((cause) => { if (alive) setDetailError(cause?.message || 'تعذر تحميل مصدر القيم.'); });
+    return () => { alive = false; };
+  }, [row.dbId]);
+
+  const maskedKeys = new Set(detail?.masked ?? []);
+  const sourceByKey = new Map((detail?.sources ?? []).map((source) => [source.field_key, source]));
+  const fieldByKey = new Map((fields ?? []).map((field) => [field.key, field]));
+  const DECISION_INPUTS = ['population', 'waterCoverage', 'pavedRoads', 'revenue', 'povertyRatio', 'projectCost', 'schools', 'agriProduction'];
+  const provenanceRows = DECISION_INPUTS
+    .map((key) => ({ key, field: fieldByKey.get(key), source: sourceByKey.get(key) }))
+    .filter((entry) => entry.field && entry.source);
+  const decision = detail?.values?.reviewerDecision ?? null;
+
+  // Donor-facing opportunity: the single most severe measured need, what it
+  // implies in programme terms, and the evidence behind it. It is derived, never
+  // stored, so it can never contradict the indicators it is built from.
+  const SECTOR_BY_INDICATOR = {
+    waterDeficit: 'مياه وإصحاح بيئي',
+    frontLineRisk: 'طوارئ وتعافٍ',
+    revenuePerCapita: 'تنمية اقتصادية محلية',
+    roadsDeficit: 'طرق وبنية تحتية',
+    populationPerFacility: 'خدمات أساسية',
+    schoolsPer10k: 'تعليم',
+    agriPerCapita: 'زراعة وأمن غذائي',
+    valueChainsScore: 'سلاسل قيمة وتمكين اقتصادي',
+    fiscalGap: 'مالية محلية',
+    associationsPer10k: 'مجتمع مدني',
+    stalledProject: 'استكمال مشاريع متعثرة',
+    aidPerCapita: 'مساعدات إنسانية',
+  };
+  const worst = indicators
+    .map((meta) => ({ meta, value: Number(row.indicators[meta.code]) }))
+    .filter((entry) => Number.isFinite(entry.value))
+    .sort((left, right) => (right.meta.direction === 'needUp' ? right.value - left.value : left.value - right.value))[0] ?? null;
+  const beneficiaries = Number(detail?.values?.expectedBeneficiaries ?? detail?.values?.population ?? 0);
+  const opportunity = worst && {
+    sector: SECTOR_BY_INDICATOR[worst.meta.code] ?? 'تنمية متعددة القطاعات',
+    need: `${worst.meta.header} = ${fmt(worst.value, 3)}${worst.meta.unit && worst.meta.unit !== '%' ? ` ${worst.meta.unit}` : ''}`,
+    beneficiaries: Number.isFinite(beneficiaries) && beneficiaries > 0 ? beneficiaries : null,
+    alignment: [detail?.values?.nationalAlignment, detail?.values?.partnerIntegration].filter(Boolean).join(' · '),
+    cost: maskedKeys.has('projectCost') ? null : detail?.values?.projectCost ?? null,
+    evidence: provenanceRows.length,
+  };
+
   return <div className="district-detail">
+    <div className="decision-card">
+      <div className="decision-head">
+        <ShieldCheck size={16} />
+        <strong>بطاقة القرار</strong>
+        <span className="decision-badge">{decision ? `القرار: ${decision}` : 'لم يُعتمد قرار بعد'}</span>
+      </div>
+      <div className="decision-grid">
+        <div><span>المشروع المقترح</span><b>{row.project?.label ?? '—'}</b></div>
+        <div><span>مستوى الثقة</span><b>{row.confidence?.text ?? row.confidence?.level ?? '—'}</b></div>
+        <div><span>المركب المعاير</span><b className="ltr">{fmt(row.calibrated?.composite)}</b></div>
+        <div><span>الرتبة</span><b>{row.calibrated?.rank ?? (row.calibrated?.blocked ? 'محجوبة' : '—')}</b></div>
+        <div><span>عدد المصادر المسجّلة</span><b>{detail ? provenanceRows.length : '...'}</b></div>
+      </div>
+      {detailError && <div className="inline-warning"><AlertTriangle size={14} />{detailError}</div>}
+      {detail && provenanceRows.length > 0 && <div className="provenance-block">
+        <h4>وحدة القياس ومصدر كل قيمة أساسية</h4>
+        <div className="table-scroll"><table className="analysis-table compact">
+          <thead><tr><th>الحقل</th><th>الوحدة</th><th>القيمة الخام</th><th>المصدر</th><th>الموضع</th><th>تاريخ الالتقاط</th></tr></thead>
+          <tbody>{provenanceRows.map(({ key, field, source }) => <tr key={key}>
+            <td>{field.header}</td>
+            <td>{field.unit ?? '—'}</td>
+            <td className="ltr-cell">{maskedKeys.has(key) ? 'محجوب' : (source.value_text ?? '—')}</td>
+            <td className="ltr-cell">{source.source_file || '—'}</td>
+            <td className="ltr-cell">{source.source_location || '—'}</td>
+            <td>{source.captured_at ? new Date(source.captured_at).toLocaleDateString('ar') : '—'}</td>
+          </tr>)}</tbody>
+        </table></div>
+        <p className="muted">الوحدة هي وحدة القالب المتوقعة، والقيمة الخام نص المصدر قبل التحويل — فما تراه هنا هو ما وصل فعلًا، لا ما فسّره المحرك.</p>
+      </div>}
+      {detail && !provenanceRows.length && <p className="muted">لا مصدر مسجّل لهذه المديرية؛ أُدخلت بقيمها مباشرة.</p>}
+    </div>
+    {opportunity && <div className="opportunity-card">
+      <div className="opportunity-head">
+        <div>
+          <p className="eyebrow">فرصة تنموية قابلة للعرض</p>
+          <h4>{opportunity.sector}</h4>
+        </div>
+        <span className="opportunity-need">الفجوة الأبرز: {opportunity.need}</span>
+      </div>
+      <div className="decision-grid">
+        <div><span>المستفيدون المتوقعون</span><b>{opportunity.beneficiaries ? arNumber.format(opportunity.beneficiaries) : 'غير محدد'}</b></div>
+        <div><span>التكلفة التقديرية</span><b className="ltr">{opportunity.cost ? `${arNumber.format(Number(opportunity.cost))} ريال` : (maskedKeys.has('projectCost') ? 'محجوبة في وضع المشاركة' : 'غير مسجّلة')}</b></div>
+        <div><span>المواءمة الوطنية والشركاء</span><b>{opportunity.alignment || 'لم تُسجّل'}</b></div>
+        <div><span>عدد الأدلة المصدرية</span><b>{opportunity.evidence}</b></div>
+      </div>
+      <p className="muted">البطاقة مشتقة من المؤشرات المحسوبة ومصادرها؛ لا تُعدّل قيمة ولا تُخفي فجوة، وتُقرأ مع مستوى الثقة أعلاه.</p>
+    </div>}
     <div className="detail-columns">
       <div>
         <h4>المؤشرات المحسوبة</h4>
         <div className="indicator-grid">
           {indicators.map((meta) => <div key={meta.code} className="indicator-item">
             <span>{meta.header}</span>
-            <strong className="ltr">{fmt(row.indicators[meta.code], 3)}</strong>
+            <strong className="ltr">{fmt(row.indicators[meta.code], 3)}<em className="indicator-unit">{meta.unit ?? ''}</em></strong>
           </div>)}
           {!indicators.length && <p className="muted">لا توجد مؤشرات قابلة للحساب.</p>}
         </div>
@@ -578,22 +688,42 @@ function WeightsTab({ analysis, notify, fail, onChanged }) {
 }
 
 function AuditTab() {
-  const [rows, setRows] = useState([]);
+  const [state, setState] = useState({ writes: [], reads: [] });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     window.localApp.auditLog({ limit: 300 })
-      .then((value) => setRows(value))
+      .then((value) => setState(Array.isArray(value) ? { writes: value, reads: [] } : { writes: value?.writes ?? [], reads: value?.reads ?? [] }))
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 
   return <div className="analysis-tab-body">
-    <div className="audit-note"><Info size={16} /><span>سجل الوصول يسجّل قراءة القوالب، وتشغيل التحليل، وتعديل الأوزان، والتصدير. لا يُسجَّل محتوى القيم الحساسة.</span></div>
+    <div className="audit-note"><Info size={16} /><span>سجل الوصول يسجّل القراءات الكتابة والتصدير: من قرأ أي كيان، وأي الحقول حُجبت، وتشغيل التحليل، وتعديل الأوزان. لا يُسجَّل محتوى القيم الحساسة نفسه.</span></div>
     <section className="panel table-panel">
+      <div className="panel-heading"><div><h2>سجل القراءات</h2><p>كل قناة قرأت بيانات، ونوع الملف، وهل حُجبت حقول.</p></div></div>
+      <div className="table-scroll"><table className="analysis-table">
+        <thead><tr><th>#</th><th>القناة</th><th>الكيان</th><th>المعرّف</th><th>الحقول</th><th>النتيجة</th><th>الصفوف</th><th>الجلسة</th><th>الوقت</th></tr></thead>
+        <tbody>{state.reads.map((entry) => <tr key={entry.id}>
+          <td className="rank-cell">{entry.id}</td>
+          <td><span className="severity-pill info">{entry.channel}</span></td>
+          <td>{entry.entity || '—'}</td>
+          <td className="ltr-cell">{String(entry.entity_id ?? '—').slice(0, 32)}</td>
+          <td className="ltr-cell">{entry.fields || '—'}</td>
+          <td>{entry.result === 'masked' ? <span className="severity-pill blocker">محجوب جزئيًا</span> : entry.result}</td>
+          <td className="num-cell">{entry.row_count ?? '—'}</td>
+          <td className="ltr-cell">{String(entry.session_id ?? '—').slice(0, 8)}</td>
+          <td>{new Date(entry.created_at).toLocaleString('ar')}</td>
+        </tr>)}</tbody>
+      </table></div>
+      {loading && <div className="table-empty">جارٍ التحميل...</div>}
+      {!loading && !state.reads.length && <div className="table-empty">لا توجد قراءات مسجّلة بعد.</div>}
+    </section>
+    <section className="panel table-panel">
+      <div className="panel-heading"><div><h2>سجل الكتابة والتصدير</h2><p>الاستيراد، والتعديل اليدوي، والترحيل، والتصدير.</p></div></div>
       <div className="table-scroll"><table className="analysis-table">
         <thead><tr><th>#</th><th>الإجراء</th><th>الكيان</th><th>المعرّف</th><th>التفاصيل</th><th>الوقت</th></tr></thead>
-        <tbody>{rows.map((entry) => <tr key={entry.id}>
+        <tbody>{state.writes.map((entry) => <tr key={entry.id}>
           <td className="rank-cell">{entry.id}</td>
           <td><span className="severity-pill info">{entry.action}</span></td>
           <td>{entry.entity || '—'}</td>
@@ -602,8 +732,7 @@ function AuditTab() {
           <td>{new Date(entry.created_at).toLocaleString('ar')}</td>
         </tr>)}</tbody>
       </table></div>
-      {loading && <div className="table-empty">جارٍ التحميل...</div>}
-      {!loading && !rows.length && <div className="table-empty">سجل التدقيق فارغ.</div>}
+      {!loading && !state.writes.length && <div className="table-empty">سجل الكتابة فارغ.</div>}
     </section>
   </div>;
 }

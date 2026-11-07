@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Check, FileScan, Pencil, Plus, RefreshCw, Save, Search, Trash2, X,
+  Check, FileScan, History, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, Trash2, X,
 } from 'lucide-react';
 import '../analysis/analysis.css';
 import './data-entry.css';
@@ -34,6 +34,32 @@ const GROUPS = [
 
 const SENSITIVITY_LABEL = { restricted: 'مقيّد', sensitive: 'حساس' };
 
+/**
+ * Why the engine flagged a proposal. Shown verbatim next to the field so the
+ * reviewer knows what to check on the page instead of seeing a bare percentage.
+ */
+const OCR_REASON_LABEL = {
+  'low-ocr-confidence': 'ثقة قراءة منخفضة',
+  'weak-label-match': 'اسم حقل غير مؤكد',
+  'label-guessed': 'اسم الحقل مستنتج من البداية',
+  'percent-converted': 'حُوّلت نسبة مئوية إلى كسر',
+  'had-percent': 'القيمة تحمل علامة %',
+  placeholder: 'القيمة نص بديل لا رقم',
+  'duplicate-line': 'الحقل تكرر في الصفحة',
+  'enrolled-exceeds-population': 'الملتحقون أكبر من السكان',
+  'beneficiaries-exceed-population': 'المستفيدون أكبر من السكان',
+  'rural-exceeds-population': 'سكان الريف أكبر من السكان',
+  'schools-exceed-population': 'عدد المدارس أكبر من السكان',
+  'ratio-out-of-range': 'النسبة خارج المدى 0-1',
+};
+
+function ocrReasonLabel(code) {
+  if (!code) return '';
+  if (OCR_REASON_LABEL[code]) return OCR_REASON_LABEL[code];
+  if (String(code).startsWith('invalid-')) return 'قيمة غير صالحة لنوع الحقل';
+  return String(code);
+}
+
 function pct(value) {
   if (value === null || value === undefined || value === '') return '—';
   const numeric = Number(value);
@@ -57,11 +83,27 @@ export default function DataEntryPage({ onToast, onError }) {
   const [form, setForm] = useState(null);
   const [ocr, setOcr] = useState(null);
   const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState(null);
+  const [ocrSelected, setOcrSelected] = useState(new Set());
+  const [historyTarget, setHistoryTarget] = useState(null);
+  const [historyVersions, setHistoryVersions] = useState([]);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  // Per-field reviewer decision, mirrored into `ocr_field_confidence` so the
+  // draft keeps an audit trail of what a human accepted, rejected, or edited.
+  const [decisions, setDecisions] = useState({});
+  const [drafts, setDrafts] = useState([]);
 
   const notify = useCallback((message) => { if (onToast) onToast(message); }, [onToast]);
   const fail = useCallback((cause, fallback) => { if (onError) onError(cause?.message || fallback); }, [onError]);
 
   const fieldMap = useMemo(() => new Map(fields.map((field) => [field.key, field])), [fields]);
+
+  // Values the engine saw but could not parse: they are *not* proposed, so the
+  // reviewer must read them from the page instead of trusting a guess.
+  const unreadable = useMemo(
+    () => (ocr?.parsed?.warnings ?? []).filter((warning) => String(warning.code ?? '').startsWith('invalid-')),
+    [ocr],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -83,6 +125,29 @@ export default function DataEntryPage({ onToast, onError }) {
       .catch((cause) => fail(cause, 'تعذر تحميل حقول النموذج؛ أعد فتح الصفحة قبل الإدخال.'));
   }, [load, fail]);
 
+  // OCR drafts are stored in the database, so closing the screen must not lose
+  // them. The list is small (10 most recent) and refreshed after any decision.
+  const loadDrafts = useCallback(async () => {
+    try {
+      const list = await window.localApp.ocrDrafts({ limit: 10 });
+      setDrafts(Array.isArray(list) ? list : []);
+    } catch {
+      // Listing drafts is a convenience; a failure must never block data entry.
+    }
+  }, []);
+
+  useEffect(() => { loadDrafts(); }, [loadDrafts]);
+
+  // OCR runs in the main process; progress and the cancel affordance come over a
+  // single event channel so a long page never looks frozen.
+  useEffect(() => {
+    if (!window.localApp.onOcrProgress) return undefined;
+    return window.localApp.onOcrProgress((message) => {
+      if (!message || message.stage === 'done') { setOcrProgress(null); return; }
+      setOcrProgress(message);
+    });
+  }, []);
+
   const governorates = useMemo(
     () => [...new Set(rows.map((row) => row.governorate).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ar')),
     [rows],
@@ -103,14 +168,20 @@ export default function DataEntryPage({ onToast, onError }) {
     return { id: null, districtName: '', governorate: '', values };
   }
 
-  function startAdd() {
+  function clearOcr() {
     setOcr(null);
+    setOcrSelected(new Set());
+    setDecisions({});
+  }
+
+  function startAdd() {
+    clearOcr();
     setForm(emptyForm());
   }
 
   function cancelForm() {
     setForm(null);
-    setOcr(null);
+    clearOcr();
   }
 
   function updateValue(key, value) {
@@ -131,7 +202,7 @@ export default function DataEntryPage({ onToast, onError }) {
         const value = detail.values?.[field.key];
         values[field.key] = value === null || value === undefined ? '' : String(value);
       }
-      setOcr(null);
+      clearOcr();
       setForm({
         id: detail.dbId ?? row.id,
         districtName: detail.districtName ?? '',
@@ -162,7 +233,7 @@ export default function DataEntryPage({ onToast, onError }) {
       const result = await window.localApp.saveDirectorate(payload);
       notify(result?.created ? 'أُضيفت المديرية إلى قاعدة البيانات.' : 'حُدّثت المديرية في قاعدة البيانات.');
       setForm(null);
-      setOcr(null);
+      clearOcr();
       await load();
     } catch (cause) {
       fail(cause, 'تعذر حفظ المديرية.');
@@ -187,40 +258,209 @@ export default function DataEntryPage({ onToast, onError }) {
     }
   }
 
+  /**
+   * A snapshot is written before every edit and delete, so the history panel is
+   * the only place a reviewer can see what a record looked like before a change
+   * — including a record that was deleted and re-created from a snapshot.
+   */
+  async function openHistory(row) {
+    setHistoryTarget(row);
+    setHistoryVersions([]);
+    setHistoryBusy(true);
+    try {
+      const versions = await window.localApp.directorateHistory(row.id);
+      setHistoryVersions(Array.isArray(versions) ? versions : []);
+    } catch (cause) {
+      fail(cause, 'تعذر تحميل سجل التغييرات.');
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
+  function closeHistory() {
+    setHistoryTarget(null);
+    setHistoryVersions([]);
+  }
+
+  async function restoreVersion(version) {
+    const confirmed = window.confirm(
+      `استعادة النسخة #${version.id} من «${version.district ?? historyTarget?.district ?? ''}»؟\n` +
+      'تُحفظ الحالة الحالية كلقطة أولًا، فيبقى هذا التراجع نفسه قابلًا للتراجع.',
+    );
+    if (!confirmed) return;
+    setHistoryBusy(true);
+    try {
+      const restored = await window.localApp.restoreVersion(version.id);
+      notify(`استُعيدت المديرية #${restored?.id ?? ''} من النسخة #${version.id}. حُفظت الحالة السابقة كلقطة.`);
+      // The form may hold values that no longer match the restored record.
+      if (form && historyTarget && form.id === historyTarget.id) cancelForm();
+      await load();
+      if (historyTarget) await openHistory(historyTarget);
+    } catch (cause) {
+      fail(cause, 'تعذرت استعادة النسخة.');
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
+  function historyActionLabel(action) {
+    const labels = {
+      edit: 'قبل التعديل',
+      delete: 'قبل الحذف',
+      'snapshot-before-restore': 'قبل الاستعادة',
+      restore: 'استعادة',
+    };
+    return labels[action] ?? String(action ?? 'لقطة');
+  }
+
   async function runOcr() {
     setOcrBusy(true);
+    setOcrProgress(null);
     try {
       const result = await window.localApp.readOcrEntry();
       if (result.canceled) return;
       setOcr(result);
+      setDecisions({});
+      // Nothing is pre-selected on the user's behalf except proposals the engine
+      // itself did not flag. A flagged field (low OCR confidence, weak label
+      // match, converted percentage, impossible cross-field value) must be
+      // ticked deliberately after the reviewer looks at the raw text.
+      const trusted = Object.entries(result.parsed?.fields ?? {})
+        .filter(([, entry]) => !entry.needsReview)
+        .map(([key]) => key);
+      setOcrSelected(new Set(trusted));
       const count = Object.keys(result.parsed?.fields ?? {}).length;
-      notify(`قُرئ «${result.fileName}»: ${count} حقلًا مقترحًا. راجعها ثم اضغط «تطبيق المقترحات».`);
+      const review = count - trusted.length;
+      notify(`قُرئ «${result.fileName}»: ${count} حقلًا مقترحًا${review ? `، ${review} منها تحتاج مراجعة يدوية` : ''}.`);
+      loadDrafts();
     } catch (cause) {
       fail(cause, 'تعذرت قراءة الملف بالـOCR.');
+    } finally {
+      setOcrBusy(false);
+      setOcrProgress(null);
+    }
+  }
+
+  async function cancelOcr() {
+    try {
+      await window.localApp.cancelOcr();
+      notify('أُلغي التعرف الضوئي.');
+    } catch (cause) {
+      fail(cause, 'تعذر إلغاء التعرف الضوئي.');
+    }
+  }
+
+  function toggleOcrField(key) {
+    setOcrSelected((previous) => {
+      const next = new Set(previous);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  /**
+   * Record one reviewer decision for one proposed field.
+   *
+   * The decision is written to the draft even when the value is not applied, so
+   * the stored draft always explains why a proposal was left out: rejected by a
+   * human, not merely forgotten. A bookkeeping failure never blocks the form —
+   * the reviewer's real work is applying values — so it is reported as a notice.
+   */
+  async function decideField(key, decision) {
+    const entry = ocr?.parsed?.fields?.[key];
+    if (!entry) return;
+    setDecisions((previous) => ({ ...previous, [key]: decision }));
+    setOcrSelected((previous) => {
+      const next = new Set(previous);
+      if (decision === 'accepted') next.add(key);
+      else next.delete(key);
+      return next;
+    });
+    if (!ocr?.draftId) return;
+    try {
+      await window.localApp.ocrDecision({
+        draftId: ocr.draftId,
+        fieldKey: key,
+        decision,
+        value: decision === 'accepted' ? entry.value : null,
+      });
+      loadDrafts();
+    } catch (cause) {
+      notify(`سُجّل القرار محليًا لكن تعذر حفظه في مسودة OCR: ${cause?.message ?? ''}`);
+    }
+  }
+
+  /**
+   * Reopen a stored draft with the decisions already taken on it, so a reviewer
+   * can finish a long page in a second sitting instead of re-reading the paper.
+   */
+  async function resumeDraft(draftId) {
+    setOcrBusy(true);
+    try {
+      const draft = await window.localApp.ocrDraft(draftId);
+      const payload = draft.payload ?? {};
+      const draftFields = payload.fields ?? {};
+      const storedDecisions = {};
+      const selected = new Set();
+      for (const field of draft.fields ?? []) {
+        if (field.decision === 'accepted' || field.decision === 'rejected') storedDecisions[field.fieldKey] = field.decision;
+        if (field.decision === 'accepted') selected.add(field.fieldKey);
+      }
+      for (const [key, entry] of Object.entries(draftFields)) {
+        if (storedDecisions[key]) continue;
+        if (!entry.needsReview) selected.add(key);
+      }
+      setOcr({
+        draftId: draft.id,
+        fileName: draft.fileName,
+        confidence: draft.confidence,
+        text: draft.text ?? '',
+        pages: 1,
+        pagesRead: 1,
+        preview: null,
+        parsed: {
+          fields: draftFields,
+          unmatched: payload.unmatched ?? [],
+          warnings: payload.warnings ?? [],
+          crossField: payload.crossField ?? [],
+          summary: payload.summary ?? null,
+        },
+      });
+      setOcrSelected(selected);
+      setDecisions(storedDecisions);
+      notify(`أُعيد فتح مسودة «${draft.fileName}» بقراراتها المحفوظة. الصورة الأصلية غير محفوظة؛ اعتمد على النص الخام.`);
+    } catch (cause) {
+      fail(cause, 'تعذر فتح مسودة OCR.');
     } finally {
       setOcrBusy(false);
     }
   }
 
   /**
-   * Applies the OCR proposal only on an explicit click. Auto-filling would risk
-   * clobbering an edit the user opened while a slow OCR pass was still running.
+   * Applies only the fields the reviewer ticked. Auto-filling everything would
+   * make "the engine guessed it" indistinguishable from "the user confirmed it".
    */
   function applyOcr() {
     const parsed = ocr?.parsed?.fields ?? {};
-    if (!Object.keys(parsed).length) {
-      fail({ message: 'لا توجد حقول مقترحة لتطبيقها.' }, '');
+    const keys = [...ocrSelected].filter((key) => parsed[key]);
+    if (!keys.length) {
+      fail({ message: 'لم تحدد أي حقل لتطبيقه. علّم الحقول التي راجعتها أولًا.' }, '');
       return;
     }
     const base = form ?? emptyForm();
     const next = { ...base, values: { ...base.values } };
-    for (const [key, entry] of Object.entries(parsed)) {
+    for (const key of keys) {
+      const entry = parsed[key];
       if (key === 'districtName') next.districtName = String(entry.value ?? '');
       else if (key === 'governorate') next.governorate = String(entry.value ?? '');
       else next.values[key] = entry.value === null || entry.value === undefined ? '' : String(entry.value);
+      // Applying a proposal *is* accepting it. Recording that keeps the draft
+      // consistent with what actually reached the form.
+      if (ocr?.draftId && decisions[key] !== 'accepted') decideField(key, 'accepted');
     }
     setForm(next);
-    notify('طُبّقت مقترحات OCR على النموذج. راجع القيم ثم احفظ.');
+    notify(`طُبّق ${keys.length} حقلًا على النموذج. لم تُطبَّق الحقول غير المعلّمة. راجع القيم ثم احفظ.`);
   }
 
   return <div className="data-entry-page">
@@ -240,29 +480,93 @@ export default function DataEntryPage({ onToast, onError }) {
       </div>
     </div>
 
+    {drafts.length > 0 && <section className="panel drafts-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>مسودات OCR محفوظة ({drafts.length})</h2>
+          <p>القرارات المحفوظة مع كل مسودة تُستعاد عند إعادة فتحها. الصورة الأصلية لا تُخزَّن؛ يبقى النص الخام والقراءات.</p>
+        </div>
+      </div>
+      <ul className="drafts-list">{drafts.map((draft) => <li key={draft.id}>
+        <div>
+          <strong>{draft.file_name ?? 'بلا اسم ملف'}</strong>
+          <span>{formatDate(draft.created_at)} · {draft.field_count} حقلًا · {draft.pending_count} بانتظار القرار · ثقة المحرك {Math.round((draft.confidence ?? 0) * 100)}%</span>
+        </div>
+        <button className="quiet-button" onClick={() => resumeDraft(draft.id)} disabled={ocrBusy}>
+          <FileScan size={14} />متابعة
+        </button>
+      </li>)}</ul>
+    </section>}
+
+    {ocrBusy && <section className="panel ocr-panel ocr-running">
+      <div className="ocr-running-row">
+        <FileScan size={20} />
+        <div>
+          <strong>{ocrProgress?.status === 'reading-page' ? `جارٍ قراءة الصفحة ${ocrProgress.page} من ${ocrProgress.pages}` : 'جارٍ التعرف الضوئي محليًا...'}</strong>
+          <span>{ocrProgress?.progress !== null && ocrProgress?.progress !== undefined ? `${Math.round(Number(ocrProgress.progress) * 100)}%` : 'تحضير الصفحة'}</span>
+        </div>
+        <button className="quiet-button danger-text" onClick={cancelOcr}><X size={15} />إلغاء القراءة</button>
+      </div>
+      <div className="ocr-progress-track"><span style={{ width: `${Math.round(Math.min(1, Math.max(0, Number(ocrProgress?.progress) || 0)) * 100)}%` }} /></div>
+    </section>}
+
     {ocr && <section className="panel ocr-panel">
       <div className="panel-heading">
         <div>
           <h2>نتيجة OCR: {ocr.fileName}</h2>
-          <p>{ocr.pagesRead ?? ocr.pages ?? 1} من {ocr.pages ?? 1} صفحة · ثقة المحرك {Math.round((ocr.confidence ?? 0) * 100)}% · {Object.keys(ocr.parsed?.fields ?? {}).length} حقلًا مطابقًا. النص مسودة، وليست بيانات معتمدة.</p>
+          <p>{ocr.pagesRead ?? ocr.pages ?? 1} من {ocr.pages ?? 1} صفحة · ثقة المحرك {Math.round((ocr.confidence ?? 0) * 100)}% · {Object.keys(ocr.parsed?.fields ?? {}).length} حقلًا مطابقًا · {ocrSelected.size} محدَّدًا للتطبيق. النص مسودة، وليست بيانات معتمدة.</p>
         </div>
         <div className="ocr-actions">
-          <button className="primary-button" onClick={applyOcr} disabled={!Object.keys(ocr.parsed?.fields ?? {}).length}><Check size={15} />تطبيق المقترحات</button>
-          <button className="quiet-button" onClick={() => setOcr(null)}><X size={15} />إغلاق</button>
+          <button className="primary-button" onClick={applyOcr} disabled={!ocrSelected.size}><Check size={15} />تطبيق المحدد ({ocrSelected.size})</button>
+          <button className="quiet-button" onClick={clearOcr}><X size={15} />إغلاق</button>
         </div>
       </div>
       {(ocr.warnings?.length > 0 || ocr.truncated || ocr.textTruncated) && <div className="inline-warning">
         {[...(ocr.warnings ?? []), ocr.truncated ? 'قُرئ جزء من الملف فقط؛ أكمل الباقي يدويًا.' : null, ocr.textTruncated ? 'عُرض جزء من النص الخام فقط.' : null].filter(Boolean).join(' ')}
       </div>}
-      {ocr.parsed?.warnings?.length > 0 && <div className="inline-warning">تنبيهات الحقول: {ocr.parsed.warnings.slice(0, 8).map((warning) => `${warning.header}: ${warning.code}`).join(' · ')}</div>}
+      {ocr.preprocessing && <div className="ocr-preprocessing">
+        <span>الدقة: {ocr.preprocessing.width}×{ocr.preprocessing.height}</span>
+        <span>ميل مصحّح: {Number(ocr.preprocessing.angle ?? 0).toFixed(1)}°</span>
+        {ocr.preprocessing.rotation ? <span>دوران: {ocr.preprocessing.rotation}°</span> : null}
+        <span>تكبير: ×{ocr.preprocessing.upscale}</span>
+      </div>}
+      <div className="ocr-review-bar">
+        <ShieldCheck size={16} />
+        <span>الحقول المعلّمة فقط ستُطبَّق. الحقول المعلّمة بتحذير لا تُحدَّد تلقائيًا: طابق الرقم مع الصورة قبل تعليمها.</span>
+        <button className="quiet-button" onClick={() => setOcrSelected(new Set(Object.entries(ocr.parsed?.fields ?? {}).filter(([, entry]) => !entry.needsReview).map(([key]) => key)))}>تحديد الآمن فقط</button>
+        <button className="quiet-button" onClick={() => setOcrSelected(new Set(Object.keys(ocr.parsed?.fields ?? {})))}>تحديد الكل</button>
+        <button className="quiet-button" onClick={() => setOcrSelected(new Set())}>إلغاء التحديد</button>
+      </div>
+      {ocr.preview && <details className="ocr-preview">
+        <summary>عرض الصورة المقروءة للمقارنة</summary>
+        <img src={ocr.preview} alt="الصفحة التي قُرئت" />
+      </details>}
       <div className="ocr-fields">
-        {Object.entries(ocr.parsed?.fields ?? {}).map(([key, entry]) => <span key={key} className="ocr-chip">
-          {entry.header}
+        {Object.entries(ocr.parsed?.fields ?? {}).map(([key, entry]) => <label key={key} className={`ocr-chip${entry.needsReview ? ' needs-review' : ''}${ocrSelected.has(key) ? ' is-selected' : ''}`}>
+          <input type="checkbox" checked={ocrSelected.has(key)} onChange={() => toggleOcrField(key)} />
+          <span className="ocr-chip-header">{entry.header}</span>
           <b>{String(entry.value)}</b>
-          <em>تطابق {Math.round(entry.score * 100)}%</em>
-        </span>)}
+          <em>تطابق الاسم {Math.round(entry.score * 100)}%{entry.confidence !== null && entry.confidence !== undefined ? ` · ثقة القراءة ${Math.round(entry.confidence * 100)}%` : ''}</em>
+          {entry.raw !== undefined && String(entry.raw) !== String(entry.value) && <code dir="auto">النص الخام: {String(entry.raw)}</code>}
+          {(entry.reviewReasons ?? []).length > 0 && <span className="ocr-chip-reasons">{(entry.reviewReasons ?? []).map(ocrReasonLabel).join(' · ')}</span>}
+          <span className="ocr-chip-actions">
+            <button type="button" className={`ocr-chip-action${decisions[key] === 'accepted' ? ' is-on' : ''}`} onClick={(event) => { event.preventDefault(); event.stopPropagation(); decideField(key, 'accepted'); }}>قبول</button>
+            <button type="button" className={`ocr-chip-action reject${decisions[key] === 'rejected' ? ' is-off' : ''}`} onClick={(event) => { event.preventDefault(); event.stopPropagation(); decideField(key, 'rejected'); }}>رفض</button>
+            <em className={`ocr-chip-decision ${decisions[key] ?? 'pending'}`}>{decisions[key] === 'accepted' ? 'مقبول' : decisions[key] === 'rejected' ? 'مرفوض' : 'بانتظار القرار'}</em>
+          </span>
+        </label>)}
         {!Object.keys(ocr.parsed?.fields ?? {}).length && <span className="muted">لم يُطابق أي حقل تلقائيًا؛ املأ النموذج يدويًا.</span>}
       </div>
+      {ocr.parsed?.crossField?.length > 0 && <div className="inline-warning">
+        تعارض بين الحقول: {ocr.parsed.crossField.slice(0, 6).map((issue) => issue.detail).join(' · ')}
+      </div>}
+      {unreadable.length > 0 && <div className="inline-warning">
+        قيم لم تُقرأ بثقة كافية فلم تُقترح أصلًا (أدخلها يدويًا من الصورة): {unreadable.map((warning) => `${warning.header} (${String(warning.raw ?? '')})`).join(' · ')}
+      </div>}
+      {ocr.parsed?.warnings?.length > 0 && <details className="ocr-unmatched">
+        <summary>تنبيهات أثناء التحليل ({ocr.parsed.warnings.length})</summary>
+        <ul>{ocr.parsed.warnings.slice(0, 30).map((warning, index) => <li key={`${warning.code}-${index}`}><span>{ocrReasonLabel(warning.code)}</span>{warning.header ? `${warning.header}: ${String(warning.raw ?? '')}` : String(warning.raw ?? '')}</li>)}</ul>
+      </details>}
       {ocr.parsed?.unmatched?.length > 0 && <details className="ocr-unmatched">
         <summary>أسطر لم تُطابق ({ocr.parsed.unmatched.length})</summary>
         <ul>{ocr.parsed.unmatched.slice(0, 30).map((item, index) => <li key={`${item.reason}-${index}`}><span>{item.reason}</span>{item.raw}</li>)}</ul>
@@ -271,6 +575,33 @@ export default function DataEntryPage({ onToast, onError }) {
         <summary>النص الخام</summary>
         <pre dir="auto">{ocr.text}</pre>
       </details>
+    </section>}
+
+    {historyTarget && <section className="panel history-panel">
+      <div className="panel-heading">
+        <div>
+          <h2><History size={16} /> سجل تغييرات: {historyTarget.district} {historyTarget.governorate ? `— ${historyTarget.governorate}` : ''}</h2>
+          <p>لقطة كاملة قبل كل تعديل أو حذف. الاستعادة نفسها تُسجَّل كلقطة، فلا يوجد تراجع نهائي بلا أثر.</p>
+        </div>
+        <button className="quiet-button" onClick={closeHistory}><X size={15} />إغلاق</button>
+      </div>
+      {historyBusy && <p className="muted history-empty">جارٍ تحميل السجل...</p>}
+      {!historyBusy && !historyVersions.length && <p className="muted history-empty">لا توجد لقطات بعد. تُنشأ تلقائيًا عند أول تعديل أو حذف.</p>}
+      {!historyBusy && historyVersions.length > 0 && <div className="table-scroll"><table className="analysis-table compact">
+        <thead><tr><th>#</th><th>الحدث</th><th>المديرية في اللقطة</th><th>المحافظة</th><th>التاريخ</th><th>إجراء</th></tr></thead>
+        <tbody>{historyVersions.map((version) => <tr key={version.id}>
+          <td className="ltr-cell">{version.id}</td>
+          <td>{historyActionLabel(version.action)}</td>
+          <td>{version.district ?? '—'}</td>
+          <td>{version.governorate ?? '—'}</td>
+          <td>{formatDate(version.created_at)}</td>
+          <td>
+            <button className="quiet-button" onClick={() => restoreVersion(version)} disabled={historyBusy}>
+              <RotateCcw size={14} />استعادة
+            </button>
+          </td>
+        </tr>)}</tbody>
+      </table></div>}
     </section>}
 
     {form && <section className="panel entry-form-panel">
@@ -342,6 +673,7 @@ export default function DataEntryPage({ onToast, onError }) {
           <td>{formatDate(row.updated_at)}</td>
           <td className="entry-row-actions">
             <button className="quiet-button" onClick={() => editRow(row)} disabled={Boolean(busy) || ocrBusy}><Pencil size={14} />تعديل</button>
+            <button className="quiet-button" onClick={() => openHistory(row)} disabled={Boolean(busy) || ocrBusy}><History size={14} />السجل</button>
             <button className="quiet-button danger-text" onClick={() => deleteRow(row)} disabled={Boolean(busy) || ocrBusy}><Trash2 size={14} />حذف</button>
           </td>
         </tr>)}</tbody>

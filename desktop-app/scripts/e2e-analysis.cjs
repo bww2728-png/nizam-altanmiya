@@ -201,7 +201,7 @@ app.whenReady().then(async () => {
 
     await clickByText(window, '.analysis-tabs button', 'سجل التدقيق');
     await sleep(500);
-    const auditText = await window.webContents.executeJavaScript(`document.querySelector('.analysis-table')?.innerText || ''`);
+    const auditText = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.analysis-table')].map((node) => node.innerText).join('\\n')`);
     check('tabs', 'سجل التدقيق يحتوي الاستيراد والتشغيل', auditText.includes('import') && auditText.includes('analysis-run'));
 
     await clickByText(window, '.analysis-tabs button', 'الأولويات');
