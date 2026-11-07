@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, AlertTriangle, ArrowDownToLine, Check, ChevronDown, CircleHelp, Database, FileSpreadsheet, FileText, FolderUp, Home, LockKeyhole, LogOut, MapPinned, RefreshCw, Search, ShieldCheck, Table2, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDownToLine, Check, ChevronDown, CircleHelp, Database, FileSpreadsheet, FileText, FolderUp, Gauge, Home, LockKeyhole, LogOut, MapPinned, RefreshCw, Search, ShieldCheck, Table2, X } from 'lucide-react';
 import './styles.css';
 import brandBanner from './assets/brand-banner.jpg';
 import logoBadge from './assets/logo-badge.png';
+import AnalysisPage from './analysis/AnalysisPage.jsx';
 
 const TAGLINES = ['تطوير مستدام', 'تنمية محلية', 'تمكين مجتمعي', 'إزدهار وطني'];
 
@@ -74,10 +75,16 @@ function App() {
     setError('');
     setLoading(true);
     try {
-      await window.localApp.open();
+      const result = await window.localApp.open();
       setDatabaseExists(true);
       setUnlocked(true);
-      setToast('تم فتح قاعدة البيانات المحلية المشفّرة.');
+      if (result?.quarantined) {
+        setError(`عُثر على قاعدة بيانات قديمة لا يمكن فتحها بمفتاح هذا الجهاز. لم تُحذف؛ نُقلت إلى نسخة احتياطية باسم «${result.quarantined.split(/[\\/]/).pop()}»، ومُنح التطبيق قاعدة جديدة نظيفة.`);
+      } else if (result?.recoveredFrom) {
+        setError(`لا توجد قاعدة بيانات فعّالة، لكن وُجدت نسخة احتياطية سابقة على هذا الجهاز: «${result.recoveredFrom.split(/[\\/]/).pop()}». البيانات السابقة محفوظة في ذلك الملف.`);
+      } else {
+        setToast('تم فتح قاعدة البيانات المحلية المشفّرة.');
+      }
     } catch (cause) {
       setError(cause.message || 'تعذر فتح قاعدة البيانات.');
     } finally {
@@ -193,6 +200,7 @@ function App() {
 
   const navItems = [
     { id: 'overview', label: 'نظرة عامة', icon: Home },
+    { id: 'analysis', label: 'تحليل الأولويات', icon: Gauge },
     { id: 'review', label: 'مراجعة الاستخراج', icon: Check, badge: (overview?.pending || 0) + (overview?.conflicts || 0) },
     { id: 'imports', label: 'سجل الاستيراد', icon: FolderUp },
     { id: 'data', label: 'البيانات المعتمدة', icon: Table2 },
@@ -246,6 +254,8 @@ function App() {
           </div>
           <div className="info-strip"><ShieldCheck size={19} /><div><strong>تنبيه جودة البيانات</strong><span>استخراج PDF/OCR قد يخطئ؛ كل نتيجة مسودة غير معتمدة حتى تراجعها. تُحفظ بيانات المصدر وموضع الصفحة أو الخلية مع القيمة.</span></div></div>
         </>}
+
+        {active === 'analysis' && <AnalysisPage onToast={setToast} onError={setError} />}
 
         {active === 'review' && <>
           <div className="page-heading"><div><p className="eyebrow">حوكمة البيانات</p><h1>مراجعة الاستخراج</h1><p>تأكد من القيمة ومفتاحها الجغرافي قبل اعتمادها في قاعدة البيانات.</p></div><button className="primary-button" onClick={importFile} disabled={loading}><FolderUp size={17} />استيراد ملف</button></div>

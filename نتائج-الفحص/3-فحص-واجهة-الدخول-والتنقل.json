@@ -1,0 +1,44 @@
+{
+  "generatedAt": "2026-11-06T22:45:43.886Z",
+  "group": "entry",
+  "total": 6,
+  "passed": 6,
+  "checks": [
+    {
+      "group": "entry",
+      "name": "شاشة الدخول تُعرض بلا كلمة مرور",
+      "ok": true,
+      "detail": "YEMEN LOCAL DEVELOPMENT SYSTEM\n\nنظام التنمية المحل"
+    },
+    {
+      "group": "entry",
+      "name": "لا يوجد أي حقل كلمة مرور في الواجهة",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "group": "entry",
+      "name": "صورة الهوية تظهر كخلفية للتطبيق",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "group": "entry",
+      "name": "زر الدخول يعمل",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "group": "entry",
+      "name": "قسم تحليل الأولويات موجود في التنقل",
+      "ok": true,
+      "detail": "نظرة عامة · تحليل الأولويات · مراجعة الاستخراج · سجل الاستيراد · البيانات المعتمدة · قفل قاعدة البيانات"
+    },
+    {
+      "group": "entry",
+      "name": "قاعدة البيانات تُفتح وتصبح مشفّرة",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}
