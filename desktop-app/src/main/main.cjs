@@ -2,7 +2,6 @@ const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const ExcelJS = require('exceljs');
 const {
   openEncryptedStore,
   loadOrCreateStoreKey,
@@ -12,36 +11,33 @@ const {
   backupStore,
   listBackups,
 } = require('./store.cjs');
-const { extractFile, IMAGE_EXTENSIONS } = require('./importers.cjs');
-const { saveImportBatch, updateReviewItem, resolveReviewItems } = require('./repository.cjs');
 const security = require('./security.cjs');
 const { analyze } = require('./analysis/engine.cjs');
 const { readDirectorateWorkbook } = require('./analysis/template-reader.cjs');
-const { mappingTable, matchHeader } = require('./analysis/mapping.cjs');
+const { mappingTable } = require('./analysis/mapping.cjs');
 const { defaultWeights, validateWeights } = require('./analysis/composite.cjs');
 const persist = require('./analysis/persist.cjs');
-const bridge = require('./analysis/bridge.cjs');
 const { serializeAnalysis } = require('./analysis/serialize.cjs');
 const { exportAnalysisWorkbook } = require('./analysis/exporter.cjs');
 const { exportAnalysisPdf } = require('./analysis/pdf.cjs');
-const { recognizeEntryFile } = require('./analysis/ocr-entry.cjs');
 const { DIRECTORATE_COLUMNS } = require('./analysis/store-schema.cjs');
-const ocr = require('./ocr-pipeline.cjs');
+const { buildImportPlan, summarizePlan, applyImportPlan } = require('./analysis/import-plan.cjs');
+const { buildSheets, buildRanking } = require('./analysis/sheets.cjs');
 
 let mainWindow;
 let database;
-/** Workbook read but not yet committed to the database. */
-let pendingTemplate = null;
+/** Workbook read and turned into a plan, but not yet applied to the database. */
+let pendingPlan = null;
 /** Last analysis held in memory so exports never recompute silently. */
 let lastAnalysis = null;
+/** Cached sheet payloads: recomputed after any write that can change a number. */
+let sheetsCache = null;
 /** Identifier written into every read-audit row for this unlocked session. */
 let sessionId = crypto.randomUUID();
-/** Set while an OCR read is running so it can be cancelled from the UI. */
-let ocrCancelled = false;
-let ocrRunning = false;
+/** Canonical path of the last workbook the main process returned from a file dialog. */
+let dialogSelectedPath = null;
 
 const COLUMN_BY_KEY = DIRECTORATE_COLUMNS;
-const KEY_BY_COLUMN = Object.fromEntries(Object.entries(DIRECTORATE_COLUMNS).map(([key, column]) => [column, key]));
 
 function getDatabasePath() {
   return path.join(app.getPath('userData'), 'development-data.db');
@@ -67,12 +63,10 @@ function requireDatabase() {
   return database;
 }
 
-function sendProgress(message) {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('import:progress', message);
-}
-
-function sendOcrProgress(message) {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('ocr:progress', message);
+/** Drop the cached sheet payloads after any write that can change a number. */
+function invalidateSheets() {
+  sheetsCache = null;
+  lastAnalysis = null;
 }
 
 /** Append a read-audit row for the current session. Never throws. */
@@ -124,6 +118,58 @@ function assertTemplatePath(filePath) {
   return filePath;
 }
 
+/** Push a progress line to the window that started the operation. Never throws. */
+function sendImportProgress(sender, payload) {
+  try {
+    if (!sender || sender.isDestroyed()) return;
+    sender.send('import:progress', payload);
+  } catch {
+    /* progress is advisory: a closed window must never fail the import */
+  }
+}
+
+/** Canonical form of a path, or null when the file cannot be resolved. */
+function safeRealpath(filePath) {
+  try {
+    return fs.realpathSync(String(filePath));
+  } catch {
+    return null;
+  }
+}
+
+/** Windows paths compare case-insensitively. */
+function comparePath(value) {
+  const text = String(value);
+  return process.platform === 'win32' ? text.toLowerCase() : text;
+}
+
+/** True when `candidate` is `root` itself or lives below it. */
+function isInsideRoot(candidate, root) {
+  const target = comparePath(candidate);
+  const base = comparePath(root);
+  return target === base || target.startsWith(base.endsWith(path.sep) ? base : `${base}${path.sep}`);
+}
+
+/**
+ * Prove a template path is inside a trusted root before anything opens it.
+ *
+ * `realpathSync` collapses `..` and symbolic links first, so a path that merely
+ * looks like it lives under the data directory cannot be used to reach a file
+ * elsewhere. The only trusted roots are the application's own userData
+ * directory and the exact path the main process returned from the open dialog.
+ */
+function assertAllowedTemplatePath(filePath) {
+  const resolved = safeRealpath(filePath);
+  if (!resolved) throw new Error('تعذّر الوصول إلى ملف القالب في المسار المحدد.');
+  const userDataRoot = safeRealpath(app.getPath('userData')) ?? path.resolve(app.getPath('userData'));
+  const allowed = isInsideRoot(resolved, userDataRoot)
+    || (dialogSelectedPath ? comparePath(resolved) === comparePath(dialogSelectedPath) : false);
+  if (!allowed) {
+    throw new Error('مسار الملف غير مسموح. اختر ملف القالب من نافذة الاختيار التي يفتحها التطبيق.');
+  }
+  return resolved;
+}
+
 /** Validate the calibration thresholds coming from the renderer. */
 function validateCalibration(kThreshold, deprivationLine) {
   if (kThreshold !== undefined && kThreshold !== null) {
@@ -141,36 +187,19 @@ function validateCalibration(kThreshold, deprivationLine) {
 }
 
 /**
- * A small JPEG preview of the recognised image, so the reviewer can compare the
- * proposal with the page instead of trusting OCR blindly. PDF pages are not
- * previewed here: the entry screen reads them page by page and a single image
- * would misrepresent the source.
+ * The application window.
+ *
+ * DevTools and the default menu are disabled in a packaged build: the renderer
+ * can reach every channel through `window.localApp`, so leaving them available
+ * would turn the app into a full data reader for anyone at the keyboard.
  */
-async function previewDataUrl(filePath) {
-  const extension = path.extname(String(filePath)).toLowerCase();
-  if (!IMAGE_EXTENSIONS.has(extension)) return null;
-  try {
-    const { createCanvas, loadImage } = require('@napi-rs/canvas');
-    const image = await loadImage(filePath);
-    const max = 1100;
-    const scale = Math.min(1, max / Math.max(image.width, image.height));
-    const width = Math.max(1, Math.round(image.width * scale));
-    const height = Math.max(1, Math.round(image.height * scale));
-    const canvas = createCanvas(width, height);
-    canvas.getContext('2d').drawImage(image, 0, 0, width, height);
-    return `data:image/jpeg;base64,${canvas.toBuffer('image/jpeg', 82).toString('base64')}`;
-  } catch {
-    return null;
-  }
-}
-
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1500,
     height: 980,
     minWidth: 1060,
     minHeight: 720,
-    backgroundColor: '#f3f6f8',
+    backgroundColor: '#0b1322',
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -283,10 +312,8 @@ function registerHandlers() {
     if (database) database.close();
     database = undefined;
     // Anything cached from the unlocked session must not survive the lock.
-    pendingTemplate = null;
-    lastAnalysis = null;
-    ocrCancelled = false;
-    ocrRunning = false;
+    pendingPlan = null;
+    invalidateSheets();
     return { success: true };
   });
 
@@ -323,112 +350,21 @@ function registerHandlers() {
     return { profile: next, label: security.PROFILE_LABELS[next] };
   });
 
-  ipcMain.handle('data:overview', () => {
-    const db = requireDatabase();
-    const overview = {
-      records: db.prepare('SELECT COUNT(DISTINCT governorate || char(31) || district || char(31) || subdistrict || char(31) || settlement || char(31) || record_type || char(31) || record_id) AS count FROM data_values').get().count,
-      values: db.prepare('SELECT COUNT(*) AS count FROM data_values').get().count,
-      pending: db.prepare("SELECT COUNT(*) AS count FROM review_items WHERE status = 'pending'").get().count,
-      conflicts: db.prepare("SELECT COUNT(*) AS count FROM review_items WHERE status = 'conflict'").get().count,
-      batches: db.prepare('SELECT COUNT(*) AS count FROM import_batches').get().count,
-      recent: db.prepare('SELECT id, file_name, file_type, item_count, status, created_at FROM import_batches ORDER BY id DESC LIMIT 6').all(),
-    };
-    auditRead('data:overview', { entity: 'data_values', rowCount: overview.values });
-    return overview;
-  });
 
-  ipcMain.handle('data:imports', () => {
-    const rows = requireDatabase().prepare('SELECT id, file_name, file_type, file_size, item_count, status, warnings_json, created_at FROM import_batches ORDER BY id DESC LIMIT 100').all();
-    auditRead('data:imports', { entity: 'import_batches', rowCount: rows.length, detail: rows.length >= 100 ? 'capped-100' : 'complete' });
-    return rows;
-  });
 
-  ipcMain.handle('data:values', () => {
-    const profile = currentProfile();
-    const rows = requireDatabase().prepare('SELECT id, governorate, district, subdistrict, settlement, record_type, record_id, field_name, value_text, source_file, source_location, imported_at FROM data_values ORDER BY imported_at DESC LIMIT 1000').all();
-    const filtered = profile === 'shared'
-      ? rows.filter((row) => {
-        const match = matchHeader(row.field_name);
-        return !(match?.key && security.PROTECTED_KEYS.includes(match.key));
-      })
-      : rows;
-    auditRead('data:values', {
-      entity: 'data_values',
-      rowCount: filtered.length,
-      result: profile === 'shared' ? 'masked' : 'ok',
-      detail: profile === 'shared' ? `hidden=${rows.length - filtered.length};capped-1000` : 'capped-1000',
-    });
-    return filtered;
-  });
 
-  ipcMain.handle('review:list', (_event, filters = {}) => {
-    const status = ['pending', 'accepted', 'rejected', 'conflict'].includes(filters.status) ? filters.status : 'pending';
-    const batchId = Number.isInteger(Number(filters.batchId)) && Number(filters.batchId) > 0 ? Number(filters.batchId) : null;
-    const limit = Math.min(500, Math.max(1, Number(filters.limit) || 200));
-    const db = requireDatabase();
-    const rows = batchId
-      ? db.prepare('SELECT r.*, b.file_name FROM review_items r JOIN import_batches b ON b.id=r.batch_id WHERE r.status=? AND r.batch_id=? ORDER BY r.id LIMIT ?').all(status, batchId, limit)
-      : db.prepare('SELECT r.*, b.file_name FROM review_items r JOIN import_batches b ON b.id=r.batch_id WHERE r.status=? ORDER BY r.id DESC LIMIT ?').all(status, limit);
-    auditRead('review:list', { entity: 'review_items', rowCount: rows.length, detail: `status=${status};batch=${batchId ?? 'all'};capped-${limit}` });
-    return rows;
-  });
 
-  ipcMain.handle('import:select-and-extract', async () => {
-    const db = requireDatabase();
-    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-      title: 'اختر ملفًا محليًا للاستيراد',
-      properties: ['openFile'],
-      filters: [{ name: 'ملفات البيانات', extensions: ['xlsx', 'pdf', 'docx'] }],
-    });
-    if (canceled || !filePaths.length) return { canceled: true };
-    sendProgress({ stage: 'extracting', message: 'جارٍ استخراج النصوص محليًا...' });
-    try {
-      const extracted = await extractFile(filePaths[0]);
-      if (!extracted.items.length) throw new Error('لم يُعثر على قيم قابلة للعرض للمراجعة في هذا الملف.');
-      const batchId = saveImportBatch(db, extracted);
-      auditRead('import:select-and-extract', { entity: 'import_batches', entityId: batchId, rowCount: extracted.items.length });
-      return { canceled: false, batchId, fileName: extracted.fileName, itemCount: extracted.items.length, pages: extracted.pages, truncated: extracted.truncated, warnings: extracted.warnings || [] };
-    } finally {
-      sendProgress({ stage: 'done', message: '' });
-    }
-  });
 
-  ipcMain.handle('review:update', (_event, item) => {
-    const result = updateReviewItem(requireDatabase(), item);
-    auditRead('review:update', { entity: 'review_items', entityId: item?.id, result: result.success ? 'ok' : 'refused', detail: result.message ?? '' });
-    return result;
-  });
 
-  ipcMain.handle('review:resolve', (_event, request) => {
-    const result = resolveReviewItems(requireDatabase(), request);
-    auditRead('review:resolve', {
-      entity: 'review_items',
-      rowCount: Array.isArray(request?.ids) ? request.ids.length : null,
-      result: request?.action ?? 'unknown',
-      detail: `accepted=${result.accepted};rejected=${result.rejected};conflicts=${result.conflicts};ignored=${result.ignored}`,
-    });
-    return result;
-  });
 
-  // ---- Review -> analysis bridge -------------------------------------------
-  ipcMain.handle('bridge:candidates', () => {
-    const db = requireDatabase();
-    const candidates = bridge.listCandidates(db);
-    auditRead('bridge:candidates', { entity: 'data_values', rowCount: candidates.length });
-    return { candidates, total: candidates.length, pending: candidates.filter((entry) => !entry.directorateId).length };
-  });
-
-  ipcMain.handle('bridge:run', (_event, request = {}) => {
-    const db = requireDatabase();
-    const result = bridge.bridgeAll(db, { keys: request.keys });
-    lastAnalysis = null;
-    auditRead('bridge:run', { entity: 'directorates', rowCount: result.total, detail: `created=${result.created};updated=${result.updated};skipped=${result.skipped}` });
-    return result;
-  });
-
-  ipcMain.handle('analysis:read-template', async (_event, request = {}) => {
+  // ---- Excel import: scan -> plan -> apply ---------------------------------
+  // The workbook is the only entry point: it is read and turned into an explicit
+  // plan first, so nothing reaches the database before a human has seen what the
+  // plan intends to do with each row.
+  ipcMain.handle('import:scan', async (event, request = {}) => {
     let filePath = request.filePath;
     if (!filePath) {
+      sendImportProgress(event.sender, { phase: 'dialog', message: 'جارٍ فتح نافذة اختيار الملف...' });
       const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
         title: 'اختر ملف «القالب المحدث» (قاعدة البيانات الشاملة)',
         properties: ['openFile'],
@@ -436,46 +372,117 @@ function registerHandlers() {
       });
       if (canceled || !filePaths.length) return { canceled: true };
       filePath = filePaths[0];
+      // The dialog is the trust boundary: this exact path is the one exception to
+      // the userData allowlist below.
+      dialogSelectedPath = safeRealpath(filePath) ?? filePath;
     }
-    filePath = assertTemplatePath(filePath);
+    filePath = assertAllowedTemplatePath(assertTemplatePath(filePath));
+    sendImportProgress(event.sender, { phase: 'reading', message: 'جارٍ قراءة الملف...' });
+    const db = requireDatabase();
     const read = await readDirectorateWorkbook(filePath);
-    pendingTemplate = { filePath, read };
-    lastAnalysis = null;
-    persist.logAccess(requireDatabase(), { action: 'template-read', entity: 'workbook', entityId: filePath, detail: `rows=${read.totalRows};sheet=${read.sheetName}` });
-    auditRead('analysis:read-template', { entity: 'workbook', entityId: filePath, rowCount: read.totalRows });
-    return {
-      canceled: false,
-      filePath,
-      fileName: read.fileName,
-      sheetName: read.sheetName,
-      headerRow: read.headerRow,
-      totalRows: read.totalRows,
-      matchedCount: read.matched.length,
-      missingInputs: read.missingInputs,
-      duplicates: read.duplicates,
-      warnings: read.warnings,
-      preview: read.rows.slice(0, 12).map((row) => ({
-        districtName: row.districtName,
-        governorate: row.governorate,
-        rowNumber: row.rowNumber,
-      })),
-    };
+    sendImportProgress(event.sender, { phase: 'plan', message: `قُرئ الملف (${read.rows?.length ?? 0} صفًا) — جارٍ بناء خطة الاستيراد...` });
+    const plan = buildImportPlan(db, read, { fileName: read.fileName, sheetName: read.sheetName });
+    pendingPlan = { filePath, read, plan };
+    persist.logAccess(db, {
+      action: 'excel-scan',
+      entity: 'workbook',
+      entityId: filePath,
+      detail: `rows=${plan.totalRows};created=${plan.scope.create};updated=${plan.scope.update};blocked=${plan.scope.blocked}`,
+    });
+    auditRead('import:scan', { entity: 'workbook', entityId: filePath, rowCount: plan.totalRows });
+    sendImportProgress(event.sender, { phase: 'done', message: `الخطة جاهزة: ${plan.totalRows} صفًا.` });
+    return { canceled: false, filePath, ...summarizePlan(plan) };
   });
 
-  ipcMain.handle('analysis:commit-template', () => {
+  ipcMain.handle('import:plan', () => {
+    if (!pendingPlan) throw new Error('لم يُقرأ أي ملف بعد. اختر ملف القالب أولًا.');
+    auditRead('import:plan', { entity: 'workbook', entityId: pendingPlan.filePath, rowCount: pendingPlan.plan.totalRows });
+    return summarizePlan(pendingPlan.plan, 5000);
+  });
+
+  ipcMain.handle('import:apply', (event, request = {}) => {
     const db = requireDatabase();
-    if (!pendingTemplate) throw new Error('لم يُقرأ أي ملف بعد. اختر ملف القالب أولًا.');
-    const counts = persist.upsertDirectorates(db, pendingTemplate.read);
-    lastAnalysis = null;
-    auditRead('analysis:commit-template', { entity: 'directorates', rowCount: counts.total, detail: `created=${counts.created};updated=${counts.updated}` });
-    return { ...counts, fileName: pendingTemplate.read.fileName, sheetName: pendingTemplate.read.sheetName };
+    if (!pendingPlan) throw new Error('لا توجد خطة استيراد جاهزة. اختر ملف القالب أولًا.');
+    const total = pendingPlan.plan.rows?.length ?? 0;
+    // The whole apply is a single database transaction, so the main process
+    // cannot interleave messages between individual rows; the progress line
+    // marks the start and end of that transaction instead of faking per-row
+    // ticks that would only be delivered after it finished anyway.
+    sendImportProgress(event.sender, { phase: 'apply', current: 0, total, message: `جارٍ تطبيق الخطة على ${total} صفًا...` });
+    const result = applyImportPlan(db, pendingPlan.plan, { decisions: request.decisions, force: request.force });
+    invalidateSheets();
+    auditRead('import:apply', {
+      entity: 'directorates',
+      entityId: pendingPlan.filePath,
+      rowCount: result.applied,
+      result: result.refused.length ? 'partial' : 'ok',
+      detail: `created=${result.created};updated=${result.updated};refused=${result.refused.length};skipped=${result.skipped.length}`,
+    });
+    sendImportProgress(event.sender, {
+      phase: 'done',
+      current: result.applied,
+      total,
+      message: `اكتمل الاستيراد: ${result.created} إضافة، ${result.updated} تحديث، ${result.refused.length} محجوب.`,
+    });
+    return { ...result, fileName: pendingPlan.plan.fileName, sheetName: pendingPlan.plan.sheetName };
+  });
+
+  // ---- The five workbook sheets, rendered from stored data ------------------
+  // One engine pass, cached per access profile: the dashboard and the indicators
+  // do not depend on the ranking mode, so `mode` is not part of the cache key and
+  // switching it only rebuilds the ranking.
+  function sheetPayloads(mode = 'calibrated') {
+    const profile = currentProfile();
+    if (!sheetsCache || sheetsCache.profile !== profile) {
+      const transformRows = profile === 'shared'
+        ? (rows) => rows.map((row) => {
+          const values = { ...row.values };
+          for (const key of security.PROTECTED_KEYS) delete values[key];
+          return { ...row, values };
+        })
+        : null;
+      // The sheets never render the sensitivity study: the engine pass behind them
+      // runs without it so opening a sheet does not pay for an unused analysis.
+      const payload = buildSheets(requireDatabase(), { transformRows, mode: 'calibrated', sensitivity: false });
+      sheetsCache = { profile, payload, rankings: { calibrated: payload.ranking } };
+    }
+    if (!sheetsCache.rankings[mode]) {
+      sheetsCache.rankings[mode] = buildRanking(sheetsCache.payload.analysis, {
+        mode,
+        calibration: sheetsCache.payload.ranking?.calibration ?? null,
+      });
+    }
+    return { ...sheetsCache.payload, ranking: sheetsCache.rankings[mode] };
+  }
+
+  ipcMain.handle('sheet:dashboard', () => {
+    const payload = sheetPayloads();
+    auditRead('sheet:dashboard', { entity: 'directorates', rowCount: payload.dashboard.totals.directorates });
+    return { ...payload.dashboard, generatedAt: payload.generatedAt, profile: currentProfile() };
+  });
+
+  ipcMain.handle('sheet:indicators', () => {
+    const payload = sheetPayloads();
+    auditRead('sheet:indicators', { entity: 'directorates', rowCount: payload.indicators.rows.length });
+    return payload.indicators;
+  });
+
+  ipcMain.handle('sheet:ranking', (_event, request = {}) => {
+    const mode = request.mode === 'replica' ? 'replica' : 'calibrated';
+    const payload = sheetPayloads(mode);
+    auditRead('sheet:ranking', {
+      entity: 'directorates',
+      rowCount: payload.ranking.ranked.length,
+      detail: `mode=${mode};waiting=${payload.ranking.excluded.waiting};anomalies=${payload.ranking.excluded.anomalies}`,
+    });
+    return payload.ranking;
   });
 
   ipcMain.handle('analysis:run', (_event, request = {}) => {
     const db = requireDatabase();
     validateCalibration(request.kThreshold, request.deprivationLine);
     const rows = persist.loadAnalysisRows(db, request.filter ?? {});
-    if (!rows.length) throw new Error('لا توجد مديريات في قاعدة البيانات. استورد ملف القالب أولًا أو رحّل القيم المعتمدة من شاشة المراجعة.');
+    if (!rows.length) throw new Error('لا توجد مديريات في قاعدة البيانات. استورد ملف «القالب المحدث» أولًا.');
     if (request.weights) {
       const check = validateWeights(request.weights);
       if (!check.valid) throw new Error(`أوزان غير صالحة: ${check.errors.join(' ')}`);
@@ -489,10 +496,14 @@ function registerHandlers() {
     // Only a successfully persisted run may become the exportable "last analysis",
     // so exports never silently carry a run that was never written to the store.
     const saved = request.save === false ? null : persist.saveRun(db, analysis, {
-      templateFile: pendingTemplate?.read?.fileName ?? analysis.meta?.template?.fileName ?? null,
-      templateSheet: pendingTemplate?.read?.sheetName ?? analysis.meta?.template?.sheet ?? null,
+      templateFile: pendingPlan?.plan?.fileName ?? analysis.meta?.template?.fileName ?? null,
+      templateSheet: pendingPlan?.plan?.sheetName ?? analysis.meta?.template?.sheet ?? null,
       mode: 'both',
     });
+    // A new run makes every cached sheet number stale. Invalidated before the
+    // fresh analysis is stored in memory, because the cache reset also drops
+    // `lastAnalysis` (which exports read).
+    invalidateSheets();
     lastAnalysis = analysis;
     const profile = security.getAccessProfile(db);
     auditRead('analysis:run', {
@@ -551,7 +562,7 @@ function registerHandlers() {
     const check = validateWeights(weights);
     if (!check.valid) throw new Error(`أوزان غير صالحة: ${check.errors.join(' ')}`);
     const saved = persist.setWeights(db, weights, request.note ?? null, request.name ?? 'default');
-    lastAnalysis = null;
+    invalidateSheets();
     persist.logAccess(db, { action: 'weights-update', entity: 'analysis_weights', entityId: saved?.id ?? '', detail: request.note ?? '' });
     return saved;
   });
@@ -588,7 +599,14 @@ function registerHandlers() {
     });
     const row = persist.rowFromDirectorate(masked.record);
     auditRead('analysis:directorate:get-provenance', { entity: 'directorate_sources', entityId: id, rowCount: Object.keys(row.sources ?? {}).length });
-    const sources = db.prepare('SELECT field_key, value_text, source_file, source_location, data_value_id, captured_at FROM directorate_sources WHERE directorate_id = ?').all(Number(id));
+    const sourceRows = db.prepare('SELECT field_key, value_text, source_file, source_location, data_value_id, captured_at FROM directorate_sources WHERE directorate_id = ?').all(Number(id));
+    // `value_text` is the raw cell text behind a field. The record above is already
+    // masked under the shared profile, so the provenance rows must be redacted on
+    // the same keys or the masked value would simply leak through this channel.
+    // The source file and location stay: they carry no field value.
+    const sources = profile === 'shared'
+      ? sourceRows.map((source) => (security.isProtected(source.field_key, profile) ? { ...source, value_text: null } : source))
+      : sourceRows;
     return { ...row, masked: masked.masked, sources };
   });
 
@@ -606,8 +624,9 @@ function registerHandlers() {
       payload = { ...request, values };
     }
     const saved = persist.saveManualDirectorate(db, payload);
-    // Any manual change invalidates the in-memory run used by exports.
-    lastAnalysis = null;
+    // Any manual change invalidates the in-memory run used by exports and the
+    // cached sheet numbers.
+    invalidateSheets();
     auditRead('analysis:directorate:save', {
       entity: 'directorates',
       entityId: saved.id,
@@ -620,7 +639,7 @@ function registerHandlers() {
   ipcMain.handle('analysis:directorate:delete', (_event, id) => {
     const db = requireDatabase();
     const removed = persist.deleteDirectorate(db, id);
-    lastAnalysis = null;
+    invalidateSheets();
     auditRead('analysis:directorate:delete', { entity: 'directorates', entityId: id });
     return removed;
   });
@@ -634,90 +653,16 @@ function registerHandlers() {
   ipcMain.handle('analysis:directorate:restore', (_event, versionId) => {
     const db = requireDatabase();
     const restored = persist.restoreDirectorateVersion(db, versionId);
-    lastAnalysis = null;
+    invalidateSheets();
     auditRead('analysis:directorate:restore', { entity: 'directorate_versions', entityId: versionId, detail: `directorate=${restored.id}` });
     return restored;
   });
 
-  // ---- OCR ----------------------------------------------------------------
-  ipcMain.handle('analysis:ocr-read', async () => {
-    const db = requireDatabase();
-    if (ocrRunning) throw new Error('هناك قراءة OCR جارية بالفعل. انتظر انتهاءها أو ألغِها.');
-    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-      title: 'اختر صورة أو PDF لقراءتها بالـOCR',
-      properties: ['openFile'],
-      filters: [{ name: 'صور وPDF', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tif', 'tiff', 'pdf'] }],
-    });
-    if (canceled || !filePaths.length) return { canceled: true };
-
-    ocrRunning = true;
-    ocrCancelled = false;
-    sendOcrProgress({ stage: 'start', message: 'جارٍ تحضير الصفحة (رمادي، تباين، تصحيح ميل)...' });
-    try {
-      const signal = { get aborted() { return ocrCancelled; } };
-      const recognized = await recognizeEntryFile(filePaths[0], {
-        signal,
-        onProgress: (message) => sendOcrProgress({ stage: 'ocr', ...message }),
-      });
-      if (ocrCancelled) throw new Error('أُلغي التعرف الضوئي بطلب منك.');
-
-      const parsed = recognized.parsed ?? {};
-      const draft = persist.saveOcrDraft(db, { ...recognized, parsed });
-      const preview = await previewDataUrl(filePaths[0]);
-      const text = String(recognized.text ?? '');
-      const textLimit = 50000;
-      persist.logAccess(db, {
-        action: 'ocr-entry',
-        entity: 'file',
-        entityId: filePaths[0],
-        detail: `fields=${Object.keys(parsed.fields ?? {}).length};draft=${draft.draftId}`,
-      });
-      auditRead('analysis:ocr-read', { entity: 'ocr_drafts', entityId: draft.draftId, rowCount: draft.fields });
-      return {
-        canceled: false,
-        draftId: draft.draftId,
-        fileName: recognized.fileName,
-        fileType: recognized.fileType,
-        fileSize: recognized.fileSize,
-        confidence: recognized.confidence,
-        pages: recognized.pages,
-        pagesRead: recognized.pagesRead ?? recognized.pages,
-        truncated: Boolean(recognized.truncated || parsed.truncated),
-        warnings: recognized.warnings ?? [],
-        preprocessing: recognized.preprocessing ?? null,
-        preview,
-        text: text.slice(0, textLimit),
-        textTruncated: text.length > textLimit,
-        parsed: {
-          fields: parsed.fields ?? {},
-          unmatched: parsed.unmatched ?? [],
-          warnings: parsed.warnings ?? [],
-          crossField: parsed.crossField ?? [],
-          summary: parsed.summary ?? null,
-        },
-      };
-    } finally {
-      ocrRunning = false;
-      sendOcrProgress({ stage: 'done', message: '' });
-    }
-  });
-
-  ipcMain.handle('analysis:ocr-cancel', async () => {
-    ocrCancelled = true;
-    await ocr.cancelRecognition();
-    auditRead('analysis:ocr-cancel', { entity: 'ocr_drafts', result: 'cancelled' });
-    return { success: true };
-  });
-
-  ipcMain.handle('analysis:ocr-decision', (_event, request = {}) => {
-    const result = persist.recordOcrDecision(requireDatabase(), request);
-    auditRead('analysis:ocr-decision', { entity: 'ocr_field_confidence', entityId: request.draftId, result: request.decision, detail: request.fieldKey });
-    return result;
-  });
-
-  ipcMain.handle('analysis:ocr-drafts', (_event, request = {}) => persist.listOcrDrafts(requireDatabase(), request.limit ?? 50));
-
-  ipcMain.handle('analysis:ocr-draft', (_event, id) => persist.getOcrDraft(requireDatabase(), id));
+  // ---- OCR removed ---------------------------------------------------------
+  // Scanning was removed from the product on the user's request: the workbook is
+  // the only entry path. The `ocr_drafts` and `ocr_field_confidence` tables are
+  // kept in the schema (never dropping an existing table) but nothing writes to
+  // them any more, and no channel exposes them.
 
   // ---- Exports ------------------------------------------------------------
   ipcMain.handle('analysis:export-excel', async () => {
@@ -761,46 +706,6 @@ function registerHandlers() {
     return { canceled: false, ...result };
   });
 
-  ipcMain.handle('data:export', async () => {
-    const db = requireDatabase();
-    const profile = security.getAccessProfile(db);
-    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-      title: 'تصدير السجلات المعتمدة',
-      defaultPath: 'بيانات-التنمية-المحلية.xlsx',
-      filters: [{ name: 'Excel', extensions: ['xlsx'] }],
-    });
-    if (canceled || !filePath) return { canceled: true };
-    const workbook = new ExcelJS.Workbook();
-    workbook.creator = 'نظام التنمية المحلية';
-    workbook.created = new Date();
-    const sheet = workbook.addWorksheet('القيم المعتمدة', { views: [{ state: 'frozen', ySplit: 1, rightToLeft: true }] });
-    sheet.columns = [
-      { header: 'المحافظة', key: 'governorate', width: 20 }, { header: 'المديرية', key: 'district', width: 20 },
-      { header: 'العزلة', key: 'subdistrict', width: 20 }, { header: 'التجمع/القرية', key: 'settlement', width: 24 },
-      { header: 'نوع السجل', key: 'record_type', width: 18 }, { header: 'معرّف السجل', key: 'record_id', width: 18 },
-      { header: 'الحقل', key: 'field_name', width: 32 }, { header: 'القيمة', key: 'value_text', width: 40 },
-      { header: 'ملف المصدر', key: 'source_file', width: 34 }, { header: 'موضع المصدر', key: 'source_location', width: 42 },
-      { header: 'تاريخ الاعتماد', key: 'imported_at', width: 26 },
-    ];
-    sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF18324B' } };
-    let rows = db.prepare('SELECT governorate,district,subdistrict,settlement,record_type,record_id,field_name,value_text,source_file,source_location,imported_at FROM data_values ORDER BY governorate,district,subdistrict,settlement,record_type,record_id,field_name').all();
-    let hiddenCount = 0;
-    if (profile === 'shared') {
-      rows = rows.filter((row) => {
-        const match = matchHeader(row.field_name);
-        const hidden = Boolean(match?.key && security.PROTECTED_KEYS.includes(match.key));
-        if (hidden) hiddenCount += 1;
-        return !hidden;
-      });
-      sheet.addRow(['— ملاحظة —', `وضع المشاركة: حُجبت ${hiddenCount} قيمة مقيّدة/حساسة من هذا الملف.`]);
-    }
-    sheet.addRows(rows);
-    await workbook.xlsx.writeFile(filePath);
-    persist.logAccess(db, { action: 'data-export', entity: 'file', entityId: filePath, detail: `profile=${profile};rows=${rows.length};hidden=${hiddenCount}` });
-    auditRead('data:export', { entity: 'file', entityId: filePath, rowCount: rows.length, result: profile === 'shared' ? 'masked' : 'ok', detail: `hidden=${hiddenCount}` });
-    return { canceled: false, filePath, hiddenCount };
-  });
 }
 
 /** Re-run the analysis from the database when nothing is cached in memory. */
@@ -845,7 +750,6 @@ if (!gotSingleInstanceLock) {
 app.on('before-quit', () => {
   if (database) database.close();
   database = undefined;
-  ocr.disposeWorker().catch(() => {});
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

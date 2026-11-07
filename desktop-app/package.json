@@ -1,6 +1,6 @@
 {
   "name": "local-development-intelligence",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "نظام محلي لإدارة بيانات التنمية والتحليل القطاعي",
   "author": "Local Development Intelligence",
@@ -20,16 +20,11 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "@napi-rs/canvas": "1.1.0",
-    "@tesseract.js-data/ara": "1.0.0",
     "better-sqlite3-multiple-ciphers": "13.0.3",
     "exceljs": "4.4.0",
     "lucide-react": "^0.468.0",
-    "mammoth": "1.13.0",
-    "pdfjs-dist": "6.5.438",
     "react": "19.3.1",
-    "react-dom": "19.3.1",
-    "tesseract.js": "7.0.0"
+    "react-dom": "19.3.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.0",
@@ -48,13 +43,7 @@
     "asar": true,
     "npmRebuild": false,
     "asarUnpack": [
-      "node_modules/better-sqlite3-multiple-ciphers/**",
-      "node_modules/tesseract.js-core/**",
-      "node_modules/tesseract.js/src/worker-script/node/**",
-      "node_modules/@tesseract.js-data/**",
-      "node_modules/@napi-rs/**",
-      "node_modules/pdfjs-dist/**",
-      "node_modules/tesseract.js/**"
+      "node_modules/better-sqlite3-multiple-ciphers/**"
     ],
     "files": [
       "dist/**",
@@ -81,9 +70,5 @@
       "installerHeaderIcon": "build/icon.ico",
       "shortcutName": "نظام التنمية المحلية"
     }
-  },
-  "optionalDependencies": {
-    "@napi-rs/canvas-linux-arm64-gnu": "^1.1.0",
-    "@napi-rs/canvas-win32-x64-msvc": "^1.1.0"
   }
 }

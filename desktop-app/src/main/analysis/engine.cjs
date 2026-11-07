@@ -48,7 +48,7 @@ function analyze(rows, options = {}) {
     };
   });
 
-  // 2. Mode A — faithful replication of column AZ.
+  // 2. Mode A — weighted composite (linear sum of the twelve dimensions).
   const replicaRun = replicaComposite(analysed, { weights });
   analysed.forEach((row, index) => {
     const result = replicaRun.results[index];
@@ -156,8 +156,8 @@ function analyze(rows, options = {}) {
       minWeightCoverage: CALIBRATION.minWeightCoverage,
       template: TEMPLATE,
       modes: {
-        replica: 'مطابقة حرفية لمعادلة AZ في القالب (الفراغ = صفر)',
-        calibrated: 'معايرة مطلقة بنقاط مرجعية ثابتة + تعداد الأبعاد المتدهورة',
+        replica: 'المؤشر المرجّح: جمع خطي للأبعاد الموزونة (الفراغ = صفر)',
+        calibrated: 'مؤشر الاحتياج المعاير: نقاط مرجعية ثابتة + تعداد الأبعاد المتدهورة',
       },
     },
     rows: analysed,

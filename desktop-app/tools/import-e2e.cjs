@@ -1,6 +1,7 @@
 /*
- * Full round trip against the packaged app: unlock -> import a real workbook via the
- * native dialog -> review -> approve one value -> export to Excel -> verify the file.
+ * Full round trip against the packaged app: unlock -> scan a real workbook ->
+ * build the import plan -> decide rows -> apply -> read the three sheet views ->
+ * export to Excel -> verify the file.
  * Usage: node tools/import-e2e.cjs "<exe>" "<source xlsx>"
  */
 const { spawn, spawnSync } = require('node:child_process');
@@ -107,56 +108,62 @@ async function evalJs(cdp, expression, { awaitPromise = false, timeoutMs = 30000
     report.open = await evalJs(cdp, 'window.localApp.open()', { awaitPromise: true, timeoutMs: 30000 });
     log('open ' + JSON.stringify(report.open));
 
-    const importPromise = evalJs(cdp, 'window.localApp.selectAndExtract()', { awaitPromise: true, timeoutMs: 240000 });
-    await sleep(1500);
-    submitDialog(child.pid, inputPath);
-    report.import = await importPromise;
-    log('import ' + JSON.stringify({ batchId: report.import.batchId, count: report.import.itemCount }));
+    // The scan channel opens the native dialog only when no path is supplied, so
+    // the script hands the copied workbook over directly and reads back the plan.
+    report.scan = await evalJs(cdp, `window.localApp.scanWorkbook({ filePath: ${JSON.stringify(inputPath)} })`, {
+      awaitPromise: true,
+      timeoutMs: 240000,
+    });
+    if (report.scan?.canceled) throw new Error('scan canceled');
+    log('scan ' + JSON.stringify({ totalRows: report.scan.totalRows, scope: report.scan.scope }));
 
-    const pending = await evalJs(
-      cdp,
-      `window.localApp.reviewItems({ status: 'pending', batchId: ${Number(report.import.batchId)}, limit: 5 })`,
-      { awaitPromise: true }
-    );
-    report.pendingSample = pending.slice(0, 3).map((row) => ({
-      id: row.id,
-      field: row.field_name,
-      value: String(row.value_text).slice(0, 60),
-      location: row.source_location,
+    report.plan = await evalJs(cdp, 'window.localApp.importPlan()', { awaitPromise: true, timeoutMs: 120000 });
+    report.planSample = (report.plan.preview ?? []).slice(0, 3).map((row) => ({
+      rowNumber: row.rowNumber,
+      district: row.districtName,
+      action: row.action,
+      status: row.status,
+      issues: row.issues.map((issue) => issue.code),
     }));
+    log('plan ' + JSON.stringify({ totalRows: report.plan.totalRows, scope: report.plan.scope }));
 
-    if (pending.length) {
-      const first = pending[0];
-      report.update = await evalJs(
-        cdp,
-        `window.localApp.updateReviewItem(${JSON.stringify({
-          id: first.id,
-          fieldName: first.field_name,
-          value: String(first.value_text).slice(0, 200),
-          proposedType: first.proposed_type || 'دوري',
-          governorate: 'صنعاء',
-          district: 'همدان',
-          subdistrict: 'بعي',
-          settlement: 'بيت زيد',
-          recordId: 'e2e-record-1',
-        })})`,
-        { awaitPromise: true }
-      );
-      report.accept = await evalJs(cdp, `window.localApp.resolveReviewItems({ action: 'accept', ids: [${first.id}] })`, {
-        awaitPromise: true,
-      });
+    // Per-row decisions: blocked rows are skipped unless the run deliberately
+    // forces them, which is what the import-plan screen lets the operator do.
+    const decisions = {};
+    for (const row of report.plan.preview ?? []) {
+      decisions[row.rowNumber] = row.status === 'blocked' ? 'skip' : 'apply';
     }
+    report.decisions = {
+      rows: Object.keys(decisions).length,
+      skipped: Object.values(decisions).filter((decision) => decision === 'skip').length,
+    };
 
-    const approved = await evalJs(cdp, 'window.localApp.approvedValues()', { awaitPromise: true });
-    report.approvedCount = approved.length;
-    report.approvedSample = approved.slice(0, 2).map((row) => ({
-      field: row.field_name,
-      value: String(row.value_text).slice(0, 60),
-      governorate: row.governorate,
-      source: row.source_location,
-    }));
+    report.apply = await evalJs(
+      cdp,
+      `window.localApp.applyImport(${JSON.stringify({ decisions, force: false })})`,
+      { awaitPromise: true, timeoutMs: 240000 }
+    );
+    log(
+      'apply ' +
+        JSON.stringify({
+          created: report.apply.created,
+          updated: report.apply.updated,
+          refused: report.apply.refused?.length ?? 0,
+          skipped: report.apply.skipped?.length ?? 0,
+        })
+    );
 
-    const exportPromise = evalJs(cdp, 'window.localApp.exportApprovedData()', { awaitPromise: true, timeoutMs: 120000 });
+    report.dashboard = await evalJs(cdp, 'window.localApp.sheetDashboard()', { awaitPromise: true });
+    report.dashboardTotals = report.dashboard.totals;
+    report.indicators = await evalJs(cdp, 'window.localApp.sheetIndicators()', { awaitPromise: true });
+    report.indicatorRows = report.indicators.rows.length;
+    report.ranking = await evalJs(cdp, "window.localApp.sheetRanking({ mode: 'calibrated' })", { awaitPromise: true });
+    report.rankingCounts = { ranked: report.ranking.ranked.length, ...report.ranking.excluded };
+
+    report.run = await evalJs(cdp, 'window.localApp.runAnalysis({})', { awaitPromise: true, timeoutMs: 240000 });
+    report.runId = report.run?.runId ?? null;
+
+    const exportPromise = evalJs(cdp, 'window.localApp.exportAnalysisExcel()', { awaitPromise: true, timeoutMs: 120000 });
     await sleep(1500);
     submitDialog(child.pid, exportPath);
     report.export = await exportPromise;
@@ -165,13 +172,18 @@ async function evalJs(cdp, expression, { awaitPromise = false, timeoutMs = 30000
     const exportedFile = report.export?.filePath || exportPath;
     report.exportedFile = exportedFile;
 
-    await evalJs(
+    report.nav = await evalJs(
       cdp,
-      `(() => { const b = [...document.querySelectorAll('.nav-item')].find((n) => n.textContent.includes('مراجعة')); if (b) b.click(); return !!b; })()`
+      `(() => {
+        const wanted = ['ترتيب الأولويات', 'الأولويات', 'الترتيب'];
+        const item = [...document.querySelectorAll('.nav-item')].find((node) => wanted.some((label) => (node.textContent || '').includes(label)));
+        if (item) item.click();
+        return Boolean(item);
+      })()`
     );
     await sleep(1200);
     const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
-    fs.writeFileSync(path.join(__dirname, '..', 'screenshot-review.png'), Buffer.from(shot.data, 'base64'));
+    fs.writeFileSync(path.join(__dirname, '..', 'screenshot-sheets.png'), Buffer.from(shot.data, 'base64'));
 
     if (fs.existsSync(exportedFile)) {
       const ExcelJS = require(path.join(__dirname, '..', 'node_modules', 'exceljs'));
@@ -184,9 +196,10 @@ async function evalJs(cdp, expression, { awaitPromise = false, timeoutMs = 30000
     }
     report.passed =
       report.open?.success === true &&
-      report.import?.itemCount > 0 &&
-      report.accept?.accepted >= 1 &&
-      report.approvedCount >= 1 &&
+      report.scan?.totalRows > 0 &&
+      report.plan?.totalRows > 0 &&
+      report.apply?.applied >= 1 &&
+      report.dashboardTotals?.directorates >= 1 &&
       report.exportedRows >= 1;
   } catch (error) {
     report.error = error.message;

@@ -109,7 +109,7 @@ async function screenshot(cdp, file) {
       cdp,
       `({
         nav: document.querySelectorAll('.nav-item').length,
-        heroBanner: !!document.querySelector('.overview-hero-banner'),
+        heroBanner: !!document.querySelector('.hero'),
         sidebarLogo: !!document.querySelector('.brand-icon img'),
         error: (document.querySelector('.error-banner') || {}).textContent || ''
       })`

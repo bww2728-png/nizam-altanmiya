@@ -1,0 +1,20 @@
+{
+  "generatedAt": "2026-11-07T21:03:19.829Z",
+  "group": "security",
+  "total": 2,
+  "passed": 2,
+  "checks": [
+    {
+      "group": "security",
+      "name": "تبديل وضع الوصول يعمل ويُحفظ",
+      "ok": true,
+      "detail": "profile=shared"
+    },
+    {
+      "group": "security",
+      "name": "العودة إلى وضع المالك تعمل",
+      "ok": true,
+      "detail": "profile=owner"
+    }
+  ]
+}

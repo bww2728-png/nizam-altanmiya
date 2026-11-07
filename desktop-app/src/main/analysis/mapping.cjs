@@ -1,6 +1,7 @@
 'use strict';
 
-const { INPUT_FIELDS, DECISION_FIELD } = require('./schema.cjs');
+const { INPUT_FIELDS, DECISION_FIELD, MANDATORY_FIELDS } = require('./schema.cjs');
+const { DIRECTORATE_COLUMNS } = require('./store-schema.cjs');
 const { stripDiacritics, normalizeDigits } = require('./parse.cjs');
 
 /**
@@ -162,13 +163,23 @@ function scoreHeaderRow(cells) {
 
 /** Canonical field table for the UI ("mapping" screen). */
 function mappingTable() {
+  const mandatoryKeys = new Set(MANDATORY_FIELDS.map((field) => field.key));
   return FIELDS.map((field) => ({
     key: field.key,
     column: field.column,
+    // The database column matters to the UI because the browse table receives
+    // raw rows (snake_case) while the editor works with field keys.
+    dbColumn: DIRECTORATE_COLUMNS[field.key] ?? null,
     header: field.header,
     type: field.type,
     unit: field.unit ?? null,
     sensitivity: field.sensitivity,
+    // The interface uses these three flags to render required markers, the
+    // "must be positive" hint and the decision dropdown without duplicating the
+    // schema in the renderer.
+    mandatory: mandatoryKeys.has(field.key),
+    positive: Boolean(field.positive),
+    allowed: field.allowed ?? null,
     aliases: ALIASES[field.key] ?? [],
   }));
 }
