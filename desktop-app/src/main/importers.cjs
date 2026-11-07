@@ -2,6 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const ExcelJS = require('exceljs');
 const mammoth = require('mammoth');
+const ocr = require('./ocr-pipeline.cjs');
 
 const MAX_FILE_BYTES = 40 * 1024 * 1024;
 const MAX_ITEMS = 50000;
@@ -188,25 +189,32 @@ async function getPdfModule() {
   return import('pdfjs-dist/legacy/build/pdf.mjs');
 }
 
-async function createOcrWorker() {
-  const { createWorker } = require('tesseract.js');
-  const languageData = require('@tesseract.js-data/ara');
-  return createWorker('ara', 1, {
-    langPath: languageData.langPath,
-    gzip: true,
-    logger: () => {},
-  });
+/** Render a PDF page near 300 DPI, but never above the pipeline's edge cap. */
+function pdfRenderScale(viewport) {
+  const longest = Math.max(viewport.width, viewport.height);
+  const target = ocr.MAX_EDGE;
+  return Math.min(4.2, Math.max(1, target / Math.max(1, longest)));
 }
 
-async function ocrPdfPage(page, pdfjs, worker) {
+async function ocrPdfPage(page, pdfjs, fn) {
   const { createCanvas } = require('@napi-rs/canvas');
   const initialViewport = page.getViewport({ scale: 1 });
-  const scale = Math.min(1.7, 2200 / Math.max(initialViewport.width, initialViewport.height));
+  const scale = pdfRenderScale(initialViewport);
   const viewport = page.getViewport({ scale });
   const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
   await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-  const result = await withTimeout(worker.recognize(canvas.toBuffer('image/png')), OCR_TIMEOUT_MS, 'تجاوز التعرف الضوئي المهلة الزمنية. جرّب صورة أوضح أو أصغر.');
-  return { text: cleanText(result.data.text), confidence: Math.max(0, Math.min(1, result.data.confidence / 100)) };
+  const prepared = await ocr.preprocessImage(canvas.toBuffer('image/png'));
+  const recognition = await withTimeout(
+    ocr.recognizeBuffer(prepared.buffer, { psm: ocr.PSM.SINGLE_BLOCK, onProgress: fn, allowRotation: false }),
+    OCR_TIMEOUT_MS,
+    'تجاوز التعرف الضوئي المهلة الزمنية. جرّب صورة أوضح أو أصغر.',
+  );
+  return {
+    text: cleanText(recognition.text),
+    confidence: recognition.confidence,
+    lines: recognition.lines,
+    prepared,
+  };
 }
 
 function pdfTextLines(items) {
@@ -245,7 +253,6 @@ async function extractPdf(filePath) {
     cMapPacked: true,
   });
   const document = await loadingTask.promise;
-  let worker;
   const items = [];
   let recognizedPages = 0;
   try {
@@ -255,9 +262,8 @@ async function extractPdf(filePath) {
       const textContent = await page.getTextContent();
       let lines = pdfTextLines(textContent.items);
       let confidence = 0.95;
-      if (lines.join(' ').replace(/\s/g, '').length < 4) {
-        worker ||= await createOcrWorker();
-        const recognition = await ocrPdfPage(page, pdfjs, worker);
+      if (!ocr.textLayerIsUsable(lines.join('\n'))) {
+        const recognition = await ocrPdfPage(page, pdfjs, null);
         lines = recognition.text.split(/\r?\n/).map(cleanText).filter(Boolean);
         confidence = recognition.confidence;
         recognizedPages += 1;
@@ -278,7 +284,7 @@ async function extractPdf(filePath) {
       warnings: recognizedPages ? [`تم استخدام OCR العربي محليًا في ${recognizedPages} صفحة؛ راجع كل نتيجة قبل اعتمادها.`] : [],
     };
   } finally {
-    if (worker) await worker.terminate();
+    await ocr.disposeWorker();
     await loadingTask.destroy();
   }
 }
@@ -287,20 +293,46 @@ async function extractPdf(filePath) {
  * OCR for a single image file. Used by the manual-entry screen, where the user
  * photographs or scans a paper form and then reviews every recognised value.
  */
-async function extractImageText(filePath) {
-  const worker = await createOcrWorker();
-  try {
-    const buffer = await fs.readFile(filePath);
-    const result = await withTimeout(worker.recognize(buffer), OCR_TIMEOUT_MS, 'تجاوز التعرف الضوئي المهلة الزمنية. جرّب صورة أوضح أو أصغر.');
-    return {
-      text: cleanText(result.data.text),
-      confidence: Math.max(0, Math.min(1, result.data.confidence / 100)),
-      pages: 1,
-      warnings: ['تم استخدام OCR العربي محليًا؛ راجع كل قيمة قبل الحفظ.'],
-    };
-  } finally {
-    await worker.terminate();
+async function extractImageText(filePath, options = {}) {
+  const buffer = await fs.readFile(filePath);
+  const prepared = await ocr.preprocessImage(buffer);
+  const recognition = await withTimeout(
+    ocr.recognizeBuffer(prepared.buffer, {
+      psm: ocr.PSM.SINGLE_BLOCK,
+      onProgress: options.onProgress,
+      signal: options.signal,
+    }),
+    OCR_TIMEOUT_MS,
+    'تجاوز التعرف الضوئي المهلة الزمنية. جرّب صورة أوضح أو أصغر.',
+  );
+  const warnings = ['تم استخدام OCR العربي محليًا؛ راجع كل قيمة قبل الحفظ.'];
+  if (recognition.confidence < ocr.REVIEW_CONFIDENCE) {
+    warnings.push(`ثقة القراءة منخفضة (${Math.round(recognition.confidence * 100)}%)؛ راجع الصورة والقيم يدويًا.`);
   }
+  if (Math.abs(prepared.angle) >= 1) {
+    warnings.push(`صُحّح ميل الصفحة بمقدار ${prepared.angle.toFixed(1)} درجة.`);
+  }
+  if (recognition.rotation) warnings.push(`أُعيد تدوير الصورة ${recognition.rotation} درجة لتحسين القراءة.`);
+  return {
+    text: cleanText(recognition.text),
+    confidence: recognition.confidence,
+    lines: recognition.lines.map((line) => ({
+      text: line.text,
+      confidence: line.confidence,
+      page: 1,
+      bbox: line.bbox ?? null,
+    })),
+    pages: 1,
+    warnings,
+    preprocessing: {
+      angle: prepared.angle,
+      rotation: recognition.rotation ?? 0,
+      upscale: Math.round(prepared.upscale * 100) / 100,
+      contrast: prepared.contrast,
+      width: prepared.width,
+      height: prepared.height,
+    },
+  };
 }
 
 /**
@@ -308,7 +340,7 @@ async function extractImageText(filePath) {
  * `extractPdf` it keeps whole lines instead of splitting them into review
  * candidates, because the entry parser needs the original "label: value" shape.
  */
-async function extractPdfRawText(filePath) {
+async function extractPdfRawText(filePath, options = {}) {
   const pdfjs = await getPdfModule();
   const pdfjsRoot = path.resolve(path.dirname(require.resolve('pdfjs-dist/legacy/build/pdf.mjs')), '../..');
   const assetDir = (name) => path.join(pdfjsRoot, name).replaceAll(path.sep, '/') + '/';
@@ -326,29 +358,47 @@ async function extractPdfRawText(filePath) {
     try { await loadingTask.destroy(); } catch { /* best effort */ }
     throw error;
   }
-  let worker;
   const chunks = [];
   const confidences = [];
+  const lineRecords = [];
   let recognizedPages = 0;
+  let garbledPages = 0;
   try {
     const pageLimit = Math.min(document.numPages, 100);
     for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber += 1) {
+      if (options.signal?.aborted) throw new Error('أُلغي التعرف الضوئي.');
+      if (options.onProgress) {
+        options.onProgress({ status: 'reading-page', page: pageNumber, pages: pageLimit, progress: (pageNumber - 1) / pageLimit });
+      }
       const page = await document.getPage(pageNumber);
       const textContent = await page.getTextContent();
       let lines = pdfTextLines(textContent.items);
       let pageConfidence = 0.95;
-      if (lines.join(' ').replace(/\s/g, '').length < 4) {
-        worker ||= await createOcrWorker();
-        const recognition = await ocrPdfPage(page, pdfjs, worker);
+      const layerText = lines.join('\n');
+      if (!ocr.textLayerIsUsable(layerText)) {
+        if (layerText.trim()) garbledPages += 1;
+        const recognition = await ocrPdfPage(page, pdfjs, options.onProgress);
         lines = recognition.text.split(/\r?\n/).map(cleanText).filter(Boolean);
         pageConfidence = recognition.confidence;
+        for (const line of recognition.lines) {
+          lineRecords.push({ text: line.text, confidence: line.confidence, page: pageNumber, bbox: line.bbox ?? null });
+        }
         recognizedPages += 1;
+      } else {
+        for (const line of lines) {
+          // A usable text layer still gets a confidence: it is not OCR, but it is
+          // the only signal we have for "trust this line more than a guess".
+          lineRecords.push({ text: line, confidence: 0.95, page: pageNumber });
+        }
       }
       if (lines.length) chunks.push(lines.join('\n'));
       confidences.push(pageConfidence);
     }
     const warnings = [];
     if (recognizedPages) warnings.push(`تم استخدام OCR العربي محليًا في ${recognizedPages} صفحة؛ راجع كل نتيجة قبل الاعتماد.`);
+    if (garbledPages) {
+      warnings.push(`طبقة النص في ${garbledPages} صفحة كانت تالفة الترميز، فأُعيد قراءتها بالتصوير الضوئي بدلًا من تمريرها كما هي.`);
+    }
     const pagesRead = Math.min(document.numPages, pageLimit);
     if (document.numPages > pagesRead) {
       warnings.push(`قُرئت أول ${pagesRead} صفحة من ${document.numPages}؛ أكمل البيانات من الصفحات المتبقية يدويًا.`);
@@ -356,13 +406,13 @@ async function extractPdfRawText(filePath) {
     return {
       text: chunks.join('\n'),
       confidence: confidences.length ? Math.min(...confidences) : 0,
+      lines: lineRecords,
       pages: document.numPages,
       pagesRead,
       truncated: document.numPages > pagesRead,
       warnings,
     };
   } finally {
-    if (worker) await worker.terminate();
     await loadingTask.destroy();
   }
 }
@@ -372,7 +422,7 @@ async function extractPdfRawText(filePath) {
  * enforces the same local size limits as the generic importer, and never writes
  * anything: recognition is only a proposal the user must review.
  */
-async function extractEntryText(filePath) {
+async function extractEntryText(filePath, options = {}) {
   const resolvedPath = path.resolve(filePath);
   const extension = path.extname(resolvedPath).toLowerCase();
   if (!IMAGE_EXTENSIONS.has(extension) && extension !== '.pdf') {
@@ -381,7 +431,16 @@ async function extractEntryText(filePath) {
   const stats = await fs.stat(resolvedPath);
   if (!stats.isFile() || stats.size === 0) throw new Error('الملف فارغ أو غير صالح.');
   if (stats.size > MAX_FILE_BYTES) throw new Error('حجم الملف يتجاوز الحد المحلي البالغ 40 ميغابايت.');
-  const result = extension === '.pdf' ? await extractPdfRawText(resolvedPath) : await extractImageText(resolvedPath);
+  let result;
+  try {
+    result = extension === '.pdf'
+      ? await extractPdfRawText(resolvedPath, options)
+      : await extractImageText(resolvedPath, options);
+  } catch (error) {
+    // A failed read must not leave a half-initialised worker holding a thread.
+    await ocr.disposeWorker();
+    throw error;
+  }
   return {
     fileName: path.basename(resolvedPath),
     fileType: extension.slice(1),

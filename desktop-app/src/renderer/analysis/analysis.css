@@ -192,3 +192,25 @@
 .sensitivity-chip.restricted { border-color: #dcc9a4; }
 .sensitivity-chip.sensitive { border-color: #e6b8b4; background: #fdf1f0; color: #8a3029; }
 .sensitivity-chip em { font-style: normal; font-size: 9px; opacity: .75; }
+
+/* Decision transparency card (unit, source, decision) inside a row detail. */
+.decision-card{border:1px solid #e2ebf2;border-radius:10px;background:#f7fbfa;padding:12px 14px;margin-bottom:14px}
+.decision-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:#1d6f68}
+.decision-head strong{font-size:12px;color:#17324d}
+.decision-badge{margin-inline-start:auto;font-size:10px;background:#e8f2ef;border:1px solid #cfe4de;border-radius:999px;padding:3px 10px;color:#1f6b60}
+.decision-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;margin-top:10px}
+.decision-grid div{display:flex;flex-direction:column;gap:2px;background:#fff;border:1px solid #eaf0f4;border-radius:8px;padding:7px 9px}
+.decision-grid span{font-size:9.5px;color:#7b8b98}
+.decision-grid b{font-size:11.5px;color:#17324d;font-weight:600}
+.provenance-block{margin-top:12px}
+.provenance-block h4{font-size:11px;color:#3f5c73;margin:0 0 6px}
+.analysis-table.compact td,.analysis-table.compact th{font-size:10px;padding:5px 7px}
+.indicator-unit{font-style:normal;font-size:9px;color:#8a9aa7;margin-inline-start:3px}
+
+/* Derived donor-facing opportunity card. */
+.opportunity-card{border:1px solid #e6e0d2;border-radius:10px;background:#fdfaf3;padding:12px 14px;margin-bottom:14px}
+.opportunity-head{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap}
+.opportunity-head h4{margin:2px 0 0;font-size:13px;color:#7a5a24}
+.opportunity-need{margin-inline-start:auto;font-size:10px;background:#f6ecd8;border:1px solid #e8d9bb;border-radius:999px;padding:3px 10px;color:#8a5a1d}
+.opportunity-card .decision-grid div{background:#fffdf8;border-color:#efe7d7}
+.opportunity-card .muted{margin:8px 0 0;font-size:10px}

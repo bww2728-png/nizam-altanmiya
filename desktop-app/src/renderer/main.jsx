@@ -34,18 +34,23 @@ function App() {
   const [progress, setProgress] = useState('');
   const [toast, setToast] = useState('');
   const [filter, setFilter] = useState('');
+  const [accessProfile, setAccessProfile] = useState('owner');
+  const [backupCount, setBackupCount] = useState(0);
+  const [candidates, setCandidates] = useState([]);
 
   const refresh = useCallback(async () => {
     if (!unlocked) return;
     try {
-      const [stats, history, items] = await Promise.all([
+      const [stats, history, items, bridged] = await Promise.all([
         window.localApp.overview(),
         window.localApp.imports(),
         window.localApp.reviewItems({ status: reviewTab, batchId: filter || undefined, limit: 500 }),
+        window.localApp.bridgeCandidates().catch(() => ({ candidates: [] })),
       ]);
       setOverview(stats);
       setImports(history);
       setReview(items);
+      setCandidates(bridged?.candidates ?? []);
       setSelected(new Set());
     } catch (cause) {
       setError(cause.message || 'تعذر تحديث البيانات.');
@@ -56,10 +61,16 @@ function App() {
     window.localApp.status().then((status) => {
       setUnlocked(status.unlocked);
       setDatabaseExists(status.hasDatabase);
+      setAccessProfile(status.accessProfile ?? 'owner');
+      setBackupCount(status.backups ?? 0);
     }).catch((cause) => setError(cause.message || 'تعذر فحص قاعدة البيانات المحلية.')).finally(() => setReady(true));
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // A selection made under one query must never survive into another: the ids
+  // behind it may no longer be on screen.
+  useEffect(() => { setSelected(new Set()); }, [searchTerm, reviewTab, filter]);
 
   useEffect(() => {
     const unsubscribe = window.localApp.onImportProgress((message) => setProgress(message.message || ''));
@@ -125,7 +136,7 @@ function App() {
 
   async function saveReviewItem(item, values) {
     try {
-      await window.localApp.updateReviewItem({
+      const result = await window.localApp.updateReviewItem({
         id: item.id,
         fieldName: values.get('fieldName'),
         value: values.get('value'),
@@ -136,10 +147,64 @@ function App() {
         settlement: values.get('settlement'),
         recordId: values.get('recordId'),
       });
-      setToast('حُفظت تعديلات المراجعة محليًا.');
-      refresh();
+      if (!result?.success) {
+        setError(result?.message || 'لم يُحفظ التعديل. لم تتغيّر البيانات.');
+        return false;
+      }
+      setToast(result.message || 'حُفظت تعديلات المراجعة محليًا.');
+      await refresh();
+      return true;
     } catch (cause) {
       setError(cause.message || 'تعذر حفظ التعديلات.');
+      return false;
+    }
+  }
+
+  async function toggleAccessProfile() {
+    try {
+      const next = accessProfile === 'shared' ? 'owner' : 'shared';
+      const result = await window.localApp.setAccessProfile({ profile: next });
+      setAccessProfile(result.profile);
+      setToast(result.profile === 'shared'
+        ? 'وضع المشاركة مفعّل: الحقول المقيّدة والحساسة محجوبة في العرض والتصدير.'
+        : 'وضع مالك الجهاز مفعّل: كل الحقول مرئية.');
+      await refresh();
+    } catch (cause) {
+      setError(cause.message || 'تعذر تغيير وضع الوصول.');
+    }
+  }
+
+  async function runBackup() {
+    try {
+      const result = await window.localApp.backupDatabase();
+      setBackupCount(result.backups ?? backupCount);
+      setToast(`أُنشئت نسخة احتياطية داخل مجلد backups (${result.backups ?? 1} نسخة).`);
+    } catch (cause) {
+      setError(cause.message || 'تعذر إنشاء النسخة الاحتياطية.');
+    }
+  }
+
+  async function bridgeApprovedValues() {
+    const pending = candidates.filter((entry) => !entry.directorateId);
+    if (!pending.length) {
+      setToast('كل القيم المعتمدة مرتبطة بمديريات في التحليل بالفعل.');
+      return;
+    }
+    if (!window.confirm(`سيُنشئ التطبيق/يحدّث ${numberFormat.format(pending.length)} مديرية من القيم المعتمدة، وتبقى القيم الأصلية محفوظة بمصدرها. متابعة؟`)) return;
+    setLoading(true);
+    setError('');
+    try {
+      const result = await window.localApp.bridgeRun({});
+      const messages = [`أُنشئت ${numberFormat.format(result.created)} مديرية`];
+      if (result.updated) messages.push(`حُدّثت ${numberFormat.format(result.updated)}`);
+      if (result.skipped) messages.push(`تُخطّي ${numberFormat.format(result.skipped)}`);
+      messages.push(`${numberFormat.format(result.fields)} حقلاً مرتبطًا بمصدره`);
+      setToast(messages.join(' · '));
+      await refresh();
+    } catch (cause) {
+      setError(cause.message || 'تعذر ترحيل القيم المعتمدة إلى التحليل.');
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -225,7 +290,7 @@ function App() {
     </aside>
 
     <main className="main-area">
-      <header className="topbar"><div className="breadcrumbs"><span>نظام التنمية المحلية</span><span className="crumb-divider">/</span><strong>{navItems.find((item) => item.id === active)?.label}</strong></div><div className="topbar-actions"><span className="local-chip"><LockKeyhole size={14} /> محلي ومشفّر</span><button className="icon-button" title="تحديث البيانات" onClick={refresh}><RefreshCw size={17} /></button><div className="avatar">م</div></div></header>
+      <header className="topbar"><div className="breadcrumbs"><span>نظام التنمية المحلية</span><span className="crumb-divider">/</span><strong>{navItems.find((item) => item.id === active)?.label}</strong></div><div className="topbar-actions"><button className={`local-chip profile-chip ${accessProfile === 'shared' ? 'shared-profile' : ''}`} title="تبديل وضع الوصول: مالك الجهاز يرى كل الحقول، ووضع المشاركة يحجب الحقول المقيّدة والحساسة" onClick={toggleAccessProfile}><ShieldCheck size={14} />{accessProfile === 'shared' ? 'وضع المشاركة: حقول محجوبة' : 'مالك الجهاز: كل الحقول'}</button><button className="icon-button" title="إنشاء نسخة احتياطية الآن" onClick={runBackup}><Database size={17} /></button><span className="local-chip"><LockKeyhole size={14} /> محلي ومشفّر</span><button className="icon-button" title="تحديث البيانات" onClick={refresh}><RefreshCw size={17} /></button><div className="avatar">م</div></div></header>
       <section className="page-content">
         {error && <div className="error-banner page-error"><AlertTriangle size={18} /><span>{error}</span><button onClick={() => setError('')} aria-label="إغلاق التنبيه"><X size={16} /></button></div>}
         {progress && <div className="progress-banner"><Activity size={18} />{progress}</div>}
@@ -264,6 +329,8 @@ function App() {
         {active === 'review' && <>
           <div className="page-heading"><div><p className="eyebrow">حوكمة البيانات</p><h1>مراجعة الاستخراج</h1><p>تأكد من القيمة ومفتاحها الجغرافي قبل اعتمادها في قاعدة البيانات.</p></div><button className="primary-button" onClick={importFile} disabled={loading}><FolderUp size={17} />استيراد ملف</button></div>
           <div className="review-guidance"><ShieldCheck size={18} /><span>القيم المستخرجة لا تدخل في الحسابات تلقائيًا. أكمل الحقول الجغرافية المطلوبة لكل سجل، ثم اعتمده.</span></div>
+          {candidates.length > 0 && <div className="bridge-panel"><Database size={18} /><div><strong>{numberFormat.format(candidates.filter((entry) => !entry.directorateId).length)} مديرية لديها قيم معتمدة غير مرتبطة بالتحليل</strong><span>تحويلها ينشئ سجل مديرية في شاشة التحليل ويربط كل قيمة بمصدرها دون إعادة إدخال.</span></div><button className="secondary-button" onClick={bridgeApprovedValues} disabled={loading}>ترحيل إلى التحليل</button></div>}
+          {filter && <div className="filter-chip"><span>عرض دفعة الاستيراد #{filter}</span><button onClick={() => setFilter('')} aria-label="إزالة فلتر الدفعة"><X size={14} />إزالة الفلتر</button></div>}
           <div className="toolbar"><div className="tabs"><button className={reviewTab === 'pending' ? 'selected' : ''} onClick={() => setReviewTab('pending')}>بانتظار المراجعة</button><button className={reviewTab === 'conflict' ? 'selected' : ''} onClick={() => setReviewTab('conflict')}>التعارضات</button><button className={reviewTab === 'accepted' ? 'selected' : ''} onClick={() => setReviewTab('accepted')}>المعتمدة</button><button className={reviewTab === 'rejected' ? 'selected' : ''} onClick={() => setReviewTab('rejected')}>المرفوضة</button></div><label className="search-box"><Search size={17} /><input value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="بحث في الحقل أو القيمة أو المصدر" /></label></div>
           {reviewTab === 'pending' && <div className="bulk-toolbar"><label><input type="checkbox" checked={filteredReview.length > 0 && selected.size === filteredReview.length} onChange={(event) => setSelected(event.target.checked ? new Set(filteredReview.map((item) => item.id)) : new Set())} />تحديد النتائج الظاهرة ({numberFormat.format(selected.size)})</label><div><button className="secondary-button danger-button" disabled={!selected.size || loading} onClick={() => resolveSelected('reject')}>رفض المحدد</button><button className="primary-button" disabled={!selected.size || loading} onClick={() => resolveSelected('accept')}><Check size={16} />اعتماد المحدد</button></div></div>}
           {filteredReview.length ? <div className="review-list">{filteredReview.map((item) => <ReviewCard key={item.id} item={item} selectable={reviewTab === 'pending'} selected={selected.has(item.id)} onSelect={(checked) => setSelected((previous) => { const next = new Set(previous); if (checked) next.add(item.id); else next.delete(item.id); return next; })} onSave={saveReviewItem} onAccept={() => resolveOne(item, 'accept')} onReplace={() => resolveOne(item, 'replace')} onReject={() => resolveOne(item, 'reject')} />)}</div> : <div className="panel"><EmptyState icon={Check} title={reviewTab === 'pending' ? 'لا توجد قيم بانتظار المراجعة' : 'لا توجد نتائج في هذا القسم'} text="يمكنك استيراد ملف جديد لمعالجة محلية ومراجعة موثقة." action="استيراد ملف" onAction={importFile} /></div>}
@@ -328,9 +395,11 @@ function ReviewCard({ item, selectable, selected, onSelect, onSave, onAccept, on
   async function submit(event) {
     event.preventDefault();
     setSaving(true);
-    await onSave(item, new FormData(event.currentTarget));
+    const ok = await onSave(item, new FormData(event.currentTarget));
     setSaving(false);
-    setEditing(false);
+    // Stay in edit mode when the write was refused, so the typed text is not
+    // silently discarded.
+    if (ok !== false) setEditing(false);
   }
   return <article className={`review-card ${selected ? 'selected' : ''}`}>
     <div className="review-card-top">{selectable && <input type="checkbox" checked={selected} onChange={(event) => onSelect(event.target.checked)} aria-label="تحديد السجل" />}<div className="review-title"><span className="review-field">{item.field_name}</span><StatusPill status={item.status} /></div><span className="confidence">المصدر محفوظ</span><button className="quiet-button" onClick={() => setEditing((value) => !value)}>{editing ? 'إلغاء التعديل' : 'تعديل السجل'}</button></div>

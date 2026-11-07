@@ -9,12 +9,14 @@
  * relation is expressed as a row index.
  */
 
+const { INPUT_FIELDS } = require('./schema.cjs');
+
 function rowKey(row, index) {
   return `${row.governorate ?? ''}|${row.districtName ?? ''}|${index}`;
 }
 
-function plainRow(row, index) {
-  return {
+function plainRow(row, index, compact = false) {
+  const plain = {
     index,
     key: rowKey(row, index),
     id: row.id ?? null,
@@ -41,6 +43,20 @@ function plainRow(row, index) {
     boundary: row.boundary ?? [],
     sensitivity: row.sensitivity ?? null,
   };
+  if (!compact) return plain;
+
+  // Compact mode drops the two heaviest per-row objects (`values` 40 keys and
+  // `rawValues` 40 strings) and keeps only what the list/table view needs. The
+  // detail drawer fetches them on demand through `analysis:row-detail`, which is
+  // also where the field-sensitivity policy is applied.
+  const values = row.values ?? {};
+  plain.restrictedPresent = INPUT_FIELDS
+    .filter((field) => field.sensitivity !== 'public'
+      && values[field.key] !== null && values[field.key] !== undefined && values[field.key] !== '')
+    .map((field) => field.key);
+  delete plain.values;
+  delete plain.rawValues;
+  return plain;
 }
 
 function indexMap(rows) {
@@ -49,9 +65,10 @@ function indexMap(rows) {
   return map;
 }
 
-function serializeAnalysis(analysis) {
+function serializeAnalysis(analysis, options = {}) {
   const rows = analysis.rows ?? [];
   const positions = indexMap(rows);
+  const compact = Boolean(options.compact);
 
   const indexesOf = (list) => (list ?? []).map((row) => positions.get(row)).filter((index) => index !== undefined);
 
@@ -75,7 +92,7 @@ function serializeAnalysis(analysis) {
   return {
     meta: analysis.meta ?? {},
     summary: analysis.summary ?? {},
-    rows: rows.map(plainRow),
+    rows: rows.map((row, index) => plainRow(row, index, compact)),
     ranking: {
       replica: {
         ranked: indexesOf(replica.ranked),

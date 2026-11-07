@@ -18,6 +18,15 @@ function saveImportBatch(database, extracted, createdAt = new Date().toISOString
   return batchId;
 }
 
+/**
+ * Update one review item.
+ *
+ * 0.3.0 ran a conditional UPDATE and returned `{success:false}` for an accepted
+ * or rejected row, which the screen ignored — so the user saw "saved" while
+ * nothing changed. Now every outcome returns an explicit message, and editing an
+ * already-accepted row also updates the approved `data_values` row it produced,
+ * so the two views cannot drift apart.
+ */
 function updateReviewItem(database, item) {
   const fields = {
     fieldName: normalizeText(item.fieldName, 'اسم الحقل'),
@@ -29,9 +38,39 @@ function updateReviewItem(database, item) {
     settlement: normalizeText(item.settlement, 'التجمع/القرية', 160),
     recordId: normalizeText(item.recordId, 'معرّف السجل', 160),
   };
-  const result = database.prepare(`UPDATE review_items SET field_name=?,value_text=?,proposed_type=?,governorate=?,district=?,subdistrict=?,settlement=?,record_id=? WHERE id=? AND status IN ('pending','conflict')`)
-    .run(fields.fieldName, fields.value, fields.proposedType || 'غير محدد', fields.governorate, fields.district, fields.subdistrict, fields.settlement, fields.recordId, Number(item.id));
-  return { success: result.changes === 1 };
+  const id = Number(item.id);
+  if (!Number.isSafeInteger(id) || id <= 0) return { success: false, message: 'معرّف السجل غير صالح.' };
+
+  return database.transaction(() => {
+    const existing = database.prepare('SELECT * FROM review_items WHERE id = ?').get(id);
+    if (!existing) return { success: false, message: 'السجل غير موجود في قاعدة البيانات.' };
+
+    database.prepare(`UPDATE review_items SET field_name=?,value_text=?,proposed_type=?,governorate=?,district=?,subdistrict=?,settlement=?,record_id=? WHERE id=?`)
+      .run(fields.fieldName, fields.value, fields.proposedType || 'غير محدد', fields.governorate, fields.district, fields.subdistrict, fields.settlement, fields.recordId, id);
+
+    if (existing.status === 'accepted') {
+      // The approved value is what the analysis sees; keep it in step with the
+      // correction the reviewer just made.
+      const synced = database.prepare(`
+        UPDATE data_values SET field_name = ?, value_text = ?, source_location = ?
+        WHERE governorate = ? AND district = ? AND subdistrict = ? AND settlement = ?
+          AND record_type = ? AND record_id = ? AND field_name = ?
+      `).run(
+        fields.fieldName, fields.value, existing.source_location,
+        existing.governorate, existing.district, existing.subdistrict, existing.settlement,
+        existing.proposed_type || 'غير محدد', existing.record_id, existing.field_name,
+      );
+      return {
+        success: true,
+        synced: synced.changes,
+        message: 'حُفظ التعديل وحدّث القيمة المعتمدة المرتبطة به.',
+      };
+    }
+    if (existing.status === 'rejected') {
+      return { success: true, synced: 0, message: 'السجل مرفوض؛ حُفظ النص المصحّح دون اعتماده.' };
+    }
+    return { success: true, synced: 0, message: 'حُفظت تعديلات المراجعة محليًا.' };
+  })();
 }
 
 function resolveReviewItems(database, request) {

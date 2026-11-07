@@ -192,6 +192,80 @@ const SQL = `
     value TEXT,
     updated_at TEXT NOT NULL
   );
+
+  /*
+   * Read-level audit trail.
+   *
+   * The access_log table only records writes and exports; the audit requirement is that
+   * *reads* of restricted/sensitive values are attributable too. This table is
+   * append-only by convention: nothing in the application updates or deletes a
+   * row, and each row stores the channel, the entity, the field keys that were
+   * actually returned and the session that asked for them.
+   */
+  CREATE TABLE IF NOT EXISTS audit_reads (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT,
+    channel TEXT NOT NULL,
+    entity TEXT,
+    entity_id TEXT,
+    fields TEXT,
+    result TEXT NOT NULL DEFAULT 'ok',
+    row_count INTEGER,
+    detail TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS audit_reads_time_idx ON audit_reads(created_at);
+
+  /*
+   * Point-in-time snapshots of a directorate, written *before* an update or a
+   * delete. This is what makes undo possible without a second copy of the whole
+   * database; the newest snapshot per directorate is enough to restore it.
+   */
+  CREATE TABLE IF NOT EXISTS directorate_versions (
+    id INTEGER PRIMARY KEY,
+    directorate_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS directorate_versions_dir_idx ON directorate_versions(directorate_id, id);
+
+  /*
+   * OCR drafts.
+   *
+   * Recognition never writes straight into directorates: the raw text and the
+   * per-field proposals live here until a human accepts them. Keeping the draft
+   * (and its engine confidence) separate is what makes "no silent bad value"
+   * enforceable and reviewable after the fact.
+   */
+  CREATE TABLE IF NOT EXISTS ocr_drafts (
+    id INTEGER PRIMARY KEY,
+    file_name TEXT,
+    file_type TEXT,
+    file_size INTEGER,
+    text TEXT,
+    confidence REAL,
+    fields_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'draft',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS ocr_field_confidence (
+    id INTEGER PRIMARY KEY,
+    draft_id INTEGER NOT NULL REFERENCES ocr_drafts(id) ON DELETE CASCADE,
+    field_key TEXT NOT NULL,
+    header TEXT,
+    raw_text TEXT,
+    parsed_value TEXT,
+    engine_confidence REAL,
+    header_score REAL,
+    decision TEXT NOT NULL DEFAULT 'pending',
+    reviewed_value TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(draft_id, field_key)
+  );
+  CREATE INDEX IF NOT EXISTS ocr_field_confidence_draft_idx ON ocr_field_confidence(draft_id);
 `;
 
 /** Columns added after the first release; applied idempotently on every open. */
@@ -201,24 +275,72 @@ const RESULT_COLUMN_MIGRATIONS = [
   { name: 'missing_json', ddl: 'ALTER TABLE analysis_results ADD COLUMN missing_json TEXT' },
 ];
 
-/** Idempotent migration; safe to run on every open. */
-function migrate(database) {
-  // Schema creation errors are real and must surface unchanged.
-  database.exec(SQL);
-  const existing = new Set(
-    database.prepare('PRAGMA table_info(analysis_results)').all().map((column) => column.name)
-  );
-  for (const column of RESULT_COLUMN_MIGRATIONS) {
+/**
+ * Columns added on `directorates` after 0.3.0. `import_warnings` keeps the
+ * per-value conversion warnings (percent converted, thousands separated, ...)
+ * so the gap layer can see them after a restart instead of losing them with the
+ * import response.
+ */
+const DIRECTORATE_COLUMN_MIGRATIONS = [
+  { name: 'import_warnings', ddl: 'ALTER TABLE directorates ADD COLUMN import_warnings TEXT' },
+];
+
+/**
+ * Indexes that match the queries actually issued by the app. They are created
+ * only when the owning table exists, so a partially created store never makes
+ * the open path fail.
+ */
+const EXTRA_INDEXES = [
+  { table: 'directorates', ddl: 'CREATE INDEX IF NOT EXISTS directorates_source_idx ON directorates(source_file)' },
+  { table: 'review_items', ddl: 'CREATE INDEX IF NOT EXISTS review_items_status_id_idx ON review_items(status, id)' },
+  { table: 'data_values', ddl: 'CREATE INDEX IF NOT EXISTS data_values_imported_idx ON data_values(imported_at)' },
+];
+
+function tableColumns(database, table) {
+  try {
+    return new Set(database.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
+  } catch {
+    return new Set();
+  }
+}
+
+function tableExists(database, table) {
+  return Boolean(database.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
+}
+
+function applyColumnMigrations(database, table, migrations) {
+  const existing = tableColumns(database, table);
+  if (!existing.size) return;
+  for (const column of migrations) {
     if (existing.has(column.name)) continue;
     try {
       database.exec(column.ddl);
     } catch (error) {
       // A concurrent runner may have added it first; that is the only benign failure.
       if (/duplicate column name/i.test(String(error.message))) continue;
-      throw new Error(`فشل ترحيل العمود ${column.name} في analysis_results: ${error.message}`);
+      throw new Error(`فشل ترحيل العمود ${column.name} في ${table}: ${error.message}`);
     }
+  }
+}
+
+/** Idempotent migration; safe to run on every open. */
+function migrate(database) {
+  // Schema creation errors are real and must surface unchanged.
+  database.exec(SQL);
+  applyColumnMigrations(database, 'analysis_results', RESULT_COLUMN_MIGRATIONS);
+  applyColumnMigrations(database, 'directorates', DIRECTORATE_COLUMN_MIGRATIONS);
+  for (const index of EXTRA_INDEXES) {
+    if (!tableExists(database, index.table)) continue;
+    database.exec(index.ddl);
   }
   return true;
 }
 
-module.exports = { migrate, DIRECTORATE_COLUMNS, SCHEMA_SQL: SQL, RESULT_COLUMN_MIGRATIONS };
+module.exports = {
+  migrate,
+  DIRECTORATE_COLUMNS,
+  SCHEMA_SQL: SQL,
+  RESULT_COLUMN_MIGRATIONS,
+  DIRECTORATE_COLUMN_MIGRATIONS,
+  EXTRA_INDEXES,
+};

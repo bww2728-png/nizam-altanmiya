@@ -18,3 +18,14 @@ body{background:#0b1926 url('./assets/app-background.jpg') center center / cover
 .primary-button{background:#18324b;border-color:#18324b;color:#fff;box-shadow:0 1px 2px rgba(12,26,40,.18)}
 .primary-button:hover:not(:disabled){background:#12283c;border-color:#12283c}
 .eyebrow{color:#8a6d2f}
+
+/* Access profile switch, review->analysis bridge and batch filter chip. */
+.profile-chip{background:#eef5f3;border:1px solid #d7e7e2;color:#1f6b60}
+.profile-chip.shared-profile{background:#fbf0e3;border-color:#eed7b8;color:#8a5a1d}
+.bridge-panel{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#f4f9f7;border:1px solid #d9e9e4;border-radius:10px;padding:12px 14px;margin:10px 0 12px;color:#1d6f68}
+.bridge-panel div{flex:1;min-width:220px;display:flex;flex-direction:column;gap:3px}
+.bridge-panel strong{font-size:12px;color:#17324d}
+.bridge-panel span{font-size:10.5px;color:#5f7b76}
+.filter-chip{display:inline-flex;align-items:center;gap:8px;background:#f1f6fa;border:1px solid #dfe9f1;border-radius:999px;padding:4px 6px 4px 12px;font-size:10.5px;color:#3f5c73;margin-bottom:8px}
+.filter-chip button{display:inline-flex;align-items:center;gap:4px;border:0;background:#e4eef5;border-radius:999px;padding:3px 9px;font-size:10px;color:#2c6f92}
+.filter-chip button:hover{background:#d7e6f0}

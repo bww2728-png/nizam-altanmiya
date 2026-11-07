@@ -10,7 +10,13 @@ const SIDECAR_SUFFIXES = ['-journal', '-wal', '-shm'];
 // The app does not ask the user for a passphrase any more. A 256-bit key is generated once,
 // stored beside the user data (mode 0600) and reused, so the database file stays encrypted
 // at rest without any step the user has to remember.
-function loadOrCreateStoreKey(keyPath) {
+//
+// `store.key` is the *only* way back into the store. If it disappears while a database
+// exists, generating a new key would make the existing file unreadable and the open path
+// would treat it as foreign and quarantine it — i.e. the user would silently get an empty
+// database. Callers therefore pass `databaseExists` so this function can refuse instead.
+function loadOrCreateStoreKey(keyPath, options = {}) {
+  const databaseExists = Boolean(options.databaseExists);
   let existing = null;
   try {
     existing = fs.readFileSync(keyPath, 'utf8').trim();
@@ -27,10 +33,65 @@ function loadOrCreateStoreKey(keyPath) {
       'ملف مفتاح التخزين (store.key) موجود لكن محتواه تالف. لا يعيد التطبيق توليده تلقائيًا حتى لا يُفقد الوصول إلى قاعدة البيانات. استعد نسخة سليمة من نسخة احتياطية، أو انقل ملفات قاعدة البيانات إلى مجلد آخر لبدء قاعدة جديدة.'
     );
   }
+  if (databaseExists) {
+    throw new Error(
+      'قاعدة البيانات موجودة لكن ملف المفتاح (store.key) مفقود. لن ينشئ التطبيق مفتاحًا جديدًا لأنه سيجعل بياناتك غير قابلة للقراءة. استعد store.key من النسخة الاحتياطية في مجلد backups، أو انقل قاعدة البيانات إلى مجلد آخر لبدء قاعدة جديدة.'
+    );
+  }
   const key = crypto.randomBytes(32).toString('hex');
   fs.mkdirSync(path.dirname(keyPath), { recursive: true });
   fs.writeFileSync(keyPath, key, { encoding: 'utf8', mode: 0o600 });
   return key;
+}
+
+/**
+ * Copy a store (plus its sidecars) into `<dir>/backups/` before a risky step such
+ * as a migration or a quarantine decision. Returns the backup path, or null when
+ * there was nothing to copy.
+ *
+ * Backups are pruned to the newest `keep` files so the folder cannot grow without
+ * bound; pruning only ever removes files this function created.
+ */
+function backupStore(filePath, options = {}) {
+  if (!fs.existsSync(filePath)) return null;
+  const keep = Math.max(1, Number(options.keep) || 10);
+  const directory = path.join(path.dirname(filePath), 'backups');
+  fs.mkdirSync(directory, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const base = path.join(directory, `${path.basename(filePath)}.${stamp}.bak`);
+  fs.copyFileSync(filePath, base);
+  for (const suffix of SIDECAR_SUFFIXES) {
+    if (fs.existsSync(`${filePath}${suffix}`)) {
+      try { fs.copyFileSync(`${filePath}${suffix}`, `${base}${suffix}`); } catch { /* optional */ }
+    }
+  }
+  try {
+    const prefix = `${path.basename(filePath)}.`;
+    const stale = fs.readdirSync(directory)
+      .filter((name) => name.startsWith(prefix) && name.endsWith('.bak'))
+      .sort()
+      .reverse()
+      .slice(keep);
+    for (const name of stale) {
+      try { fs.rmSync(path.join(directory, name), { force: true }); } catch { /* best effort */ }
+    }
+  } catch { /* pruning is best effort */ }
+  return base;
+}
+
+/** Newest backups for a store path, newest first. */
+function listBackups(filePath) {
+  const directory = path.join(path.dirname(filePath), 'backups');
+  const prefix = `${path.basename(filePath)}.`;
+  try {
+    return fs.readdirSync(directory)
+      .filter((name) => name.startsWith(prefix) && name.endsWith('.bak'))
+      .sort()
+      .reverse()
+      .map((name) => path.join(directory, name));
+  } catch {
+    return [];
+  }
 }
 
 function openEncryptedStore(filePath, passphrase) {
@@ -104,7 +165,7 @@ function openEncryptedStore(filePath, passphrase) {
  * Probe `filePath` with `key` and say *why* it failed, so a busy file is never
  * mistaken for a foreign one (which would trigger a destructive quarantine).
  *
- * @returns {{ ok:boolean, reason:'readable'|'busy'|'foreign'|'unknown', error?:Error }}
+ * @returns {{ ok:boolean, reason:'readable'|'busy'|'corrupt'|'foreign'|'unknown', error?:Error }}
  */
 function classifyStore(filePath, key) {
   let probe;
@@ -120,7 +181,10 @@ function classifyStore(filePath, key) {
     try { if (probe) probe.close(); } catch { /* already closed */ }
     const message = String(error?.message ?? '');
     if (/busy|locked/i.test(message)) return { ok: false, reason: 'busy', error };
-    if (/not a database|file is not a database|malformed|encrypted|SQLITE_NOTADB/i.test(message)) {
+    // A malformed/corrupt file is *ours* and must never be swapped for an empty
+    // store inside the same folder: the user needs a restore, not a reset.
+    if (/malformed|corrupt|SQLITE_CORRUPT/i.test(message)) return { ok: false, reason: 'corrupt', error };
+    if (/not a database|file is not a database|encrypted|SQLITE_NOTADB/i.test(message)) {
       return { ok: false, reason: 'foreign', error };
     }
     return { ok: false, reason: 'unknown', error };
@@ -200,6 +264,8 @@ module.exports = {
   loadOrCreateStoreKey,
   canOpenWithKey,
   classifyStore,
+  backupStore,
+  listBackups,
   findLegacyBackups,
   quarantineLegacyDatabase,
 };

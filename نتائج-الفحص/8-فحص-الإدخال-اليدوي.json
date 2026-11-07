@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-07T06:50:30.599Z",
+  "generatedAt": "2026-11-07T17:03:54.621Z",
   "group": "manual",
   "total": 9,
   "passed": 9,
@@ -32,7 +32,7 @@
       "group": "manual",
       "name": "المديرية الجديدة تُحفظ في القاعدة",
       "ok": true,
-      "detail": "{\"id\":4,\"governorate\":\"إب\",\"district\":\"مديرية إدخال آلي\",\"nature\":null,\"population\":12345,\"migrants\":null,\"density_per_km2\":null,\"expected_beneficiaries\":null,\"schools\":null,\"enrolled_students\":null,\"gov_facilities\":null,\"private_facilities\":null,\"water_coverage\":null,\"paved_roads\":null,\"unpaved_roads\":null,\"cut_roads\":null,\"service_distance_km\":null,\"revenue\":null,\"agri_production\":null,\"livestock_heads\":null,\"value_chains\":null,\"inactive_value_chains\":null,\"unemployment\":null,\"lost_opportunity\":null,\"associations\":null,\"goods_tons\":null,\"front_line\":null,\"poverty_ratio\":null,\"vulnerable_groups\":null,\"service_gap_type\":null,\"rural_population\":null,\"geographic_dispersion\":null,\"project_cost\":null,\"project_status\":null,\"partner_integration\":null,\"community_participation\":null,\"sustainability_criteria\":null,\"project_continuity\":null,\"need_alignment\":null,\"national_alignment\":null,\"reviewer_decision\":null,\"source_file\":\"إدخال يدوي\",\"source_sheet\":\"إدخال يدوي\",\"source_row\":null,\"updated_at\":\"2026-11-07T06:50:28.339Z\"}"
+      "detail": "{\"id\":4,\"governorate\":\"إب\",\"district\":\"مديرية إدخال آلي\",\"nature\":null,\"population\":12345,\"migrants\":null,\"density_per_km2\":null,\"expected_beneficiaries\":null,\"schools\":null,\"enrolled_students\":null,\"gov_facilities\":null,\"private_facilities\":null,\"water_coverage\":null,\"paved_roads\":null,\"unpaved_roads\":null,\"cut_roads\":null,\"service_distance_km\":null,\"revenue\":null,\"agri_production\":null,\"livestock_heads\":null,\"value_chains\":null,\"inactive_value_chains\":null,\"unemployment\":null,\"lost_opportunity\":null,\"associations\":null,\"goods_tons\":null,\"front_line\":null,\"poverty_ratio\":null,\"vulnerable_groups\":null,\"service_gap_type\":null,\"rural_population\":null,\"geographic_dispersion\":null,\"project_cost\":null,\"project_status\":null,\"partner_integration\":null,\"community_participation\":null,\"sustainability_criteria\":null,\"project_continuity\":null,\"need_alignment\":null,\"national_alignment\":null,\"reviewer_decision\":null,\"source_file\":\"إدخال يدوي\",\"source_sheet\":\"إدخال يدوي\",\"source_row\":null,\"updated_at\":\"2026-11-07T17:03:52.204Z\",\"import_warnings\":null}"
     },
     {
       "group": "manual",
