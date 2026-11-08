@@ -523,7 +523,40 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
   );
 }
 
+function previewCellText(cell) {
+  if (cell.formula) {
+    const cached = cell.cachedResult === null || cell.cachedResult === undefined ? 'لا توجد نتيجة مخزنة' : String(cell.cachedResult);
+    return `=${cell.formula} ← ${cached}`;
+  }
+  if (cell.text) return String(cell.text);
+  if (cell.rawValue === null || cell.rawValue === undefined) return 'فارغ';
+  if (typeof cell.rawValue === 'object') return JSON.stringify(cell.rawValue);
+  return String(cell.rawValue);
+}
+
 function DurableStaging({ staging, status, stagingOnly, message }) {
+  const [preview, setPreview] = useState(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [previewError, setPreviewError] = useState('');
+
+  const loadSheetPreview = async (sheet) => {
+    setPreviewBusy(true);
+    setPreviewError('');
+    try {
+      const result = await window.localApp.importSheetPreview({
+        batchId: staging.batchId,
+        sheetId: sheet.id,
+        limit: 20,
+      });
+      setPreview(result);
+    } catch (error) {
+      setPreviewError(errText(error) || 'تعذر تحميل عينة الورقة.');
+      setPreview(null);
+    } finally {
+      setPreviewBusy(false);
+    }
+  };
+
   return (
     <Card
       title="نسخة الاستقبال المحفوظة داخل قاعدة البيانات"
@@ -542,7 +575,7 @@ function DurableStaging({ staging, status, stagingOnly, message }) {
       {staging.mediaUnanchoredCount > 0 && <Notice tone="warn" title="صور بلا موضع موثوق">{fmtNumber(staging.mediaUnanchoredCount, 0)} صورة/عنصر لم يمكن ربط موضعه بورقة وخلية بشكل موثوق؛ حُفظت غير منسوبة إلى كيان.</Notice>}
       <div className="table-wrap" style={{ marginTop: 14 }}>
         <table className="data">
-          <thead><tr><th>الورقة</th><th>الحالة</th><th>الأبعاد</th><th>صفوف محفوظة</th><th>خلايا</th><th>مناطق مرشحة</th><th>محتوى إضافي</th></tr></thead>
+          <thead><tr><th>الورقة</th><th>الحالة</th><th>الأبعاد</th><th>صفوف محفوظة</th><th>خلايا</th><th>مناطق مرشحة</th><th>محتوى إضافي</th><th>المعاينة</th></tr></thead>
           <tbody>
             {(staging.sheets ?? []).map(sheet => (
               <tr key={sheet.name}>
@@ -561,11 +594,49 @@ function DurableStaging({ staging, status, stagingOnly, message }) {
                   {sheet.truncated && <Badge tone="warn">حد فحص</Badge>}
                   {!sheet.formulaCount && !sheet.hiddenRowCount && !sheet.imageCount && !sheet.tableCount && !sheet.mergedRangeCount && !sheet.truncated && '—'}
                 </div></td>
+                <td>
+                  <button className="btn small ghost" onClick={() => loadSheetPreview(sheet)} disabled={previewBusy}>
+                    {previewBusy ? 'جارٍ التحميل…' : 'عرض عينة'}
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {previewError && <ErrorBanner message={previewError} />}
+      {preview?.restricted && <Notice tone="warn" title="المعاينة محجوبة">{preview.message}</Notice>}
+      {preview?.rows && (
+        <div className="quote" style={{ marginTop: 14 }}>
+          <div className="row between">
+            <strong>عينة من ورقة «{preview.sheet.name}»</strong>
+            <button className="btn small ghost" onClick={() => setPreview(null)}>إغلاق المعاينة</button>
+          </div>
+          <p className="muted" style={{ fontSize: '0.8rem', marginTop: 6 }}>
+            أول {preview.rows.length} صفوف غير فارغة فقط. القيم الخام تظهر في وضع المالك، ولا يتم اعتمادها أو تنفيذ معادلاتها.
+          </p>
+          <div className="stack tight" style={{ marginTop: 10 }}>
+            {preview.rows.map(row => (
+              <div key={row.rowNumber} className="stack tight" style={{ borderBottom: '1px solid var(--line)', paddingBottom: 8 }}>
+                <div className="row gap-sm">
+                  <strong>صف {row.rowNumber}</strong>
+                  {row.hidden && <Badge tone="warn">صف مخفي</Badge>}
+                  {row.hasFormula && <Badge tone="info">يحتوي صيغة</Badge>}
+                </div>
+                <div className="chip-row">
+                  {row.cells.map(cell => (
+                    <span className="chip" key={cell.address} title={[cell.formula ? `الصيغة: ${cell.formula}` : '', cell.note ? `ملاحظة: ${cell.note}` : ''].filter(Boolean).join(' · ')}>
+                      <strong>{cell.address}</strong>: {previewCellText(cell)}
+                    </span>
+                  ))}
+                  {row.cellsTruncated && <Badge tone="warn">عرض أول 24 خلية من {row.cellCount}</Badge>}
+                </div>
+              </div>
+            ))}
+          </div>
+          {preview.truncated && <p className="muted" style={{ fontSize: '0.8rem', marginTop: 8 }}>توجد صفوف أخرى محفوظة لم تظهر في هذه العينة المحدودة.</p>}
+        </div>
+      )}
       <Notice tone="info" title="ما الذي تم حفظه؟">
         <span className="chip">الملف الأصلي وبصمته</span>
         <span className="chip">خلايا كل ورقة مع موقعها ومحتواها وصيغها وملاحظاتها</span>
