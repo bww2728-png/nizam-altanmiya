@@ -4,9 +4,8 @@ name: Release
 # main. The release is created from the exact merge commit, and the package
 # version is the source of truth for the tag (for example, 0.5.3 -> v0.5.3).
 #
-# The installed app is offline-only: latest.yml is included as build metadata
-# alongside the installer, but updates are distributed through local installers
-# rather than an in-app network updater.
+# The installed app keeps its data and analysis local. Its updater may reach
+# only this repository's published GitHub releases and their release assets.
 
 on:
   push:

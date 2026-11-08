@@ -27,8 +27,11 @@ test('Electron E2E records before/after screenshots and per-action traces', () =
   assert.match(harness, /12-تتبع-التفاعلات\.json/);
 });
 
-test('Electron E2E validates centralized Node, Electron and Chromium offline guards', () => {
-  assert.match(main, /installOfflineNetworkGuards\(\{ electronNet: net \}\)/);
+test('Electron E2E validates network guards and the update-only allowlist', () => {
+  assert.match(main, /installOfflineNetworkGuards\(\{ electronNet: net, allowedNetworkRequest: isAllowedUpdateRequest \}\)/);
+  assert.match(offlinePolicy, /automaticUpdatesEnabled: true/);
+  assert.match(offlinePolicy, /function isAllowedUpdateRequest/);
+  assert.match(offlinePolicy, /github\.com/);
   assert.match(main, /installOfflineSessionGuard\(session\.defaultSession\)/);
   assert.match(offlinePolicy, /webRequest\.onBeforeRequest/);
   assert.match(offlinePolicy, /http:\/\/\*\/\*/);

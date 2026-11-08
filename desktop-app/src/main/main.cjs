@@ -1,6 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, net, session } = require('electron');
-const { installOfflineNetworkGuards, installOfflineSessionGuard } = require('./offline-policy.cjs');
-installOfflineNetworkGuards({ electronNet: net });
+const { installOfflineNetworkGuards, installOfflineSessionGuard, isAllowedUpdateRequest, updateStatus } = require('./offline-policy.cjs');
+installOfflineNetworkGuards({ electronNet: net, allowedNetworkRequest: isAllowedUpdateRequest });
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -24,8 +24,10 @@ const { defaultWeights, validateWeights } = require('./analysis/composite.cjs');
 const persist = require('./analysis/persist.cjs');
 const { serializeAnalysis } = require('./analysis/serialize.cjs');
 const { exportAnalysisWorkbook } = require('./analysis/exporter.cjs');
+const { exportFilteredWorkbook } = require('./analysis/report-exporter.cjs');
+const { filterIndicatorReport } = require('./analysis/report-query.cjs');
 const { exportAnalysisPdf, exportDatabaseReportPdf, exportIndicatorsReportPdf } = require('./analysis/pdf.cjs');
-const { INPUT_FIELDS } = require('./analysis/schema.cjs');
+const { INPUT_FIELDS, DECISION_FIELD, MANDATORY_FIELDS } = require('./analysis/schema.cjs');
 const { DIRECTORATE_COLUMNS } = require('./analysis/store-schema.cjs');
 const { buildImportPlan, summarizePlan, applyImportPlan } = require('./analysis/import-plan.cjs');
 const { buildSheets, buildRanking } = require('./analysis/sheets.cjs');
@@ -43,6 +45,11 @@ let sheetsCache = null;
 let sessionId = crypto.randomUUID();
 /** Canonical path of the last workbook the main process returned from a file dialog. */
 let dialogSelectedPath = null;
+let autoUpdater = null;
+let lastUpdateStatus = { state: 'idle' };
+const UPDATE_CHECK_DELAY_MS = 8_000;
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+try { ({ autoUpdater } = require('electron-updater')); } catch { autoUpdater = null; }
 
 const COLUMN_BY_KEY = DIRECTORATE_COLUMNS;
 
@@ -96,6 +103,101 @@ function maskDbRows(rows, profile) {
     return result.record;
   });
   return { rows: output, masked: [...maskedKeys] };
+}
+
+function directorateQueryOptions(profile) {
+  const fieldKeys = [...INPUT_FIELDS, DECISION_FIELD].map((field) => field.key);
+  const allowedKeys = new Set(fieldKeys.filter((key) => !security.isProtected(key, profile)));
+  const allowedMandatoryKeys = new Set(MANDATORY_FIELDS.map((field) => field.key).filter((key) => allowedKeys.has(key)));
+  return { allowedKeys, allowedMandatoryKeys, profile };
+}
+
+function sanitizeReportFilters(input = {}, profile = 'owner') {
+  const request = input && typeof input === 'object' ? input : {};
+  const criteria = (Array.isArray(request.criteria) ? request.criteria : []).slice(0, 64).map((item) => ({
+    key: typeof item?.key === 'string' ? item.key.slice(0, 80) : '',
+    operator: typeof item?.operator === 'string' ? item.operator.slice(0, 16) : '',
+    min: item?.min === null || item?.min === undefined ? '' : String(item.min).slice(0, 32),
+    max: item?.max === null || item?.max === undefined ? '' : String(item.max).slice(0, 32),
+    value: typeof item?.value === 'string' ? item.value.slice(0, 120) : '',
+    values: (Array.isArray(item?.values) ? item.values : []).slice(0, 100).map((value) => String(value).slice(0, 120))
+      .filter((value) => profile !== 'shared' || !security.isProtected(value, profile)),
+    exclude: item?.exclude === true,
+    missing: item?.missing === 'include' ? 'include' : 'exclude',
+  })).filter((item) => profile !== 'shared' || (!security.isProtected(item.key, profile) && item.key !== '__qualityLevel'));
+  return {
+    search: typeof request.search === 'string' ? request.search.trim().slice(0, 120) : '',
+    governorates: [...new Set((Array.isArray(request.governorates) ? request.governorates : []).map((value) => String(value).trim().slice(0, 120)).filter(Boolean))].slice(0, 100),
+    logic: request.logic === 'or' ? 'or' : 'and',
+    criteria,
+    sortKey: typeof request.sortKey === 'string' ? request.sortKey.slice(0, 80) : '',
+    sortDirection: request.sortDirection === 'asc' ? 'asc' : 'desc',
+  };
+}
+
+function reportFilterLabels(filters, catalogue) {
+  const labels = new Map([...INPUT_FIELDS, DECISION_FIELD].map((field) => [field.key, field.header]));
+  for (const field of catalogue) labels.set(field.key, field.header);
+  return filters.criteria.map((condition) => {
+    const name = labels.get(condition.key) ?? ({
+      __district: 'المديرية', __completeness: 'اكتمال الحقول الإلزامية', __missingField: 'الحقول الناقصة',
+      __qualityLevel: 'تحذيرات الاستيراد', __sourceFile: 'ملف المصدر', __sourceSheet: 'ورقة المصدر',
+      __sourceRow: 'رقم صف المصدر', __createdAt: 'تاريخ الاستيراد', __updatedAt: 'آخر تحديث',
+    })[condition.key] ?? condition.key;
+    const range = [condition.min !== '' ? `من ${condition.min}` : '', condition.max !== '' ? `إلى ${condition.max}` : ''].filter(Boolean).join(' ');
+    const values = condition.values.length ? condition.values.join('، ') : condition.value;
+    const operation = condition.operator === 'empty' ? 'فارغ'
+      : condition.operator === 'present' ? 'متوفر'
+        : condition.operator === 'contains' ? 'يحتوي على'
+          : condition.operator === 'in' ? 'يساوي إحدى'
+            : condition.operator === 'not-in' ? 'لا يساوي' : '';
+    return `${condition.exclude ? 'NOT ' : ''}${name} ${operation} ${range || values}`.trim();
+  });
+}
+
+function indicatorReportFilterLabels(report) {
+  const priorityLabels = {
+    composite: 'درجة الاحتياج المركبة', rank: 'الترتيب', degradedCount: 'الأبعاد المتدهورة',
+    weightCoverage: 'تغطية الأوزان %', severe: 'الحرمان الحاد', blocked: 'الحجب عن الترتيب',
+    complete: 'اكتمال البيانات', anomalous: 'وجود قيمة شاذة', confidenceLevel: 'تصنيف الثقة',
+    fragile: 'قرار هش بسبب الأوزان', maxRankShift: 'مدى تغيّر الرتبة بين الأوزان',
+  };
+  const indicators = new Map(report.registry.map((indicator) => [indicator.code, indicator.header]));
+  return report.filters.criteria.map((condition) => {
+    const name = condition.field === 'metric' ? indicators.get(condition.code) ?? condition.code : priorityLabels[condition.field] ?? condition.field;
+    const range = [condition.min !== '' ? `من ${condition.min}` : '', condition.max !== '' ? `إلى ${condition.max}` : ''].filter(Boolean).join(' ');
+    const value = condition.value === 'true' ? 'نعم' : condition.value === 'false' ? 'لا' : condition.value;
+    const operation = condition.operator === 'empty' ? 'فارغ'
+      : condition.operator === 'present' ? 'متوفر'
+        : condition.operator === 'equals' || condition.operator === 'boolean' ? 'يساوي'
+          : condition.operator === 'range' ? '' : condition.operator;
+    return `${condition.exclude ? 'NOT ' : ''}${name} ${operation} ${range || value}`.trim();
+  });
+}
+
+function metricReportValue(row, code, view) {
+  const value = view === 'scores' ? row.scores?.[code]
+    : view === 'contributions' ? row.contributions?.[code]?.contribution ?? row.contributions?.[code]
+      : row.values?.[code];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function directorateReportSummary(rows, selectedFields) {
+  const governorates = new Map();
+  let population = 0;
+  let populationCount = 0;
+  for (const row of rows) {
+    const name = String(row.governorate ?? 'غير محددة').trim() || 'غير محددة';
+    governorates.set(name, (governorates.get(name) ?? 0) + 1);
+    if (selectedFields.has('population') && Number.isFinite(Number(row[DIRECTORATE_COLUMNS.population]))) {
+      population += Number(row[DIRECTORATE_COLUMNS.population]);
+      populationCount += 1;
+    }
+  }
+  return {
+    governorates: [...governorates.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 15),
+    population: populationCount ? population : null,
+  };
 }
 
 /**
@@ -203,10 +305,30 @@ function validateCalibration(kThreshold, deprivationLine) {
   }
 }
 
-// ---- Offline runtime policy -------------------------------------------------
-// The installed application must remain usable without network access.
-// Updates are distributed as administrator-provided local installer packages.
-const { offlineUpdateStatus } = require('./offline-policy.cjs');
+function pushUpdateStatus(next) {
+  lastUpdateStatus = { ...lastUpdateStatus, ...next };
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+    mainWindow.webContents.send('update:status', lastUpdateStatus);
+  }
+}
+
+function setupAutoUpdate() {
+  if (!app.isPackaged || process.platform !== 'win32' || !autoUpdater) return;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowPrerelease = false;
+
+  autoUpdater.on('checking-for-update', () => pushUpdateStatus({ state: 'checking' }));
+  autoUpdater.on('update-available', info => pushUpdateStatus({ state: 'available', version: info?.version }));
+  autoUpdater.on('update-not-available', () => pushUpdateStatus({ state: 'not-available' }));
+  autoUpdater.on('download-progress', progress => pushUpdateStatus({ state: 'downloading', percent: Math.round(progress?.percent ?? 0) }));
+  autoUpdater.on('update-downloaded', info => pushUpdateStatus({ state: 'downloaded', version: info?.version }));
+  autoUpdater.on('error', error => pushUpdateStatus({ state: 'error', message: String(error?.message ?? error) }));
+
+  const checkForUpdates = () => { autoUpdater.checkForUpdates().catch(() => {}); };
+  setTimeout(checkForUpdates, UPDATE_CHECK_DELAY_MS);
+  setInterval(checkForUpdates, UPDATE_CHECK_INTERVAL_MS);
+}
 
 /**
  * The application window.
@@ -786,6 +908,19 @@ function registerHandlers() {
     return { ...sheetsCache.payload, ranking: sheetsCache.rankings[mode] };
   }
 
+  function makeIndicatorReport(request = {}, profile = currentProfile()) {
+    const criteria = Array.isArray(request.criteria) ? request.criteria : [];
+    const requiresSensitivity = profile !== 'shared' && criteria.some((condition) => ['fragile', 'maxRankShift'].includes(condition?.field));
+    let payload = sheetPayloads(request.mode === 'replica' ? 'replica' : 'calibrated');
+    if (requiresSensitivity && !payload.analysis.rows?.some((row) => row.sensitivity)) {
+      const transformRows = profile === 'shared' ? (rows) => security.maskInputRows(rows, 'shared') : null;
+      const enriched = buildSheets(requireDatabase(), { transformRows, mode: 'calibrated', sensitivity: true });
+      sheetsCache = { profile, payload: enriched, rankings: { calibrated: enriched.ranking } };
+      payload = sheetPayloads(request.mode === 'replica' ? 'replica' : 'calibrated');
+    }
+    return filterIndicatorReport(payload.indicators, request, profile);
+  }
+
   ipcMain.handle('sheet:dashboard', () => {
     const payload = sheetPayloads();
     auditRead('sheet:dashboard', { entity: 'directorates', rowCount: payload.dashboard.totals.directorates });
@@ -796,6 +931,16 @@ function registerHandlers() {
     const payload = sheetPayloads();
     auditRead('sheet:indicators', { entity: 'directorates', rowCount: payload.indicators.rows.length });
     return payload.indicators;
+  });
+
+  ipcMain.handle('sheet:indicator-report', (_event, request = {}) => {
+    const profile = currentProfile();
+    const report = makeIndicatorReport(request, profile);
+    auditRead('sheet:indicator-report', {
+      entity: 'directorates', rowCount: report.total, result: profile === 'shared' ? 'masked' : 'ok',
+      detail: `criteria=${report.filters.criteria.length};mode=${report.filters.mode};view=${report.filters.view}`,
+    });
+    return report;
   });
 
   ipcMain.handle('sheet:ranking', (_event, request = {}) => {
@@ -915,15 +1060,33 @@ function registerHandlers() {
   ipcMain.handle('analysis:directorates', (_event, request = {}) => {
     const db = requireDatabase();
     const profile = security.getAccessProfile(db);
-    const rows = persist.listDirectorates(db, request);
+    const queryOptions = directorateQueryOptions(profile);
+    const rows = persist.listDirectorates(db, request, queryOptions);
     const masked = maskDbRows(rows, profile);
+    const total = persist.countDirectorates(db, request, queryOptions);
     auditRead('analysis:directorates', {
       entity: 'directorates',
       rowCount: rows.length,
       fields: masked.masked.join(','),
       result: masked.masked.length ? 'masked' : 'ok',
+      detail: `filtered=${request.criteria?.length ?? 0}`,
     });
-    return { total: persist.countDirectorates(db), rows: masked.rows, masked: masked.masked };
+    return { total, rows: masked.rows, masked: masked.masked };
+  });
+
+  ipcMain.handle('analysis:directorates:filter-options', (_event, request = []) => {
+    const db = requireDatabase();
+    const profile = security.getAccessProfile(db);
+    const fieldKeys = [...INPUT_FIELDS, DECISION_FIELD].map((field) => field.key);
+    const allowedKeys = new Set(fieldKeys.filter((key) => !security.isProtected(key, profile)));
+    const options = {};
+    for (const key of [...new Set((Array.isArray(request) ? request : []).map(String))].slice(0, 64)) {
+      if (key.startsWith('__') || allowedKeys.has(key)) {
+        options[key] = persist.listDirectorateFilterOptions(db, key, { allowedKeys });
+      }
+    }
+    auditRead('analysis:directorates:filter-options', { entity: 'directorates', rowCount: Object.keys(options).length });
+    return options;
   });
 
   ipcMain.handle('analysis:directorate:get', (_event, id) => {
@@ -1030,61 +1193,143 @@ function registerHandlers() {
     return { canceled: false, filePath };
   });
 
-  ipcMain.handle('analysis:export-filtered-pdf', async (_event, request = {}) => {
+  async function exportFilteredReport(request = {}, format = 'pdf') {
     const db = requireDatabase();
     const profile = security.getAccessProfile(db);
     const input = request && typeof request === 'object' ? request : {};
     if (!['database', 'indicators'].includes(input.type)) throw new Error('نوع التقرير المطلوب غير صالح.');
-    const filters = input.filters && typeof input.filters === 'object' ? input.filters : {};
-    const search = typeof filters.search === 'string' ? filters.search.trim().slice(0, 200) : '';
-    const governorate = typeof filters.governorate === 'string' ? filters.governorate.trim().slice(0, 120) : '';
-    const allColumns = filters.allColumns === true;
+    const rowLimit = format === 'pdf' ? 3000 : 50000;
+    const extension = format === 'pdf' ? 'pdf' : 'xlsx';
+    const filtersInput = input.filters && typeof input.filters === 'object' ? input.filters : {};
     const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
       title: 'تصدير التقرير المخصص',
-      defaultPath: `تقرير-${input.type === 'indicators' ? 'المؤشرات' : 'قاعدة-البيانات'}-${new Date().toISOString().slice(0, 10)}.pdf`,
-      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+      defaultPath: `تقرير-${input.type === 'indicators' ? 'المؤشرات' : 'قاعدة-البيانات'}-${new Date().toISOString().slice(0, 10)}.${extension}`,
+      filters: [{ name: format === 'pdf' ? 'PDF' : 'Excel', extensions: [extension] }],
     });
     if (canceled || !filePath) return { canceled: true };
 
     let result;
+    let rowCount;
+    let maskedFields = [];
+    let labels = [];
     if (input.type === 'database') {
-      const rows = persist.listDirectorates(db, { search, governorate, limit: 3000 });
+      const filters = sanitizeReportFilters(filtersInput, profile);
+      const options = directorateQueryOptions(profile);
+      rowCount = persist.countDirectorates(db, filters, options);
+      if (rowCount > rowLimit) throw new Error(`عدد النتائج (${rowCount.toLocaleString('ar')}) يتجاوز حد ${format === 'pdf' ? 'PDF' : 'Excel'} الآمن (${rowLimit.toLocaleString('ar')}). أضف فلاتر لتقليل النتائج.`);
+      const rows = persist.listDirectorates(db, { ...filters, limit: rowLimit }, options);
       const masked = maskDbRows(rows, profile);
-      const defaultKeys = new Set([
-        'districtName', 'governorate', 'population', 'waterCoverage', 'pavedRoads',
-        'revenue', 'schools', 'govFacilities', 'valueChains', 'projectCost', 'projectStatus',
-      ]);
-      const fields = INPUT_FIELDS.filter((field) => allColumns || defaultKeys.has(field.key));
-      result = await exportDatabaseReportPdf({ BrowserWindow }, filePath, {
-        rows: masked.rows,
-        columns: fields.map((field) => ({ key: field.key, header: field.header, type: field.type, dbColumn: COLUMN_BY_KEY[field.key] })),
-        filters: { search, governorate, allColumns },
-      });
-      auditRead('analysis:export-filtered-pdf', {
-        entity: 'directorates', rowCount: rows.length, fields: masked.masked.join(','),
-        result: masked.masked.length ? 'masked' : 'ok', detail: 'type=database',
-      });
-    } else if (input.type === 'indicators') {
-      const view = ['values', 'scores', 'contributions'].includes(input.view) ? input.view : 'values';
-      const payload = sheetPayloads().indicators;
-      const rows = payload.rows.filter((row) => (!governorate || row.governorate === governorate)
-        && (!search || `${row.districtName} ${row.governorate}`.includes(search)));
-      result = await exportIndicatorsReportPdf({ BrowserWindow }, filePath, {
-        rows, registry: payload.registry, filters: { search, governorate }, view,
-      });
-      auditRead('analysis:export-filtered-pdf', {
-        entity: 'directorates', rowCount: rows.length, result: profile === 'shared' ? 'masked' : 'ok',
-        detail: `type=indicators;view=${view}`,
+      maskedFields = masked.masked;
+      const catalogue = [...INPUT_FIELDS, DECISION_FIELD];
+      const allowedFields = catalogue.filter((field) => !security.isProtected(field.key, profile));
+      const allowedKeys = new Set(allowedFields.map((field) => field.key));
+      const requestedKeys = Array.isArray(input.columns)
+        ? input.columns.map(String).slice(0, catalogue.length)
+        : ['districtName', 'governorate', 'population', 'waterCoverage', 'pavedRoads', 'schools', 'projectStatus'];
+      const selectedKeys = [...new Set(requestedKeys)].filter((key) => allowedKeys.has(key));
+      for (const identityKey of ['districtName', 'governorate']) {
+        if (!selectedKeys.includes(identityKey)) selectedKeys.unshift(identityKey);
+      }
+      const fields = allowedFields.filter((field) => selectedKeys.includes(field.key));
+      const columns = fields.map((field) => ({ key: field.key, header: field.header, type: field.type, dbColumn: COLUMN_BY_KEY[field.key] }));
+      const reportRows = masked.rows.map((row) => ({
+        ...row,
+        ...Object.fromEntries(columns.map((column) => [column.key, row[column.dbColumn]])),
+      }));
+      labels = reportFilterLabels(filters, catalogue);
+      const reportFilters = { search: filters.search, governorates: filters.governorates, logic: filters.logic, criteria: labels, labels };
+      const summary = directorateReportSummary(reportRows, new Set(fields.map((field) => field.key)));
+      const report = {
+        title: 'تقرير قاعدة البيانات الشاملة',
+        generatedAt: new Date().toISOString(),
+        rows: reportRows,
+        columns,
+        filters: reportFilters,
+        summary: { ...summary, total: rowCount },
+        total: rowCount,
+      };
+      result = format === 'pdf'
+        ? await exportDatabaseReportPdf({ BrowserWindow }, filePath, report)
+        : await exportFilteredWorkbook(filePath, report);
+      auditRead(`analysis:export-filtered-${format}`, {
+        entity: 'directorates', rowCount, fields: maskedFields.join(','),
+        result: maskedFields.length ? 'masked' : 'ok', detail: 'type=database',
       });
     } else {
-      throw new Error('نوع التقرير المطلوب غير صالح.');
+      const report = makeIndicatorReport(filtersInput, profile);
+      rowCount = report.total;
+      if (rowCount > rowLimit) throw new Error(`عدد النتائج (${rowCount.toLocaleString('ar')}) يتجاوز حد ${format === 'pdf' ? 'PDF' : 'Excel'} الآمن (${rowLimit.toLocaleString('ar')}). أضف شروطًا لتقليل النتائج.`);
+      const columnsRequest = input.columns && typeof input.columns === 'object' ? input.columns : {};
+      const selectedCodes = Array.isArray(columnsRequest.indicators) ? columnsRequest.indicators.map(String) : report.registry.map((item) => item.code);
+      const registry = report.registry.filter((indicator) => selectedCodes.includes(indicator.code));
+      const includePriority = profile !== 'shared' && columnsRequest.includePriority !== false;
+      const mode = report.filters.mode;
+      const view = report.filters.view;
+      const rankKey = mode === 'replica' ? 'replicaRank' : 'calibratedRank';
+      const scoreKey = mode === 'replica' ? 'replicaComposite' : 'composite';
+      const indicatorColumns = registry.map((indicator) => ({ key: indicator.code, header: indicator.header, width: 20 }));
+      const reportColumns = [
+        { key: 'districtName', header: 'المديرية', width: 24 },
+        { key: 'governorate', header: 'المحافظة', width: 18 },
+        ...(includePriority ? [
+          { key: 'reportRank', header: 'الرتبة', width: 12 },
+          { key: 'reportComposite', header: 'درجة المسار', width: 16 },
+        ] : []),
+        ...indicatorColumns,
+      ];
+      const reportRows = report.rows.map((row) => ({
+        ...row,
+        reportRank: row[rankKey] ?? null,
+        reportComposite: row[scoreKey] ?? null,
+        ...Object.fromEntries(registry.map((indicator) => [indicator.code, metricReportValue(row, indicator.code, view)])),
+      }));
+      labels = indicatorReportFilterLabels(report);
+      const reportFilters = { ...report.filters, criteria: labels, labels };
+      const exportReport = {
+        title: 'تقرير مؤشرات التنمية',
+        generatedAt: new Date().toISOString(),
+        rows: reportRows,
+        columns: reportColumns,
+        filters: reportFilters,
+        summary: {
+          ...report.summary,
+          ...(includePriority ? {} : { rankable: null, complete: null, averageComposite: null }),
+          items: [
+            { label: 'نتائج مطابقة', value: rowCount },
+            { label: 'قيم شاذة', value: report.summary.anomalous },
+            ...(includePriority ? [
+              { label: 'قابلة للترتيب', value: report.summary.rankable },
+              { label: 'متوسط درجة المسار', value: report.summary.averageComposite },
+            ] : []),
+          ],
+        },
+      };
+      result = format === 'pdf'
+        ? await exportIndicatorsReportPdf({ BrowserWindow }, filePath, {
+          rows: reportRows,
+          registry,
+          filters: reportFilters,
+          view,
+          mode,
+          total: rowCount,
+          summary: exportReport.summary,
+          includePriority,
+        })
+        : await exportFilteredWorkbook(filePath, exportReport);
+      auditRead(`analysis:export-filtered-${format}`, {
+        entity: 'directorates', rowCount, result: profile === 'shared' ? 'masked' : 'ok',
+        detail: `type=indicators;view=${view};mode=${mode}`,
+      });
     }
     persist.logAccess(db, {
-      action: 'export-pdf', entity: 'file', entityId: filePath,
-      detail: `profile=${profile};type=${input.type};search=${Boolean(search)};governorate=${Boolean(governorate)}`,
+      action: format === 'pdf' ? 'export-pdf' : 'export-excel', entity: 'file', entityId: filePath,
+      detail: `profile=${profile};type=${input.type};rows=${rowCount};criteria=${labels.length}`,
     });
     return { canceled: false, ...result };
-  });
+  }
+
+  ipcMain.handle('analysis:export-filtered-pdf', (_event, request = {}) => exportFilteredReport(request, 'pdf'));
+  ipcMain.handle('analysis:export-filtered-excel', (_event, request = {}) => exportFilteredReport(request, 'excel'));
 
   ipcMain.handle('analysis:export-pdf', async () => {
 
@@ -1107,12 +1352,21 @@ function registerHandlers() {
     return { canceled: false, ...result };
   });
 
-  // ---- Offline update policy ----------------------------------------------
-  // These compatibility channels never access the network or install software.
-  // Administrators distribute signed/verified installer packages separately.
-  ipcMain.handle('update:status', () => offlineUpdateStatus(app.getVersion()));
-  ipcMain.handle('update:check', async () => offlineUpdateStatus(app.getVersion()));
-  ipcMain.handle('update:install', () => false);
+  ipcMain.handle('update:status', () => ({ ...updateStatus(app.getVersion()), ...lastUpdateStatus, currentVersion: app.getVersion() }));
+  ipcMain.handle('update:check', async () => {
+    if (!app.isPackaged || process.platform !== 'win32' || !autoUpdater) return { ...updateStatus(app.getVersion()), currentVersion: app.getVersion() };
+    try {
+      await autoUpdater.checkForUpdates();
+    } catch (error) {
+      pushUpdateStatus({ state: 'error', message: String(error?.message ?? error) });
+    }
+    return { ...lastUpdateStatus, currentVersion: app.getVersion() };
+  });
+  ipcMain.handle('update:install', () => {
+    if (!autoUpdater || lastUpdateStatus.state !== 'downloaded') return false;
+    setImmediate(() => autoUpdater.quitAndInstall());
+    return true;
+  });
 
 }
 
@@ -1152,6 +1406,7 @@ if (!gotSingleInstanceLock) {
     if (app.isPackaged) Menu.setApplicationMenu(null);
     registerHandlers();
     createWindow();
+    setupAutoUpdate();
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   });
 }

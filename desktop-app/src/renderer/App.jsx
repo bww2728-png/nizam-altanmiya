@@ -26,7 +26,7 @@ import { cx, errText } from './lib/format.js';
 const PAGES_NEEDING_CATALOGUE = new Set(['correction', 'database', 'ranking', 'card']);
 
 /** Auto-update states that deserve a banner; idle/checking/not-available stay silent. */
-const UPDATE_BANNER_STATES = new Set(['available', 'downloading', 'downloaded', 'error', 'offline-only']);
+const UPDATE_BANNER_STATES = new Set(['available', 'downloading', 'downloaded', 'error']);
 
 /** Whole percent, clamped, or null when the main process has not reported one. */
 function updatePercent(value) {
@@ -287,11 +287,11 @@ export default function App() {
       case 'correction':
         return <Correction catalogue={catalogue ?? []} notify={notify} refreshKey={refreshKey} focusId={params.focusId ?? null} />;
       case 'indicators':
-        return <Indicators notify={notify} />;
+        return <Indicators accessProfile={status?.accessProfile ?? 'owner'} notify={notify} refreshKey={refreshKey} />;
       case 'ranking':
         return <Ranking catalogue={catalogue ?? []} notify={notify} onOpenCard={(id) => navigate('card', { id })} />;
       case 'database':
-        return <Database catalogue={catalogue ?? []} notify={notify} refreshKey={refreshKey} onOpenCard={(id) => navigate('card', { id })} />;
+        return <Database catalogue={catalogue ?? []} accessProfile={status?.accessProfile ?? 'owner'} notify={notify} refreshKey={refreshKey} onOpenCard={(id) => navigate('card', { id })} />;
       case 'card':
         return <DirectorateCard id={params.id ?? null} catalogue={catalogue ?? []} notify={notify} refreshKey={refreshKey} onNavigate={navigate} />;
       case 'dashboard':
@@ -323,9 +323,7 @@ function UpdateBanner({ status, onDismiss }) {
 
   let tone = 'info';
   let message = 'يتوفر تحديث جديد.';
-  if (state === 'offline-only') {
-    message = 'يعمل النظام محليًا دون اتصال بالإنترنت. تُثبَّت التحديثات من حزمة محلية معتمدة.';
-  } else if (state === 'available') {
+  if (state === 'available') {
     message = version
       ? `يتوفر إصدار جديد (${version}) — جارٍ التنزيل تلقائيًا...`
       : 'يتوفر إصدار جديد — جارٍ التنزيل تلقائيًا...';

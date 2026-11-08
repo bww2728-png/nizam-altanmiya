@@ -41,9 +41,11 @@ function reportValue(value, type = 'text') {
 }
 
 function filterSummary(filters, labels = {}) {
-  const items = Object.entries(filters ?? {}).filter(([, value]) => Boolean(value));
+  const items = Object.entries(filters ?? {}).filter(([key, value]) => key !== 'labels'
+    && value !== null && value !== undefined && value !== ''
+    && (!Array.isArray(value) || value.length > 0));
   if (!items.length) return 'من دون تصفية إضافية';
-  return items.map(([key, value]) => `<span><strong>${escapeHtml(labels[key] ?? key)}:</strong> ${escapeHtml(value)}</span>`).join(' — ');
+  return items.map(([key, value]) => `<span><strong>${escapeHtml(labels[key] ?? key)}:</strong> ${escapeHtml(Array.isArray(value) ? value.join('، ') : value)}</span>`).join(' — ');
 }
 
 const FILTERED_REPORT_STYLE = `
@@ -65,24 +67,29 @@ const FILTERED_REPORT_STYLE = `
   footer { position: fixed; bottom: 0; left: 0; right: 0; text-align: center; font-size: 8pt; color: #7b8fa1; }
 `;
 
-function renderDatabaseReportHtml({ rows = [], columns = [], filters = {}, generatedAt = new Date().toISOString() } = {}) {
+function renderDatabaseReportHtml({ rows = [], columns = [], filters = {}, summary = {}, total = rows.length, generatedAt = new Date().toISOString() } = {}) {
   const identity = columns.filter((column) => ['districtName', 'governorate'].includes(column.key));
   const measures = columns.filter((column) => !['districtName', 'governorate'].includes(column.key));
   const groups = [];
   for (let index = 0; index < measures.length; index += 6) groups.push(measures.slice(index, index + 6));
   if (!groups.length) groups.push([]);
-  const sections = groups.map((group, index) => {
+  const sections = groups.map((group) => {
     const heading = group.length ? group.map((column) => column.header).join('، ') : identity.map((column) => column.header).join('، ');
     const fields = [...identity, ...group];
     return `<h2>${escapeHtml(heading || 'السجلات المطابقة')}</h2>
       <table><thead><tr><th style="width:4%">#</th>${fields.map((column) => `<th>${escapeHtml(column.header)}</th>`).join('')}</tr></thead>
       <tbody>${rows.length ? rows.map((row, rowIndex) => `<tr><td>${rowIndex + 1}</td>${fields.map((column) => `<td>${escapeHtml(reportValue(row[column.dbColumn], column.type))}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${fields.length + 1}">لا توجد سجلات مطابقة للفلاتر الحالية.</td></tr>`}</tbody></table>`;
   }).join('');
-  const labels = { search: 'البحث', governorate: 'المحافظة', allColumns: 'الأعمدة المعروضة' };
-  const filterValues = { ...filters, ...(filters.allColumns ? { allColumns: 'كل الحقول' } : { allColumns: 'العرض المختصر' }) };
-  return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>تقرير قاعدة البيانات الشاملة</title><style>${FILTERED_REPORT_STYLE}</style></head><body>
+  const labels = { search: 'البحث', governorates: 'المحافظات', logic: 'منطق الشروط', criteria: 'الشروط الإضافية', allColumns: 'الأعمدة المعروضة' };
+  const filterValues = { ...filters, allColumns: filters.allColumns ? 'كل الحقول' : 'الأعمدة المختارة' };
+  const governorateBars = (summary.governorates ?? []).map((item) => {
+    const width = summary.governorates?.[0]?.count ? Math.max(3, Math.round(item.count / summary.governorates[0].count * 100)) : 0;
+    return `<div class="bar-row"><span>${escapeHtml(item.name)}</span><div class="bar-track"><i style="width:${width}%"></i></div><strong>${item.count}</strong></div>`;
+  }).join('');
+  return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>تقرير قاعدة البيانات الشاملة</title><style>${FILTERED_REPORT_STYLE}.bar-row{display:grid;grid-template-columns:140px 1fr 36px;gap:8px;align-items:center;margin:4px 0}.bar-track{height:8px;background:#e7edf2;border-radius:8px;overflow:hidden}.bar-track i{display:block;height:100%;background:#d9a441}</style></head><body>
     <div class="cover"><div>الجمهورية اليمنية — نظام التنمية المحلية</div><h1>تقرير قاعدة البيانات الشاملة</h1><div class="muted">تاريخ الإنشاء: ${escapeHtml(arabicDate(generatedAt))}</div></div>
-    <div class="summary"><strong>الفلاتر:</strong> ${filterSummary(filterValues, labels)}<br><strong>عدد السجلات المعروضة:</strong> ${rows.length}</div>
+    <div class="summary"><strong>الفلاتر:</strong> ${filterSummary(filterValues, labels)}<br><strong>عدد المديريات المطابقة:</strong> ${total} — <strong>المصدّرة:</strong> ${rows.length}${summary.population !== null && summary.population !== undefined ? ` — <strong>مجموع السكان:</strong> ${escapeHtml(reportValue(summary.population, 'number'))}` : ''}</div>
+    ${governorateBars ? `<h2>التوزيع الجغرافي للنتائج</h2>${governorateBars}` : ''}
     ${sections}<footer>نظام التنمية المحلية — تقرير آلي من البيانات المحلية المعتمدة.</footer></body></html>`;
 }
 
@@ -108,20 +115,27 @@ function indicatorReportStat(rows, indicator, view) {
   };
 }
 
-function renderIndicatorsReportHtml({ rows = [], registry = [], filters = {}, view = 'values', generatedAt = new Date().toISOString() } = {}) {
+function renderIndicatorsReportHtml({ rows = [], registry = [], filters = {}, view = 'values', mode = 'calibrated', total = rows.length, summary = {}, generatedAt = new Date().toISOString() } = {}) {
   const viewLabels = { values: 'القيم الأصلية', scores: 'الدرجات 0–100', contributions: 'المساهمة في المؤشر المركّب' };
   const summaries = registry.map((indicator) => {
     const stat = indicatorReportStat(rows, indicator, view);
     return `<tr><td>${escapeHtml(indicator.header)}</td><td>${stat.count}</td><td>${stat.missing}</td><td class="ltr">${escapeHtml(reportValue(stat.min, 'number'))}</td><td class="ltr">${escapeHtml(reportValue(stat.max, 'number'))}</td><td class="ltr">${escapeHtml(reportValue(stat.average, 'number'))}</td></tr>`;
   }).join('');
-  const body = rows.length ? rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.districtName)}</td><td>${escapeHtml(row.governorate)}</td>${registry.map((indicator) => `<td class="ltr">${escapeHtml(reportValue(indicatorValue(row, indicator.code, view), 'number'))}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${registry.length + 3}">لا توجد مديريات مطابقة للفلاتر الحالية.</td></tr>`;
-  const labels = { search: 'البحث', governorate: 'المحافظة', view: 'طريقة العرض' };
-  const filterValues = { ...filters, view: viewLabels[view] ?? viewLabels.values };
+  const rankKey = mode === 'replica' ? 'replicaRank' : 'calibratedRank';
+  const body = rows.length ? rows.map((row, index) => `<tr><td>${index + 1}</td><td class="ltr">${row[rankKey] ?? '—'}</td><td>${escapeHtml(row.districtName)}</td><td>${escapeHtml(row.governorate)}</td>${registry.map((indicator) => `<td class="ltr">${escapeHtml(reportValue(indicatorValue(row, indicator.code, view), 'number'))}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${registry.length + 4}">لا توجد مديريات مطابقة للفلاتر الحالية.</td></tr>`;
+  const labels = { criteria: 'الشروط', logic: 'منطق الشروط', mode: 'مسار الأولوية', sort: 'الترتيب', view: 'طريقة العرض' };
+  const filterValues = { ...filters, mode: mode === 'replica' ? 'مطابقة القالب' : 'المعاير', view: viewLabels[view] ?? viewLabels.values };
+  const summaryCards = [
+    ['النتائج المطابقة', total],
+    ...(summary.rankable === null || summary.rankable === undefined ? [] : [['قابلة للترتيب', summary.rankable]]),
+    ...(summary.complete === null || summary.complete === undefined ? [] : [['مكتملة البيانات', summary.complete]]),
+    ...(summary.averageComposite === null || summary.averageComposite === undefined ? [] : [['متوسط الأولوية', Number(summary.averageComposite).toFixed(3)]]),
+  ].map(([label, value]) => `<span><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</span>`).join(' — ');
   return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>تقرير مؤشرات التنمية</title><style>${FILTERED_REPORT_STYLE}</style></head><body>
     <div class="cover"><div>الجمهورية اليمنية — نظام التنمية المحلية</div><h1>تقرير مؤشرات التنمية</h1><div class="muted">تاريخ الإنشاء: ${escapeHtml(arabicDate(generatedAt))}</div></div>
-    <div class="summary"><strong>الفلاتر:</strong> ${filterSummary(filterValues, labels)}<br><strong>عدد المديريات:</strong> ${rows.length}</div>
+    <div class="summary"><strong>الفلاتر:</strong> ${filterSummary(filterValues, labels)}<br>${summaryCards}</div>
     <h2>ملخص المؤشرات ضمن النتائج المطابقة</h2><table><thead><tr><th>المؤشر</th><th>محسوب</th><th>ناقص</th><th>الأدنى</th><th>الأعلى</th><th>المتوسط</th></tr></thead><tbody>${summaries}</tbody></table>
-    <h2>تفاصيل النتائج — ${escapeHtml(viewLabels[view] ?? viewLabels.values)}</h2><table><thead><tr><th style="width:3%">#</th><th style="width:12%">المديرية</th><th style="width:9%">المحافظة</th>${registry.map((indicator) => `<th>${escapeHtml(indicator.header)}${indicator.unit ? `<div class="muted">${escapeHtml(indicator.unit)}</div>` : ''}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>
+    <h2>تفاصيل النتائج — ${escapeHtml(viewLabels[view] ?? viewLabels.values)}</h2><table><thead><tr><th style="width:3%">#</th><th style="width:5%">الرتبة</th><th style="width:12%">المديرية</th><th style="width:9%">المحافظة</th>${registry.map((indicator) => `<th>${escapeHtml(indicator.header)}${indicator.unit ? `<div class="muted">${escapeHtml(indicator.unit)}</div>` : ''}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>
     <footer>نظام التنمية المحلية — تقرير آلي من المؤشرات المحسوبة على البيانات المحلية.</footer></body></html>`;
 }
 

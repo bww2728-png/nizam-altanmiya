@@ -14,6 +14,7 @@ const { DIRECTORATE_COLUMNS } = require('./store-schema.cjs');
 const { INPUT_FIELDS, DECISION_FIELD } = require('./schema.cjs');
 const canonicalData = require('./canonical-data.cjs');
 const { parseFieldValue } = require('./parse.cjs');
+const { buildDirectorateWhere } = require('./report-filters.cjs');
 
 const FIELD_BY_KEY = new Map(INPUT_FIELDS.map((field) => [field.key, field]));
 const COLUMN_ENTRIES = Object.entries(DIRECTORATE_COLUMNS);
@@ -242,20 +243,18 @@ function upsertDirectorates(database, read) {
   return { created, updated, total: rows.length, duplicates, stale };
 }
 
-function canonicalDirectorateRows(database, filter = {}, limit = 50000) {
-  const governorate = filter.governorate ? String(filter.governorate).trim() : null;
-  const search = filter.search ? String(filter.search).trim() : null;
+function canonicalDirectorateRows(database, filter = {}, limit = 50000, options = {}) {
   const bounded = Math.min(50000,Math.max(1,Number(limit) || 50000));
-  const clauses = ["er.entity_type='directorate'","er.status='approved'"];
-  const params = [];
-  if (governorate) { clauses.push('governorate.name=?'); params.push(governorate); }
-  if (search) {
-    const escaped = search.replace(/[\\%_]/g,'\\$&');
-    clauses.push("unit.name LIKE ? ESCAPE '\\'");
-    params.push('%' + escaped + '%');
-  }
-  params.push(bounded);
-  const records = database.prepare(`SELECT er.id AS entity_id,er.external_key,er.created_at,er.updated_at,unit.name AS district,governorate.name AS governorate FROM entity_records er JOIN geographic_units unit ON unit.id=er.geographic_unit_id LEFT JOIN geographic_units governorate ON governorate.id=unit.parent_id WHERE ${clauses.join(' AND ')} ORDER BY governorate.name,unit.name LIMIT ?`).all(...params);
+  const offset = Math.max(0,Math.min(1000000,Number(filter.offset) || 0));
+  const { clauses, params } = buildDirectorateWhere(filter, options);
+  const sortKey = String(filter.sortKey ?? '');
+  const sortField = INPUT_FIELDS.find((field) => field.key === sortKey) ?? (DECISION_FIELD.key === sortKey ? DECISION_FIELD : null);
+  const sortColumn = sortField ? DIRECTORATE_COLUMNS[sortField.key] : null;
+  let orderBy = 'governorate.name,unit.name';
+  if (sortColumn) orderBy = `legacy.${sortColumn} ${filter.sortDirection === 'desc' ? 'DESC' : 'ASC'},governorate.name,unit.name`;
+  else if (['updated_at','created_at'].includes(sortKey)) orderBy = `er.${sortKey} ${filter.sortDirection === 'asc' ? 'ASC' : 'DESC'},governorate.name,unit.name`;
+  params.push(bounded,offset);
+  const records = database.prepare(`SELECT er.id AS entity_id,er.external_key,er.created_at,er.updated_at,unit.name AS district,governorate.name AS governorate FROM entity_records er JOIN geographic_units unit ON unit.id=er.geographic_unit_id LEFT JOIN geographic_units governorate ON governorate.id=unit.parent_id LEFT JOIN directorates legacy ON legacy.id=CAST(substr(er.external_key,20) AS INTEGER) WHERE ${clauses.join(' AND ')} ORDER BY ${orderBy} LIMIT ? OFFSET ?`).all(...params);
   if (!records.length) return [];
   const parsed = records.map(record => ({
     ...record,
@@ -293,17 +292,28 @@ function canonicalDirectorateRows(database, filter = {}, limit = 50000) {
   });
 }
 
-function listDirectorates(database, filter = {}) {
-  const limit = Math.min(5000,Math.max(1,Number(filter.limit) || 2000));
-  return canonicalDirectorateRows(database,filter,limit);
+function listDirectorateFilterOptions(database, key, options = {}) {
+  const allowedKeys = options.allowedKeys instanceof Set ? options.allowedKeys : new Set([...INPUT_FIELDS,DECISION_FIELD].map((field) => field.key));
+  if (key === '__governorate') return database.prepare("SELECT name AS value FROM geographic_units WHERE unit_type='governorate' ORDER BY name COLLATE NOCASE LIMIT 200").all().map((row) => row.value);
+  if (key === '__district') return database.prepare("SELECT name AS value FROM geographic_units WHERE unit_type='district' ORDER BY name COLLATE NOCASE LIMIT 5000").all().map((row) => row.value);
+  if (key === '__sourceFile' || key === '__sourceSheet') {
+    const column = key === '__sourceFile' ? 'source_file' : 'source_sheet';
+    return database.prepare(`SELECT DISTINCT ${column} AS value FROM directorates WHERE ${column} IS NOT NULL AND TRIM(${column})<>'' ORDER BY ${column} COLLATE NOCASE LIMIT 200`).all().map((row) => row.value);
+  }
+  if (!allowedKeys.has(key)) return [];
+  const field = [...INPUT_FIELDS,DECISION_FIELD].find((item) => item.key === key);
+  if (!field || field.type !== 'text') return [];
+  return database.prepare("SELECT DISTINCT value.value_text AS value FROM entity_field_values value JOIN data_field_definitions definition ON definition.id=value.field_definition_id WHERE definition.entity_type='directorate' AND definition.field_key=? AND value.period_key='' AND value.value_state<>'unknown' AND value.value_text IS NOT NULL AND TRIM(value.value_text)<>'' ORDER BY value.value_text COLLATE NOCASE LIMIT 200").all(key).map((row) => row.value);
 }
 
-function countDirectorates(database, filter = {}) {
-  const governorate = filter.governorate ? String(filter.governorate).trim() : null;
-  const clauses = ["er.entity_type='directorate'","er.status='approved'","er.external_key GLOB 'legacy-directorate:[0-9]*'"];
-  const params = [];
-  if (governorate) { clauses.push('governorate.name=?'); params.push(governorate); }
-  return database.prepare(`SELECT COUNT(*) AS count FROM entity_records er JOIN geographic_units unit ON unit.id=er.geographic_unit_id LEFT JOIN geographic_units governorate ON governorate.id=unit.parent_id WHERE ${clauses.join(' AND ')}`).get(...params).count;
+function listDirectorates(database, filter = {}, options = {}) {
+  const limit = Math.min(50000,Math.max(1,Number(filter.limit) || 2000));
+  return canonicalDirectorateRows(database,filter,limit,options);
+}
+
+function countDirectorates(database, filter = {}, options = {}) {
+  const { clauses, params } = buildDirectorateWhere(filter, options);
+  return database.prepare(`SELECT COUNT(DISTINCT er.id) AS count FROM entity_records er JOIN geographic_units unit ON unit.id=er.geographic_unit_id LEFT JOIN geographic_units governorate ON governorate.id=unit.parent_id LEFT JOIN directorates legacy ON legacy.id=CAST(substr(er.external_key,20) AS INTEGER) WHERE ${clauses.join(' AND ')}`).get(...params).count;
 }
 
 /** Convert a stored directorate row back into the engine's input shape. */
@@ -997,6 +1007,7 @@ module.exports = {
   upsertDirectorate,
   upsertDirectorates,
   listDirectorates,
+  listDirectorateFilterOptions,
   countDirectorates,
   loadAnalysisRows,
   rowFromDirectorate,
