@@ -512,6 +512,16 @@ function registerHandlers() {
     return history;
   });
 
+  ipcMain.handle('import:sheet-preview', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') {
+      return { restricted: true, message: 'عرض القيم الخام متاح في وضع المالك فقط؛ وضع المشاركة لا يكشف بيانات ملفات غير مصنفة.' };
+    }
+    const db = requireDatabase();
+    const preview = canonicalData.readWorkbookSheetPreview(db, request.batchId, request.sheetId, request.limit ?? 20);
+    auditRead('import:sheet-preview', { entity: 'workbook_import_sheet', entityId: preview.sheet.id, rowCount: preview.rows.length });
+    return preview;
+  });
+
   ipcMain.handle('import:apply', (event, request = {}) => {
     const db = requireDatabase();
     if (!pendingPlan) throw new Error('لا توجد خطة استيراد جاهزة. اختر ملف القالب أولًا.');
