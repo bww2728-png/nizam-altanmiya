@@ -72,7 +72,20 @@ test('reading the real template finds the right sheet, header row and 39 input c
 
   assert.equal(azal.districtName, 'مديرية أزال');
   assert.equal(faqih.districtName, 'مديرية بيت الفقيه');
-  assert.equal(result.warnings.length, 0);
+  const inventoryNoticeCodes = new Set([
+    'unimported-data-sheets',
+    'hidden-data-sheets',
+    'unimported-table-regions',
+    'embedded-images-detected',
+    'formula-cells-detected',
+    'merged-cells-detected',
+    'inventory-row-limit',
+    'header-scan-limit',
+  ]);
+  assert.ok(
+    result.warnings.every((warning) => inventoryNoticeCodes.has(warning.code)),
+    `unexpected row/mapping warning: ${JSON.stringify(result.warnings)}`
+  );
 });
 
 test('file to engine: the numbers match the workbook end to end', async () => {

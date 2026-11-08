@@ -480,6 +480,37 @@ test('a plan is rejected when the database changes after review', () => {
   }
 });
 
+test('hidden rows and cached-formula values require manual review and are not bulk-approved', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    const plan = buildImportPlan(database, readOf([
+      rowOf(7, completeValues(), {
+        warnings: [
+          { key: null, code: 'hidden-row', raw: '', value: null },
+          { key: 'population', code: 'formula-cell', raw: '=1000*40', value: 43739 },
+        ],
+      }),
+    ]), { fileName: FILE_NAME });
+
+    const row = plan.rows[0];
+    assert.equal(row.status, 'review');
+    for (const code of ['hidden-row', 'formula-cell']) {
+      const issue = row.issues.find((item) => item.code === code);
+      assert.ok(issue, `missing review issue ${code}`);
+      assert.equal(issue.severity, 'warning');
+    }
+
+    const result = applyImportPlan(database, plan);
+    assert.equal(result.applied, 0);
+    assert.equal(result.created, 0);
+    assert.equal(result.skipped.length, 1);
+    assert.equal(persist.countDirectorates(database), 0);
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('unreviewed create/update rows are skipped and only explicit approvals are written', () => {
   const { database, directory } = openTestDatabase();
   try {

@@ -267,6 +267,9 @@ async function readDirectorateWorkbook(filePath) {
     const rawValues = {};
     const sources = {};
     const rowWarnings = [];
+    if (row.hidden) {
+      rowWarnings.push({ key: null, code: 'hidden-row', raw: '', value: null });
+    }
     let hasAnyValue = false;
 
     for (const [key, column] of Object.entries(columnMap)) {
@@ -275,8 +278,13 @@ async function readDirectorateWorkbook(filePath) {
       const cell = row.getCell(column);
       const raw = cell.value === undefined || cell.value === null ? null : cell.value;
       const text = cellText(raw);
-      if (text !== '') hasAnyValue = true;
+      const isFormula = Boolean(raw && typeof raw === 'object' && (raw.formula || raw.sharedFormula));
+      const formulaText = isFormula ? `=${raw.formula ?? raw.sharedFormula}` : '';
+      if (text !== '' || isFormula) hasAnyValue = true;
       const parsed = parseFieldValue(raw === null ? null : (typeof raw === 'object' && raw.result !== undefined ? raw.result : raw), field);
+      if (isFormula) {
+        rowWarnings.push({ key, code: 'formula-cell', raw: formulaText, value: parsed.value });
+      }
       // Only a value that parsed cleanly may touch the database. An empty or
       // placeholder cell must NOT arrive as an explicit `null`, otherwise
       // re-importing a partial workbook would silently wipe values that were

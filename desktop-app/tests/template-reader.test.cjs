@@ -22,7 +22,7 @@ async function makeWorkbook(target) {
     ['J2', 'عدد المدارس'],
     ['A3', 'مديرية أولى'],
     ['E3', 'إب'],
-    ['H3', 20000],
+    ['H3', { formula: '10000 * 2', result: 20000 }],
     ['J3', 12],
     ['A30', 'مديرية ثانية'],
     ['E30', 'تعز'],
@@ -41,7 +41,12 @@ async function makeWorkbook(target) {
   ]) main.getCell(cell).value = value;
 
   main.getRow(40).hidden = true;
-  main.getCell('H31').value = { formula: '100 + 1', result: 101 };
+  for (const [cell, value] of [
+    ['A40', 'مديرية مخفية'],
+    ['E40', 'ذمار'],
+    ['H40', 12000],
+    ['J40', 9],
+  ]) main.getCell(cell).value = value;
 
   const imageId = workbook.addImage({
     base64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jzBYAAAAASUVORK5CYII=',
@@ -99,8 +104,8 @@ test('reader inventories all sheets and does not silently import hidden/addition
     const read = await readDirectorateWorkbook(filePath);
 
     assert.equal(read.sheetName, 'البيانات الأساسية');
-    assert.deepEqual(read.rows.map((row) => row.rowNumber), [3, 30]);
-    assert.equal(read.totalRows, 2, 'sparse row gaps must not stop reading, and the second table must not be mixed in');
+    assert.deepEqual(read.rows.map((row) => row.rowNumber), [3, 30, 40]);
+    assert.equal(read.totalRows, 3, 'sparse row gaps must not stop reading, hidden rows are surfaced for review, and the second table must not be mixed in');
     assert.equal(read.workbookInventory.sheetCount, 4);
     assert.equal(read.workbookInventory.hiddenSheetCount, 1);
     assert.equal(read.workbookInventory.visibleSheetCount, 3);
@@ -120,6 +125,8 @@ test('reader inventories all sheets and does not silently import hidden/addition
     assert.equal(base.formulaCount, 1);
     assert.ok(base.mergedRangeCount >= 1);
     assert.ok(base.hiddenRowCount >= 1);
+    assert.ok(read.rows.find((row) => row.rowNumber === 3).warnings.some((warning) => warning.code === 'formula-cell'));
+    assert.ok(read.rows.find((row) => row.rowNumber === 40).warnings.some((warning) => warning.code === 'hidden-row'));
 
     assert.equal(water.headerCandidates.length, 1);
     assert.equal(water.selected, false);

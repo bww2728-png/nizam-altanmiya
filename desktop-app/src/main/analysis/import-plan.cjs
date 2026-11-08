@@ -50,7 +50,7 @@ const CURRENCY_KEYS = new Set(['revenue', 'projectCost']);
 /** Codes that mean "this cell could not be understood": the row is quarantined. */
 const BLOCKING_CODES = new Set(['invalid-number', 'invalid-boolean', 'ratio-out-of-range', 'missing-identity']);
 /** Codes that leave the row writable but incomplete or annotated. */
-const WARNING_CODES = new Set(['missing-mandatory', 'percent-converted', 'placeholder', 'had-percent', 'anomaly', 'duplicate-in-file']);
+const WARNING_CODES = new Set(['missing-mandatory', 'percent-converted', 'placeholder', 'had-percent', 'anomaly', 'duplicate-in-file', 'hidden-row', 'formula-cell']);
 
 function nowIso() {
   return new Date().toISOString();
@@ -96,6 +96,8 @@ const CODE_LABELS = {
   placeholder: 'خلية تحمل «لا يوجد/—» فتُعامل كفراغ',
   'had-percent': 'الخلية تحمل علامة % صريحة',
   'duplicate-in-file': 'مفتاح مكرر داخل الملف',
+  'hidden-row': 'الصف مخفي في ورقة Excel — يتطلب مراجعة واعتمادًا يدويًا',
+  'formula-cell': 'قيمة حُسبت بصيغة Excel — تُراجع القيمة المحفوظة ولا تُنفّذ الصيغة',
 };
 
 function labelFor(code) {
