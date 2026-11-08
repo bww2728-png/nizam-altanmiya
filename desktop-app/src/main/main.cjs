@@ -10,6 +10,7 @@ const {
   quarantineLegacyDatabase,
   backupStore,
   copyStoreKey,
+  restoreBackupBundle,
   listBackups,
 } = require('./store.cjs');
 const security = require('./security.cjs');
@@ -341,24 +342,69 @@ function registerHandlers() {
     return { success: true };
   });
 
-  ipcMain.handle('db:backup', async () => {
-    const db = requireDatabase();
+  async function createConsistentBackup(db) {
     const directory = path.join(app.getPath('userData'), 'backups');
-    fs.mkdirSync(directory, { recursive: true });
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') fs.chmodSync(directory, 0o700);
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const target = path.join(directory, `development-data.db.${stamp}.bak`);
+    const target = path.join(directory, 'development-data.db.' + stamp + '-' + crypto.randomBytes(3).toString('hex') + '.bak');
     await db.backup(target);
-    const keyTarget = target + '.key';
     try {
-      copyStoreKey(getStoreKeyPath(), keyTarget);
+      if (process.platform !== 'win32') fs.chmodSync(target, 0o600);
+      copyStoreKey(getStoreKeyPath(), target + '.key');
     } catch (error) {
       try { fs.rmSync(target, { force: true }); } catch { /* best effort cleanup */ }
-      try { fs.rmSync(keyTarget, { force: true }); } catch { /* best effort cleanup */ }
-      throw new Error('فشل حفظ مفتاح النسخة الاحتياطية؛ حُذفت النسخة غير القابلة للاستعادة: ' + error.message);
+      try { fs.rmSync(target + '.key', { force: true }); } catch { /* best effort cleanup */ }
+      throw new Error('فشل إنشاء نسخة احتياطية قابلة للاستعادة؛ حُذفت النسخة الجزئية: ' + error.message);
     }
+    return target;
+  }
+
+  ipcMain.handle('db:backup', async () => {
+    const db = requireDatabase();
+    const target = await createConsistentBackup(db);
     persist.logAccess(db, { action: 'store-backup', entity: 'store', entityId: target });
     auditRead('db:backup', { entity: 'store', entityId: target });
     return { filePath: target, backups: listBackups(getDatabasePath()).length };
+  });
+
+  ipcMain.handle('db:restore', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'اختر النسخة الاحتياطية المراد استعادتها',
+      properties: ['openFile'],
+      filters: [{ name: 'نسخ قاعدة البيانات الاحتياطية', extensions: ['bak'] }],
+    });
+    if (canceled || !filePaths.length) return { canceled: true };
+
+    const selected = safeRealpath(filePaths[0]) ?? path.resolve(filePaths[0]);
+    const databasePath = getDatabasePath();
+    const keyPath = getStoreKeyPath();
+    let safetyBackup = null;
+
+    if (database) safetyBackup = await createConsistentBackup(database);
+    else if (fs.existsSync(databasePath)) safetyBackup = backupStore(databasePath, { keyPath });
+
+    if (database) database.close();
+    database = undefined;
+    pendingPlan = null;
+    invalidateSheets();
+
+    try {
+      const restored = restoreBackupBundle(selected, databasePath, keyPath);
+      database = openDatabase();
+      sessionId = crypto.randomUUID();
+      auditRead('db:restore', { entity: 'store', entityId: selected, result: 'ok', detail: 'safetyBackup=' + Boolean(safetyBackup) });
+      return { canceled: false, restored: true, safetyBackup, filePath: restored.restoredPath };
+    } catch (error) {
+      // restoreBackupBundle rolls the original database/key pair back on a failed swap.
+      try {
+        if (!database && fs.existsSync(databasePath) && fs.existsSync(keyPath)) {
+          database = openDatabase();
+          sessionId = crypto.randomUUID();
+        }
+      } catch { /* preserve the original restore error; the files remain available for manual recovery */ }
+      throw error;
+    }
   });
 
   ipcMain.handle('db:backups', () => ({ backups: listBackups(getDatabasePath()) }));
