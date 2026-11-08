@@ -23,6 +23,7 @@ const { exportAnalysisPdf } = require('./analysis/pdf.cjs');
 const { DIRECTORATE_COLUMNS } = require('./analysis/store-schema.cjs');
 const { buildImportPlan, summarizePlan, applyImportPlan } = require('./analysis/import-plan.cjs');
 const { buildSheets, buildRanking } = require('./analysis/sheets.cjs');
+const { inspectXlsxPackage } = require('./analysis/xlsx-preflight.cjs');
 
 let mainWindow;
 let database;
@@ -121,6 +122,10 @@ function assertTemplatePath(filePath) {
   const stat = fs.statSync(filePath);
   if (!stat.isFile() || stat.size === 0) throw new Error('ملف القالب فارغ أو ليس ملفًا صالحًا.');
   if (stat.size > TEMPLATE_MAX_BYTES) throw new Error('حجم ملف القالب يتجاوز الحد الآمن (200 ميجابايت).');
+  // Inspect ZIP central-directory metadata before ExcelJS loads any workbook
+  // XML or inflates entries. This rejects corrupt and decompression-bomb-like
+  // packages while keeping extraction entirely in memory/local parsing.
+  inspectXlsxPackage(filePath);
   return filePath;
 }
 
