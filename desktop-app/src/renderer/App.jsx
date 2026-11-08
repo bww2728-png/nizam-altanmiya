@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Download, RefreshCw, X } from 'lucide-react';
 import AppShell from './components/AppShell.jsx';
+import ThemeToggle from './components/ThemeToggle.jsx';
 import { ErrorBanner, Loading, ToastStack } from './components/ui.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import ImportPage from './pages/Import.jsx';
@@ -42,6 +43,13 @@ export default function App() {
   const [bootError, setBootError] = useState('');
   const [route, setRoute] = useState('dashboard');
   const [view, setView] = useState({ route: 'dashboard', phase: 'enter', next: null, params: {} });
+  const [theme, setTheme] = useState(() => {
+    try {
+      return window.localStorage.getItem('ldi-theme') === 'light' ? 'light' : 'dark';
+    } catch {
+      return 'dark';
+    }
+  });
   const [params, setParams] = useState({});
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
@@ -64,6 +72,19 @@ export default function App() {
 
   const dismissToast = useCallback((id) => {
     setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem('ldi-theme', theme);
+    } catch {
+      return;
+    }
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => current === 'dark' ? 'light' : 'dark');
   }, []);
 
   /* ---------------------------------------------------------------- session */
@@ -259,6 +280,8 @@ export default function App() {
         route={route}
         phase={view.phase}
         onNavigate={navigate}
+        theme={theme}
+        onToggleTheme={toggleTheme}
         profile={status.accessProfile}
         profileLabel={status.accessProfileLabel}
         onToggleProfile={toggleProfile}
