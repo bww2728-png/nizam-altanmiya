@@ -18,10 +18,15 @@ const test = require('node:test');
 const Database = require('better-sqlite3-multiple-ciphers');
 
 const { migrate, DIRECTORATE_COLUMN_MIGRATIONS } = require('../src/main/analysis/store-schema.cjs');
-const { openEncryptedStore, backupStore, copyStoreKey, listBackups } = require('../src/main/store.cjs');
+const { openEncryptedStore, backupStore, copyStoreKey, restoreBackupBundle, listBackups } = require('../src/main/store.cjs');
 const persist = require('../src/main/analysis/persist.cjs');
 const security = require('../src/main/security.cjs');
 const { serializeAnalysis } = require('../src/main/analysis/serialize.cjs');
+
+function classifyStoreForRestore(filePath, key) {
+  const { classifyStore } = require('../src/main/store.cjs');
+  return classifyStore(filePath, key).ok;
+}
 
 function openTestDatabase() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-hardening-'));
@@ -234,3 +239,68 @@ test('copyStoreKey writes only validated key material with private permissions',
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+
+test('restore swaps an encrypted database and its matching key as one verified bundle', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-restore-bundle-'));
+  const livePath = path.join(directory, 'development-data.db');
+  const liveKeyPath = path.join(directory, 'store.key');
+  const backupPath = path.join(directory, 'development-data.db.2026-11-08.bak');
+  const liveKey = 'b'.repeat(64);
+  const backupKey = 'a'.repeat(64);
+  try {
+    const live = openEncryptedStore(livePath, liveKey);
+    live.exec("CREATE TABLE restore_marker (value TEXT NOT NULL); INSERT INTO restore_marker VALUES ('live-before-restore')");
+    live.close();
+    fs.writeFileSync(liveKeyPath, liveKey, { mode: 0o600 });
+
+    const backup = openEncryptedStore(backupPath, backupKey);
+    backup.exec("CREATE TABLE restore_marker (value TEXT NOT NULL); INSERT INTO restore_marker VALUES ('from-backup')");
+    backup.close();
+    const sourceKeyPath = path.join(directory, 'source.key');
+    fs.writeFileSync(sourceKeyPath, backupKey, { mode: 0o600 });
+    copyStoreKey(sourceKeyPath, backupPath + '.key');
+
+    const restored = restoreBackupBundle(backupPath, livePath, liveKeyPath);
+    assert.equal(restored.restoredPath, livePath);
+    assert.equal(fs.readFileSync(liveKeyPath, 'utf8').trim(), backupKey);
+    assert.equal(classifyStoreForRestore(livePath, backupKey), true);
+    const opened = openEncryptedStore(livePath, backupKey);
+    try {
+      assert.equal(opened.prepare('SELECT value FROM restore_marker').get().value, 'from-backup');
+    } finally {
+      opened.close();
+    }
+    assert.equal(fs.existsSync(livePath + '.rollback-' + 'unused'), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('invalid restore bundle is rejected before changing the live encrypted database', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-restore-invalid-'));
+  const livePath = path.join(directory, 'development-data.db');
+  const liveKeyPath = path.join(directory, 'store.key');
+  const backupPath = path.join(directory, 'bad-backup.bak');
+  const liveKey = 'c'.repeat(64);
+  try {
+    const live = openEncryptedStore(livePath, liveKey);
+    live.exec("CREATE TABLE restore_marker (value TEXT NOT NULL); INSERT INTO restore_marker VALUES ('preserve-me')");
+    live.close();
+    fs.writeFileSync(liveKeyPath, liveKey, { mode: 0o600 });
+    fs.writeFileSync(backupPath, 'not-a-sqlcipher-database');
+    fs.writeFileSync(backupPath + '.key', 'd'.repeat(64), { mode: 0o600 });
+
+    assert.throws(() => restoreBackupBundle(backupPath, livePath, liveKeyPath), /تعذّر التحقق من النسخة الاحتياطية/);
+    assert.equal(fs.readFileSync(liveKeyPath, 'utf8').trim(), liveKey);
+    const opened = openEncryptedStore(livePath, liveKey);
+    try {
+      assert.equal(opened.prepare('SELECT value FROM restore_marker').get().value, 'preserve-me');
+    } finally {
+      opened.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
