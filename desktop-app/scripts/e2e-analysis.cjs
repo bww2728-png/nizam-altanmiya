@@ -28,6 +28,21 @@ const USER_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-e2e-'));
 const SAMPLE = path.join(USER_DATA, 'sample-20.xlsx');
 const { getOfflineNetworkAudit } = require(path.join(ROOT, 'src', 'main', 'offline-policy.cjs'));
 const interactionTrace = [];
+const rendererRuntimeErrors = [];
+
+app.on('browser-window-created', (_event, browserWindow) => {
+  browserWindow.webContents.on('console-message', (_consoleEvent, level, message, line, sourceId) => {
+    if (level >= 2) {
+      rendererRuntimeErrors.push({ type: 'console-error', level, message, line, sourceId });
+    }
+  });
+  browserWindow.webContents.on('render-process-gone', (_goneEvent, details) => {
+    rendererRuntimeErrors.push({ type: 'render-process-gone', ...details });
+  });
+  browserWindow.webContents.on('did-fail-load', (_loadEvent, errorCode, errorDescription, validatedURL) => {
+    rendererRuntimeErrors.push({ type: 'did-fail-load', errorCode, errorDescription, validatedURL });
+  });
+});
 
 app.setPath('userData', USER_DATA);
 require(path.join(ROOT, 'src', 'main', 'main.cjs'));
@@ -497,9 +512,14 @@ app.whenReady().then(async () => {
       projectTitlePresent: document.body.innerText.includes('سجل المشاريع المعتمدة'),
       projectCodePresent: document.body.innerText.includes('E2E-001'),
       pageText: document.body.innerText.slice(-1800),
+      rootHtml: document.querySelector('#root')?.innerHTML.slice(-2400) ?? null,
       cards: [...document.querySelectorAll('.card')].map(card => card.innerText.slice(0, 100)),
     }))()`);
-    console.log('[E2E] Project page navigation: ' + JSON.stringify({ projectNavClicked, ...projectPageDiagnostics }));
+    console.log('[E2E] Project page navigation: ' + JSON.stringify({
+      projectNavClicked,
+      rendererRuntimeErrors: rendererRuntimeErrors.slice(-20),
+      ...projectPageDiagnostics,
+    }));
     await waitFor(window, `document.body.innerText.includes('سجل المشاريع المعتمدة') && document.body.innerText.includes('مشروع اختبار E2E')`, 12000)
       .catch(error => { throw new Error(error.message + '; projectPage=' + JSON.stringify(projectPageDiagnostics)); });
     const projectList = await bodyText(window);
