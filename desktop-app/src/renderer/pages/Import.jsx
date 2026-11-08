@@ -126,6 +126,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
       // decisions that the operator explicitly made in this review session.
       const applied = await window.localApp.applyImport({ decisions, force });
       setResult(applied);
+      setPlan(current => current?.staging ? { ...current, stagingStatus: applied.stagingStatus } : current);
       await refreshHistory();
       setStep('applied');
       onApplied?.();
@@ -187,8 +188,8 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
         </div>
       )}
 
-      {plan?.staging && <DurableStaging staging={plan.staging} stagingOnly={plan.stagingOnly} message={plan.stagingMessage} />}
-      {!plan?.staging && <ImportHistory rows={importHistory} />}
+      {plan?.staging && <DurableStaging staging={plan.staging} status={plan.stagingStatus ?? plan.staging.status} stagingOnly={plan.stagingOnly} message={plan.stagingMessage} />}
+      <ImportHistory rows={importHistory} />
 
       {step === 'idle' && <Starter busy={busy} onChoose={chooseFile} />}
 
@@ -517,11 +518,11 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
   );
 }
 
-function DurableStaging({ staging, stagingOnly, message }) {
+function DurableStaging({ staging, status, stagingOnly, message }) {
   return (
     <Card
       title="نسخة الاستقبال المحفوظة داخل قاعدة البيانات"
-      subtitle={`دفعة #${staging.batchId} · SHA-256 ${String(staging.sha256 ?? '').slice(0, 16)}… · لم تُعتمد بيانات الأوراق الإضافية`}
+      subtitle={`دفعة #${staging.batchId} · SHA-256 ${String(staging.sha256 ?? '').slice(0, 16)}… · الحالة: ${status ?? 'staged'}`}
     >
       <div className="stat-strip">
         <MiniStat label="أوراق العمل" value={fmtNumber(staging.sheetCount, 0)} />
