@@ -73,15 +73,18 @@ function copyStoreKey(keyPath, targetPath) {
 
 /**
  * Copy a complete encrypted store (database, sidecars and encryption key) into
- * the backups folder. When keyPath is supplied, failure to copy the key or any
+ * the backups folder. keyPath is mandatory: failure to copy the key or any
  * existing sidecar aborts the backup and removes the partial files.
  *
  * Backups are pruned as complete bundles: database, key and SQLite sidecars.
  */
 function backupStore(filePath, options = {}) {
   if (!fs.existsSync(filePath)) return null;
-  const keyPath = options.keyPath ? path.resolve(options.keyPath) : null;
-  if (keyPath && !fs.existsSync(keyPath)) {
+  if (!options.keyPath) {
+    throw new Error('تعذّر إنشاء نسخة احتياطية آمنة: يجب توفير مفتاح التخزين store.key مع قاعدة البيانات.');
+  }
+  const keyPath = path.resolve(options.keyPath);
+  if (!fs.existsSync(keyPath)) {
     throw new Error('تعذّر إنشاء نسخة قابلة للاستعادة: مفتاح التخزين store.key غير موجود.');
   }
 
