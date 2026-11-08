@@ -24,6 +24,11 @@ const { DIRECTORATE_COLUMNS } = require('./analysis/store-schema.cjs');
 const { buildImportPlan, summarizePlan, applyImportPlan } = require('./analysis/import-plan.cjs');
 const { buildSheets, buildRanking } = require('./analysis/sheets.cjs');
 
+// electron-updater is optional at load time: a source checkout without publish
+// configuration must still boot rather than crash on import.
+let autoUpdater = null;
+try { ({ autoUpdater } = require('electron-updater')); } catch { autoUpdater = null; }
+
 let mainWindow;
 let database;
 /** Workbook read and turned into a plan, but not yet applied to the database. */
@@ -190,6 +195,45 @@ function validateCalibration(kThreshold, deprivationLine) {
       throw new Error('خط الحرمان يجب أن يكون رقمًا بين 0 و1.');
     }
   }
+}
+
+// ---- Automatic updates ------------------------------------------------------
+
+/** Latest update state; every push is a merge of this object. */
+let lastUpdateStatus = { state: 'idle' };
+/** First check waits for the window to settle, then repeats every six hours. */
+const UPDATE_CHECK_DELAY_MS = 8000;
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/** Merge a status patch and forward it when the window can still receive it. */
+function pushUpdateStatus(next) {
+  lastUpdateStatus = { ...lastUpdateStatus, ...next };
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+    mainWindow.webContents.send('update:status', lastUpdateStatus);
+  }
+}
+
+/**
+ * Wire electron-updater once. A dev run (or a build without publish metadata)
+ * stays inert on purpose: `app.isPackaged` is false and nothing is queried.
+ */
+function setupAutoUpdate() {
+  if (!app.isPackaged || !autoUpdater) return;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('checking-for-update', () => pushUpdateStatus({ state: 'checking' }));
+  autoUpdater.on('update-available', (info) => pushUpdateStatus({ state: 'available', version: info?.version }));
+  autoUpdater.on('update-not-available', () => pushUpdateStatus({ state: 'not-available' }));
+  autoUpdater.on('download-progress', (progress) => pushUpdateStatus({ state: 'downloading', percent: Math.round(progress?.percent ?? 0) }));
+  autoUpdater.on('update-downloaded', (info) => pushUpdateStatus({ state: 'downloaded', version: info?.version }));
+  autoUpdater.on('error', (error) => pushUpdateStatus({ state: 'error', message: String(error?.message ?? error) }));
+
+  // Every check keeps a catch: an offline machine must not surface an
+  // unhandled rejection, and a failed check is already reported by the error event.
+  const check = () => { autoUpdater.checkForUpdates().catch(() => {}); };
+  setTimeout(check, UPDATE_CHECK_DELAY_MS);
+  setInterval(check, UPDATE_CHECK_INTERVAL_MS);
 }
 
 /**
@@ -732,6 +776,29 @@ function registerHandlers() {
     return { canceled: false, ...result };
   });
 
+  // ---- Automatic updates --------------------------------------------------
+  ipcMain.handle('update:status', () => ({ ...lastUpdateStatus, currentVersion: app.getVersion() }));
+
+  ipcMain.handle('update:check', async () => {
+    // A dev run has no publish target, so answer from the cached state instead.
+    if (!app.isPackaged || !autoUpdater) return { ...lastUpdateStatus, currentVersion: app.getVersion() };
+    try {
+      await autoUpdater.checkForUpdates();
+    } catch (error) {
+      pushUpdateStatus({ state: 'error', message: String(error?.message ?? error) });
+    }
+    return { ...lastUpdateStatus, currentVersion: app.getVersion() };
+  });
+
+  ipcMain.handle('update:install', () => {
+    if (autoUpdater && lastUpdateStatus.state === 'downloaded') {
+      // Defer the quit so this reply reaches the renderer before the window closes.
+      setImmediate(() => autoUpdater.quitAndInstall());
+      return true;
+    }
+    return false;
+  });
+
 }
 
 /** Re-run the analysis from the database when nothing is cached in memory. */
@@ -769,6 +836,7 @@ if (!gotSingleInstanceLock) {
     if (app.isPackaged) Menu.setApplicationMenu(null);
     registerHandlers();
     createWindow();
+    setupAutoUpdate();
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   });
 }

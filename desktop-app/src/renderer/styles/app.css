@@ -923,6 +923,55 @@ table.data .cell-actions { display: flex; gap: 6px; justify-content: flex-start;
 .error-banner button { margin-inline-start: auto; color: inherit; }
 
 /* --------------------------------------------------------------------------
+   Automatic update strip
+   -------------------------------------------------------------------------- */
+
+.update-banner {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-block-end: 1px solid var(--line-strong);
+  background: rgba(11, 20, 36, 0.96);
+  color: var(--text);
+  font-size: 0.84rem;
+}
+.update-banner.info {
+  border-block-end-color: rgba(98, 168, 232, 0.4);
+  background: rgba(20, 38, 62, 0.96);
+  color: #d7e8ff;
+}
+.update-banner.ok {
+  border-block-end-color: rgba(67, 192, 138, 0.42);
+  background: rgba(16, 42, 34, 0.96);
+  color: #d3f4e4;
+}
+.update-banner.bad {
+  border-block-end-color: rgba(236, 106, 100, 0.45);
+  background: rgba(48, 22, 22, 0.96);
+  color: #ffd9d6;
+}
+.update-banner-icon { display: inline-flex; color: inherit; }
+.update-banner-text { flex: 1; }
+.update-banner-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-gold);
+  background: var(--gold-shadow);
+  color: var(--gold-bright);
+  font-size: 0.78rem;
+}
+.update-banner-action:hover { background: rgba(216, 180, 95, 0.28); }
+.update-banner-close { display: inline-flex; color: inherit; opacity: 0.8; }
+.update-banner-close:hover { opacity: 1; }
+
+/* --------------------------------------------------------------------------
    Import review
    -------------------------------------------------------------------------- */
 

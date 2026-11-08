@@ -58,4 +58,14 @@ contextBridge.exposeInMainWorld('localApp', {
   // Exports
   exportAnalysisExcel: () => ipcRenderer.invoke('analysis:export-excel'),
   exportAnalysisPdf: () => ipcRenderer.invoke('analysis:export-pdf'),
+
+  // Automatic updates (GitHub Releases)
+  updateStatus: () => ipcRenderer.invoke('update:status'),
+  checkForUpdates: () => ipcRenderer.invoke('update:check'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  onUpdateStatus: (handler) => {
+    const listener = (_event, message) => handler(message);
+    ipcRenderer.on('update:status', listener);
+    return () => ipcRenderer.removeListener('update:status', listener);
+  },
 });

@@ -7,6 +7,22 @@ release/
 build/
 out/
 
+# electron-builder needs the application icons from this folder
+!desktop-app/build/
+!desktop-app/build/**
+
+# Reference templates and audit evidence (kept locally, excluded from the repository)
+*.xlsx
+!desktop-app/tests/fixtures/*.xlsx
+تدقيق-شامل/
+نتائج-الفحص/
+screenshot-*.png
+desktop-app/screenshot-*.png
+desktop-app/*-result.json
+desktop-app/*-stdout.txt
+desktop-app/*-log.txt
+desktop-app/tools/*-result.json
+
 # Local logs and temporary evidence
 *.log
 *.err.log

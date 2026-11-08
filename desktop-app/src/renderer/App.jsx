@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, Download, RefreshCw, X } from 'lucide-react';
 import AppShell from './components/AppShell.jsx';
 import { ErrorBanner, Loading, ToastStack } from './components/ui.jsx';
 import Dashboard from './pages/Dashboard.jsx';
@@ -9,7 +10,7 @@ import Ranking from './pages/Ranking.jsx';
 import Database from './pages/Database.jsx';
 import DirectorateCard from './pages/DirectorateCard.jsx';
 import Welcome from './pages/Welcome.jsx';
-import { errText } from './lib/format.js';
+import { cx, errText } from './lib/format.js';
 
 /**
  * Application root.
@@ -20,6 +21,16 @@ import { errText } from './lib/format.js';
  */
 
 const PAGES_NEEDING_CATALOGUE = new Set(['correction', 'database', 'ranking', 'card']);
+
+/** Auto-update states that deserve a banner; idle/checking/not-available stay silent. */
+const UPDATE_BANNER_STATES = new Set(['available', 'downloading', 'downloaded', 'error']);
+
+/** Whole percent, clamped, or null when the main process has not reported one. */
+function updatePercent(value) {
+  const numeric = Number(value);
+  if (value === null || value === undefined || !Number.isFinite(numeric)) return null;
+  return Math.min(100, Math.max(0, Math.round(numeric)));
+}
 
 export default function App() {
   const [status, setStatus] = useState(null);
@@ -32,6 +43,8 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [toasts, setToasts] = useState([]);
+  const [updateStatus, setUpdateStatus] = useState(null);
+  const [dismissedUpdateError, setDismissedUpdateError] = useState(null);
   const toastId = useRef(0);
 
   /* --------------------------------------------------------------- toasts */
@@ -70,6 +83,34 @@ export default function App() {
       .catch((cause) => setBootError(errText(cause) || 'تعذر فحص قاعدة البيانات المحلية.'))
       .finally(() => setReady(true));
   }, [loadCatalogue]);
+
+  /* ------------------------------------------------------- auto-update feed */
+
+  useEffect(() => {
+    let active = true;
+    const bridge = window.localApp;
+    const apply = (value) => {
+      if (active && value && typeof value === 'object') setUpdateStatus(value);
+    };
+
+    // The bridge is optional: the renderer also runs in a plain browser during dev.
+    try {
+      bridge?.updateStatus?.()?.then?.(apply)?.catch?.(() => {});
+    } catch (cause) {
+      void cause;
+    }
+
+    const unsubscribe = bridge?.onUpdateStatus?.(apply);
+    return () => {
+      active = false;
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, []);
+
+  // A dismissed error stays dismissed until the flow moves on to another state.
+  useEffect(() => {
+    if (updateStatus?.state !== 'error') setDismissedUpdateError(null);
+  }, [updateStatus?.state]);
 
   const onOpened = useCallback(async () => {
     try {
@@ -177,9 +218,18 @@ export default function App() {
 
   const needsCatalogue = PAGES_NEEDING_CATALOGUE.has(route);
   const catalogueReady = Array.isArray(catalogue) && catalogue.length > 0;
+  const updateErrorKey = updateStatus?.state === 'error' ? updateStatus.message ?? '' : null;
+  const showUpdateBanner = UPDATE_BANNER_STATES.has(updateStatus?.state)
+    && updateErrorKey !== dismissedUpdateError;
 
   return (
     <>
+      {showUpdateBanner && (
+        <UpdateBanner
+          status={updateStatus}
+          onDismiss={updateStatus?.state === 'error' ? () => setDismissedUpdateError(updateErrorKey) : undefined}
+        />
+      )}
       <AppShell
         route={route}
         phase={view.phase}
@@ -225,5 +275,70 @@ function CardishLoading() {
     <section className="card padded">
       <Loading label="جارٍ تحميل جدول الحقول..." />
     </section>
+  );
+}
+
+/**
+ * Slim status strip for the automatic updater (GitHub Releases).
+ *
+ * It only renders for the four states the user must see; the icon and tone are
+ * derived from the state so a single component covers download, ready and
+ * failure. The restart control asks the main process to install and quit.
+ */
+function UpdateBanner({ status, onDismiss }) {
+  const state = status?.state;
+  const version = status?.version ? `v${status.version}` : '';
+  const percent = updatePercent(status?.percent);
+
+  let tone = 'info';
+  let message = 'يتوفر تحديث جديد.';
+  if (state === 'available') {
+    message = version
+      ? `يتوفر إصدار جديد (${version}) — جارٍ التنزيل تلقائيًا...`
+      : 'يتوفر إصدار جديد — جارٍ التنزيل تلقائيًا...';
+  } else if (state === 'downloading') {
+    message = percent === null
+      ? 'جارٍ تنزيل التحديث...'
+      : `جارٍ تنزيل التحديث... ${percent}%`;
+  } else if (state === 'downloaded') {
+    tone = 'ok';
+    message = version
+      ? `اكتمل تنزيل الإصدار ${version} —`
+      : 'اكتمل تنزيل التحديث —';
+  } else if (state === 'error') {
+    tone = 'bad';
+    message = `تعذّر التحقق من التحديث: ${status?.message ?? 'خطأ غير معروف'}`;
+  }
+
+  const install = () => {
+    try {
+      Promise.resolve(window.localApp?.installUpdate?.()).catch(() => {});
+    } catch (cause) {
+      void cause;
+    }
+  };
+
+  const icon = state === 'error'
+    ? <AlertTriangle size={16} />
+    : state === 'downloaded'
+      ? <RefreshCw size={16} />
+      : <Download size={16} />;
+
+  return (
+    <div className={cx('update-banner', tone)} role="status">
+      <span className="update-banner-icon" aria-hidden="true">{icon}</span>
+      <span className="update-banner-text">{message}</span>
+      {state === 'downloaded' && (
+        <button type="button" className="update-banner-action" onClick={install}>
+          <RefreshCw size={14} aria-hidden="true" />
+          إعادة التشغيل والتحديث
+        </button>
+      )}
+      {state === 'error' && typeof onDismiss === 'function' && (
+        <button type="button" className="update-banner-close" onClick={onDismiss} aria-label="إغلاق">
+          <X size={16} aria-hidden="true" />
+        </button>
+      )}
+    </div>
   );
 }
