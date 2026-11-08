@@ -73,7 +73,7 @@ async function pointerClick(window, selector, text = null, label = '') {
     // A real operator can only click a control after scrolling its container
     // into view. scrollIntoView moves the nearest scrollable ancestors (e.g. the
     // wide RTL table viewport), then the actual pointer event is hit-tested.
-    target.scrollIntoView({ behavior: 'instant', block: 'nearest', inline: 'center' });
+    target.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
     const rect = target.getBoundingClientRect();
     const x = Math.round(rect.left + rect.width / 2);
     const y = Math.round(rect.top + rect.height / 2);
