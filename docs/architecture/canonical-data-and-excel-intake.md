@@ -44,6 +44,22 @@ The import IPC path now:
 
 Staging is transactional: if the file exceeds a scan cap before the write transaction begins, no partial staging batch is committed. The original source file is retained in the encrypted database so the source package can be re-examined without relying on the original path.
 
+## Project-region review and promotion
+
+Project-like regions are now discovered from a conservative combination of recognizable project headers and non-empty tabular rows. Discovery is only a suggestion; it does not write into the canonical project tables.
+
+In owner mode, the intake screen exposes each discovered project region, a bounded row preview and manual column mapping. The operator must review the suggested mapping, explicitly select row numbers and press the promotion action. Shared mode does not expose raw staged cell values or project promotion.
+
+The promotion service currently handles project identity, description/status, estimated and actual costs, currency, ISO-like dates, optional geographic/sector references, and an optional funding partner/amount/currency. It refuses hidden rows, formula-bearing rows, invalid numeric/date values, duplicate project codes, and rows already promoted. It writes projects, funding, source references, row-to-entity promotion records, and unresolved geographic/sector quality issues in a database transaction. The original workbook, cell provenance, selected mapping and source row location remain traceable.
+
+This is deliberately a bounded first entity-specific path. It is not yet a universal import engine: indicator observations, generic entity records, field-level tri-state values, user-defined dictionaries, and attachment-to-entity approval remain separate work. Unmatched geography/sector text is recorded as a quality issue and is not converted into an invented reference.
+
+## Encrypted backup and restore
+
+A backup is treated as a bundle: encrypted database bytes plus the matching 64-hex-character store.key companion (.bak.key) and any SQLite sidecars present. Creating a database-only backup without its key is rejected. Restore validates the source bundle before touching the active database, creates a safety backup of the current store, stages the replacement files in the target directory, swaps the database and key together, and re-opens the restored store. A failed swap attempts to roll back the previous database/key pair.
+
+The UI exposes restore via a file picker for .bak files and requires confirmation. Unit and Electron end-to-end tests exercise restore. Recovery must still be run on a real Windows installation before release; CI evidence is not a substitute for testing the user's own backup file and filesystem permissions.
+
 ## Limits and known caveats
 
 The current intake caps are defined in `canonical-data.cjs`: 200 sheets, 5,000 rows per sheet, 400 columns per sheet, 60,000 non-empty rows and 500,000 non-empty cells across the workbook, 200 MiB for the original file, 1,000 media assets, 20 MiB per extracted media item and 60 MiB total extracted media bytes.
@@ -52,7 +68,7 @@ Reaching a cap sets the result as truncated (or rejects a limit breach before st
 
 ExcelJS does not guarantee that every drawing in every Excel-generated workbook is exposed through the same worksheet image-anchor API. Therefore image bytes and anchor metadata are kept separate, and no image is linked to a project or geographic record solely by proximity or guesswork. Formulas are recorded, not evaluated; cached values are retained as evidence only.
 
-The new project, indicator and generic-entity tables are schema foundations, not yet live screens or import destinations. The app does not yet provide a complete multi-entity mapping and approval UI, canonical generic-entity promotion, or manual editing for all entity types. Nor does this change implement OCR.
+The new indicator and generic-entity tables remain schema foundations rather than live import destinations. Project regions have a bounded review and promotion path, but the app does not yet provide complete indicator-observation or generic-entity mapping and approval, nor manual editing for all entity types. This change does not implement OCR.
 
 ## Next engineering steps
 
@@ -64,9 +80,10 @@ The new project, indicator and generic-entity tables are schema foundations, not
 6. Add managed attachment browsing, preview, export, and explicit reviewed linking to a project/geographic entity. Add Arabic OCR only as an optional proposal requiring human confirmation.
 7. Implement field-, record-, dataset-, source- and time-level validation and duplicate/conflict review. Do not infer factual accuracy from format checks alone.
 8. Add data migration from the legacy directorate tables with reconciled row counts and analysis regression tests before switching dashboards/ranking to canonical values.
-9. Add backup/restore that preserves the encrypted database and its key as a recoverable pair, and test recovery on Windows.
-10. Extend OS-level offline verification, IPC authorization, accessibility, performance, and signed Windows packaging.
+9. Extend entity-specific promotion services to indicator observations and generic records; do not infer period or units from header text alone.
+10. Add managed attachment browsing and explicit review/linking to projects and geographic entities. Binary staging is not proof of semantic attachment.
+11. Extend OS-level offline verification, IPC authorization, accessibility, performance, and signed Windows packaging.
 
 ## Test coverage added
 
-`canonical-data.test.cjs` verifies additive/idempotent migrations, seeding of existing directorate fields and indicators, durable source-byte and cell provenance storage, hidden worksheet/row handling, formulas, merged ranges, embedded images, review-only staging and rejection of empty files. The repository CI must pass on both Windows and Linux before this change is considered verified.
+`canonical-data.test.cjs` verifies additive/idempotent migrations, seeding of existing directorate fields and indicators, durable source-byte and cell provenance storage, hidden worksheet/row handling, formulas, merged ranges, embedded images, review-only staging, project-region mapping and promotion guards, provenance, funding linkage and rejection of empty files. `hardening.test.cjs` covers encrypted backup/restore bundles. The repository CI must pass on both Windows and Linux before this change is considered verified.
