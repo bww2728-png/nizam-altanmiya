@@ -261,7 +261,12 @@ async function stageWorkbook(database, filePath, workbookOption = null) {
     truncated,
     status: 'staged',
     limits: LIMITS,
-    sheets: inventory.map(item => ({
+    sheets: database.prepare("SELECT id, sheet_index FROM workbook_import_sheets WHERE batch_id = ? ORDER BY sheet_index").all(saved.batchId).map((storedSheet, index) => ({
+      id: storedSheet.id,
+      index: storedSheet.sheet_index,
+      ...(() => {
+        const item = inventory[index];
+        return {
       name: item.sheet.name,
       state: item.sheet.state ?? 'visible',
       rowCount: item.maxRow,
@@ -281,8 +286,33 @@ async function stageWorkbook(database, filePath, workbookOption = null) {
         matchedCount: region.matched.length,
         confidence: region.confidence,
       })),
+        };
+      })(),
     })),
   };
+}
+
+function readWorkbookSheetPreview(database, batchId, sheetId, limit = 20) {
+  const batch = Number(batchId);
+  const sheet = Number(sheetId);
+  const bounded = Math.min(30, Math.max(1, Number(limit) || 20));
+  if (!Number.isSafeInteger(batch) || batch <= 0 || !Number.isSafeInteger(sheet) || sheet <= 0) {
+    throw new Error('معرّف دفعة أو ورقة الاستيراد غير صالح.');
+  }
+  const metadata = database.prepare(
+    'SELECT id, batch_id, sheet_index, name, state FROM workbook_import_sheets WHERE id = ? AND batch_id = ?'
+  ).get(sheet, batch);
+  if (!metadata) throw new Error('الورقة المطلوبة لا تنتمي إلى دفعة الاستيراد المحددة.');
+  const rows = database.prepare(
+    'SELECT row_number, is_hidden, has_formula, cell_count, cells_json FROM workbook_import_rows WHERE batch_id = ? AND sheet_id = ? ORDER BY row_number LIMIT ?'
+  ).all(batch, sheet, bounded).map(row => ({
+    rowNumber: row.row_number,
+    hidden: Boolean(row.is_hidden),
+    hasFormula: Boolean(row.has_formula),
+    cellCount: row.cell_count,
+    cells: JSON.parse(row.cells_json),
+  }));
+  return { batchId: batch, sheet: metadata, rows, limit: bounded, truncated: rows.length < metadata.nonempty_row_count };
 }
 
 function completeWorkbookImport(database, batchId, result = {}) {
@@ -302,4 +332,4 @@ function listWorkbookImports(database, limit = 30) {
   return database.prepare("SELECT b.id,b.file_name,b.file_size,b.sha256,b.sheet_count,b.row_count,b.cell_count,b.media_count,b.media_stored_count,b.truncated,b.status,b.created_at,b.updated_at,(SELECT COUNT(*) FROM workbook_import_regions r WHERE r.batch_id=b.id) AS region_count,(SELECT COUNT(*) FROM workbook_import_rows w WHERE w.batch_id=b.id) AS stored_row_count FROM workbook_import_batches b ORDER BY b.id DESC LIMIT ?").all(bounded);
 }
 
-module.exports = { LIMITS, migrateCanonicalData, stageWorkbook, completeWorkbookImport, listWorkbookImports };
+module.exports = { LIMITS, migrateCanonicalData, stageWorkbook, readWorkbookSheetPreview, completeWorkbookImport, listWorkbookImports };
