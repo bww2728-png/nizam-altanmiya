@@ -219,6 +219,20 @@ async function buildSampleWorkbook(targetPath) {
     target.getCell(2).value = governorates[index % governorates.length];
   }
 
+  // Include a real non-directorate project table so the staged review + mapping +
+  // explicit promotion path is exercised through the operator-facing UI.
+  const projects = workbook.addWorksheet('مشاريع اختبار');
+  projects.getRow(1).values = [
+    'اسم المشروع', 'رمز المشروع', 'التكلفة التقديرية', 'رمز العملة',
+    'تاريخ البداية', 'تاريخ النهاية', 'جهة التمويل', 'مبلغ التمويل',
+    'المحافظة', 'المديرية', 'القطاع', 'عملة التمويل',
+  ];
+  projects.getRow(2).values = [
+    'مشروع اختبار E2E', 'E2E-001', '1000', 'YER',
+    '2026-01-01', '2026-12-31', 'UNDP', '100',
+    'صنعاء', 'مديرية اختبار 1', 'المياه', 'USD',
+  ];
+
   await workbook.xlsx.writeFile(targetPath);
   return { headerRow, rows: 20, dataStart: dataRows[0] };
 }
@@ -388,7 +402,7 @@ app.whenReady().then(async () => {
     await waitFor(window, `document.body.innerText.includes('فحص بنية ملف Excel')`, 60000);
     await waitFor(window, `(() => {
       const text = document.body.innerText;
-      return text.includes('فُحصت 8 ورقة') && !text.includes('جارٍ بناء خطة الاستيراد');
+      return text.includes('فُحصت 9 ورقة') && !text.includes('جارٍ بناء خطة الاستيراد');
     })()`, 30000);
     const inventoryUi = await window.webContents.executeJavaScript(`(() => {
       const card = [...document.querySelectorAll('.card')].find((item) =>
@@ -414,6 +428,21 @@ app.whenReady().then(async () => {
     );
     await screenshot(window, '8-الاستيراد.png');
     await screenshot(window, '14-فهرس-الأوراق.png');
+
+    // Exercise non-directorate review, explicit row selection and canonical
+    // project promotion with a real Electron pointer click.
+    await waitFor(window, `document.body.innerText.includes('مناطق المشاريع المرشحة: 1') && document.body.innerText.includes('مشروع اختبار E2E')`, 30000);
+    const projectRowSelected = await clickBySelector(window, '#project-row-2', 'اختيار صف المشروع');
+    const selectedProject = await window.webContents.executeJavaScript(`document.querySelector('#project-row-2')?.checked === true`);
+    const promoteClicked = await clickByText(window, '.btn.primary', 'اعتماد المشاريع المحددة في قاعدة البيانات');
+    await waitFor(window, `document.body.innerText.includes('نتيجة اعتماد المشاريع') && document.body.innerText.includes('أُضيفت: 1')`, 30000);
+    check(
+      'import',
+      'جدول المشاريع يُربط ويُعتمد بعد اختيار الصف صراحةً',
+      projectRowSelected && selectedProject && promoteClicked,
+      (await bodyText(window)).slice(-500).replace(/\\n/g, ' | ')
+    );
+    await screenshot(window, '15-اعتماد-المشاريع.png');
 
     // ---------- 4. Access profile ----------
     const toggled = await clickBySelector(window, '.topbar button.chip.clickable', 'تبديل وضع الوصول');
