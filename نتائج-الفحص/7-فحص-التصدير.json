@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-08T05:10:26.023Z",
+  "generatedAt": "2026-11-08T07:42:18.013Z",
   "group": "export",
   "total": 12,
   "passed": 12,
@@ -44,7 +44,7 @@
       "group": "export",
       "name": "PDF يُنتج بمحرك الطباعة",
       "ok": true,
-      "detail": "121469 bytes"
+      "detail": "121487 bytes"
     },
     {
       "group": "export",

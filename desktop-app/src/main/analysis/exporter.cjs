@@ -16,12 +16,17 @@
 
 const ExcelJS = require('exceljs');
 const { INPUT_FIELDS, INDICATORS, DECISION_FIELD } = require('./schema.cjs');
+const { isRankableCalibrated } = require('./sheets.cjs');
 
-/** Ranking eligibility, matching the interface: complete and free of anomalies. */
+/**
+ * Ranking eligibility, matching the interface: complete, free of anomalies, and
+ * backed by a finite composite (a blocked row is complete but not computable, so
+ * it must not count). Mirrors the ranking sheet's `rankable` predicate.
+ */
 function isRankableRow(row) {
-  const { rankableVerdict } = require('./sheets.cjs');
-  const verdict = rankableVerdict(row);
-  return verdict.complete && !verdict.anomalous;
+  // Delegates to the shared predicate so the export, the interface and the PDF
+  // can never disagree about who is rankable.
+  return isRankableCalibrated(row);
 }
 
 const HEADER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF18324B' } };
@@ -108,15 +113,12 @@ async function buildAnalysisWorkbook(analysis, context = {}) {
   // Lazy require: the anomaly rule lives with the import plan, and export must
   // exclude exactly what the interface excludes.
   const { anomalyKeys } = require('./import-plan.cjs');
-  const { rankableVerdict, compareCalibratedRows } = require('./sheets.cjs');
+  const { compareCalibratedRows } = require('./sheets.cjs');
   // The interface ranks only complete, non-anomalous rows and renumbers them
   // from 1; the report must show the same population with the same numbering, so
   // it applies the same predicate instead of the engine's raw rank (which still
   // numbers rows the interface parks under «بانتظار الاستكمال»).
-  const rankable = (row) => {
-    const verdict = rankableVerdict(row);
-    return verdict.complete && !verdict.anomalous && Number.isFinite(row.calibrated?.composite);
-  };
+  const rankable = isRankableCalibrated;
   const rankedRows = (analysis.rows ?? []).filter(rankable);
   const calibratedOrder = [...rankedRows].sort(compareCalibratedRows);
   const calibratedRank = new Map(calibratedOrder.map((row, index) => [row, index + 1]));

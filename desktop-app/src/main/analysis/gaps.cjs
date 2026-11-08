@@ -165,7 +165,13 @@ function analyzeGaps(records) {
       summary.total += 1;
     }
   }
-  for (const item of crossIssues) summary[item.severity] += 1;
+  for (const item of crossIssues) {
+    summary[item.severity] += 1;
+    // Cross-record issues never pass through `add()`, so fold their codes into
+    // `byCode` here too — otherwise the code tally silently disagrees with the
+    // severity/total counters directly below.
+    byCode.set(item.code, (byCode.get(item.code) ?? 0) + 1);
+  }
   if (crossIssues.length) summary.total += crossIssues.length;
   summary.byCode = Object.fromEntries([...byCode.entries()].sort((a, b) => b[1] - a[1]));
   summary.recordsWithBlockers = [...recordIssues.entries()].filter(([, issues]) => issues.some((item) => item.severity === 'blocker')).length;

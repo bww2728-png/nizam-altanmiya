@@ -226,11 +226,8 @@ function renderReportHtml(analysis, context = {}) {
   // The ranking mirrors the interface: only complete, non-anomalous rows are
   // ordered (severe deprivation first, matching the engine), and the anomalies and
   // incomplete rows get their own sections so nothing is dropped silently.
-  const { rankableVerdict, compareCalibratedRows } = require('./sheets.cjs');
-  const rankable = rows.filter((row) => {
-    const verdict = rankableVerdict(row);
-    return verdict.complete && !verdict.anomalous && Number.isFinite(row.calibrated?.composite);
-  });
+  const { isRankableCalibrated, compareCalibratedRows } = require('./sheets.cjs');
+  const rankable = rows.filter(isRankableCalibrated);
   const ordered = [...rankable].sort(compareCalibratedRows);
   const top = ordered.slice(0, 15);
 
@@ -248,7 +245,14 @@ function renderReportHtml(analysis, context = {}) {
   </div>
 
   <h2>الملخص التنفيذي</h2>
-  ${cards({ ...summary, calibratedRanked: rankable.length })}
+  ${cards({
+    ...summary,
+    calibratedRanked: rankable.length,
+    // Match the interface badge: count severe rows within the ranked set only
+    // (same predicate as sheets.cjs buildRanking), so the executive-summary card
+    // and the on-screen «حرمان حاد» cannot diverge for the same dataset.
+    severeCount: rankable.filter((row) => row.calibrated?.severe === true).length,
+  })}
   <div class="note">
     يعرض التقرير مسارين تحليليين متوازيين على البيانات نفسها: <strong>المؤشر المرجّح</strong> الذي يجمع الأبعاد الاثني عشر
     بأوزانها جمعًا خطيًا، و<strong>مؤشر الاحتياج المعاير</strong> الذي يقيس الاحتياج بنقاط مرجعية ثابتة ويحجب الحكم حين لا تكفي الأدلة.

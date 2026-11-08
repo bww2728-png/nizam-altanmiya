@@ -47,7 +47,7 @@ const ANOMALY_ABSOLUTE_LIMIT = 1e7;
 const CURRENCY_KEYS = new Set(['revenue', 'projectCost']);
 
 /** Codes that mean "this cell could not be understood": the row is quarantined. */
-const BLOCKING_CODES = new Set(['invalid-number', 'invalid-boolean', 'invalid-text', 'invalid-ratio', 'ratio-out-of-range', 'missing-identity']);
+const BLOCKING_CODES = new Set(['invalid-number', 'invalid-boolean', 'ratio-out-of-range', 'missing-identity']);
 /** Codes that leave the row writable but incomplete or annotated. */
 const WARNING_CODES = new Set(['missing-mandatory', 'percent-converted', 'placeholder', 'had-percent', 'anomaly', 'duplicate-in-file']);
 
@@ -63,8 +63,6 @@ function identityKey(governorate, district) {
 const CODE_LABELS = {
   'invalid-number': 'قيمة رقمية غير صالحة (نص في حقل رقمي)',
   'invalid-boolean': 'قيمة نعم/لا غير مفهومة',
-  'invalid-text': 'قيمة نصية غير صالحة',
-  'invalid-ratio': 'قيمة غير صالحة في حقل نسبة',
   'ratio-out-of-range': 'نسبة خارج المدى المفهوم (0-100%)',
   anomaly: 'مقدار غير منطقي (خطأ وحدة مرجّح)',
   'missing-mandatory': 'حقل إلزامي ناقص',

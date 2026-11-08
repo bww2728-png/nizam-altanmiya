@@ -446,12 +446,13 @@ function registerHandlers() {
   function sheetPayloads(mode = 'calibrated') {
     const profile = currentProfile();
     if (!sheetsCache || sheetsCache.profile !== profile) {
+      // `maskInputRows` strips the protected keys from `values`, `rawValues` and
+      // `sources`, and drops the parse `warnings` that carry a protected raw
+      // value. The previous ad-hoc transform removed only `values` keys, so the
+      // cached `analysis` (and anything spread from it) still carried protected
+      // raw text. Only applied under `shared`, matching `analyzeShared`.
       const transformRows = profile === 'shared'
-        ? (rows) => rows.map((row) => {
-          const values = { ...row.values };
-          for (const key of security.PROTECTED_KEYS) delete values[key];
-          return { ...row, values };
-        })
+        ? (rows) => security.maskInputRows(rows, 'shared')
         : null;
       // The sheets never render the sensitivity study: the engine pass behind them
       // runs without it so opening a sheet does not pay for an unused analysis.

@@ -133,6 +133,9 @@ function analyze(rows, options = {}) {
   const summary = {
     template: TEMPLATE,
     rows: analysed.length,
+    // Match the dashboard buckets (sheets.cjs): an empty governorate is its own
+    // 'غير محددة' bucket, so PDF and dashboard show the same total.
+    governorates: new Set(analysed.map((row) => String(row.governorate ?? '').trim() || 'غير محددة')).size,
     complete: complete.length,
     waiting: analysed.length - complete.length,
     averageCompleteness: analysed.length
@@ -142,8 +145,8 @@ function analyze(rows, options = {}) {
     calibratedRanked: calibratedRanking.ranked.length,
     calibratedBlocked: calibratedRanking.blocked.length,
     severeCount: analysed.filter((row) => row.calibrated.severe).length,
-    fragileCount: analysed.filter((row) => row.sensitivity?.fragile).length,
-    sampleSensitivityTruncated: Boolean(sampleSensitivity?.truncated),
+    fragileCount: withSensitivity ? analysed.filter((row) => row.sensitivity?.fragile).length : null,
+    sampleSensitivityTruncated: withSensitivity ? Boolean(sampleSensitivity?.truncated) : null,
     averageWeightCoverage: analysed.length
       ? analysed.reduce((sum, row) => sum + (row.calibrated.weightCoverage ?? 0), 0) / analysed.length
       : 0,

@@ -63,6 +63,22 @@ function toColumnValue(key, value) {
   return String(value);
 }
 
+/**
+ * Compare a canonical next value with the raw value currently stored in the
+ * column. SQLite hands back `null` for an empty cell while `toColumnValue`
+ * normalises the same state to `null` too, so both sides are compared after the
+ * same normalisation. Numbers are compared numerically (a REAL round trip must
+ * not look like an edit), everything else as text.
+ */
+function sameStoredValue(nextValue, storedValue) {
+  const next = nextValue === undefined ? null : nextValue;
+  const stored = storedValue === undefined ? null : storedValue;
+  if (next === stored) return true;
+  if (next === null || stored === null) return false;
+  if (typeof next === 'number' && typeof stored === 'number') return next === stored;
+  return String(next) === String(stored);
+}
+
 function safeJson(value, fallback = null) {
   if (value === undefined) return fallback;
   try {
@@ -778,6 +794,8 @@ function saveManualDirectorate(database, request = {}) {
     let targetId = id;
     let created = false;
     let identityChanged = false;
+    /** Pre-save row, used to tell which fields the operator really changed. */
+    let storedRecord = null;
 
     if (targetId === null) {
       const clash = database
@@ -787,7 +805,8 @@ function saveManualDirectorate(database, request = {}) {
         throw new Error(`توجد مديرية مسجّلة بالاسم «${district}» في «${governorate || 'بلا محافظة'}». عدّلها بدل إضافتها مجددًا.`);
       }
     } else {
-      const existing = getDirectorate(database, targetId);
+      storedRecord = getDirectorate(database, targetId);
+      const existing = storedRecord;
       identityChanged = existing.governorate !== governorate || existing.district !== district;
       const clash = database
         .prepare('SELECT id FROM directorates WHERE governorate = ? AND district = ? AND id <> ?')
@@ -804,9 +823,31 @@ function saveManualDirectorate(database, request = {}) {
       params.push(toColumnValue(key, clean[key]));
     }
 
+    // A warning is cleared only for a field whose stored value actually changed
+    // in this save. The Correction screen posts the whole form, so `clean` holds
+    // every key; treating all of them as authoritative would erase the import
+    // blocker (invalid raw text + reason) of every field the operator never
+    // touched. The record was read before the UPDATE, so this compares against
+    // the pre-save state. A brand new row starts with no warnings at all.
+    let refreshedWarnings = '[]';
+    if (targetId !== null && storedRecord) {
+      const columnByKey = new Map(COLUMN_ENTRIES);
+      const dirtyKeys = new Set();
+      for (const key of Object.keys(clean)) {
+        const column = columnByKey.get(key);
+        if (!column) continue;
+        if (!sameStoredValue(toColumnValue(key, clean[key]), storedRecord[column])) dirtyKeys.add(key);
+      }
+      const storedWarnings = parseJson(storedRecord.import_warnings, []);
+      const kept = Array.isArray(storedWarnings)
+        ? storedWarnings.filter((warning) => !warning || !dirtyKeys.has(warning.key))
+        : [];
+      refreshedWarnings = safeJson(kept, '[]');
+    }
+
     if (targetId === null) {
-      const insertColumns = ['governorate', 'district', ...columns, 'source_file', 'source_sheet', 'source_row', 'updated_at'];
-      const insertParams = [governorate, district, ...params, MANUAL_SOURCE, MANUAL_SOURCE, null, timestamp];
+      const insertColumns = ['governorate', 'district', ...columns, 'source_file', 'source_sheet', 'source_row', 'import_warnings', 'updated_at'];
+      const insertParams = [governorate, district, ...params, MANUAL_SOURCE, MANUAL_SOURCE, null, refreshedWarnings, timestamp];
       const placeholders = insertColumns.map(() => '?').join(', ');
       const info = database
         .prepare(`INSERT INTO directorates (${insertColumns.join(', ')}) VALUES (${placeholders})`)
@@ -816,8 +857,8 @@ function saveManualDirectorate(database, request = {}) {
     } else {
       // Keep an undo point before the row changes.
       snapshotDirectorate(database, targetId, 'snapshot-before-update');
-      const assignments = ['governorate = ?', 'district = ?', ...columns.map((column) => `${column} = ?`), 'updated_at = ?'];
-      const updateParams = [governorate, district, ...params, timestamp];
+      const assignments = ['governorate = ?', 'district = ?', ...columns.map((column) => `${column} = ?`), 'import_warnings = ?', 'updated_at = ?'];
+      const updateParams = [governorate, district, ...params, refreshedWarnings, timestamp];
       if (identityChanged) {
         // A renamed record no longer mirrors the workbook row it came from, so
         // it must stop advertising that file as its source. Otherwise a later

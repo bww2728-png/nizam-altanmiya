@@ -66,7 +66,7 @@ export default function Ranking({ catalogue, notify, onOpenCard }) {
               <Badge tone="warn">بانتظار الاستكمال: {waiting.length}</Badge>
               <Badge tone="bad">شاذة: {anomalies.length}</Badge>
               {meta.severeCount !== undefined && <Badge tone="violet">حرمان حاد: {meta.severeCount}</Badge>}
-              {meta.fragileCount !== undefined && <Badge tone="info">حساسة للأوزان: {meta.fragileCount}</Badge>}
+              {meta.fragileCount != null && <Badge tone="info">حساسة للأوزان: {meta.fragileCount}</Badge>}
             </div>
           </div>
           <div className="stack tight">

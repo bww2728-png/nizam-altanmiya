@@ -137,6 +137,20 @@ function maskEngineRow(row, profile) {
     masked.push(key);
   }
   const output = { ...row, values, rawValues, sources };
+  // Derived state is computed from the protected values — indicators (revenue
+  // per capita), the project classification, the calibrated/replica composites,
+  // the boundary verdicts and the sensitivity study. The `analysis:row-detail`
+  // channel already omits them on purpose, but clearing them on the returned row
+  // means a future `{ ...masked.row }` spread cannot carry them past the IPC
+  // boundary by accident.
+  output.indicators = {};
+  output.project = null;
+  output.calibrated = null;
+  output.replica = null;
+  output.boundary = null;
+  output.sensitivity = null;
+  // `warnings` carries a protected key's rejected raw text, so filter by key too.
+  output.warnings = Array.isArray(output.warnings) ? redactWarnings(output.warnings, 'shared') : output.warnings;
   if (row.completeness) {
     output.completeness = redactEngineCompleteness(row.completeness, values);
   }

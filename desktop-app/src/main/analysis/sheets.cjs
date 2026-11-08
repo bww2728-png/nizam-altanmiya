@@ -212,30 +212,49 @@ function buildIndicators(analysis) {
   };
 }
 
+/**
+ * The single source of truth for "this row belongs in the calibrated ranking":
+ * complete, free of anomalies, and backed by a finite calibrated composite. A
+ * blocked row is complete but not computable (its composite is null), so the
+ * finite check already excludes it. The interface, the Excel ranking sheet and
+ * the PDF all delegate here so they can never disagree about who is rankable.
+ */
+function isRankableCalibrated(row) {
+  const verdict = rankableVerdict(row);
+  return verdict.complete && !verdict.anomalous && Number.isFinite(row.calibrated?.composite);
+}
+
 function buildRanking(analysis, options = {}) {
   const rows = analysis.rows ?? [];
   const mode = options.mode === 'replica' ? 'replica' : 'calibrated';
   const valueOf = (row) => (mode === 'replica' ? row.replica?.composite : row.calibrated?.composite);
   const entries = rows.map((row) => ({ row, verdict: rankableVerdict(row) }));
-  const ranked = entries
+  const rankedEntries = entries
     .filter((entry) => entry.verdict.complete && !entry.verdict.anomalous && Number.isFinite(valueOf(entry.row)))
     .sort((a, b) => (mode === 'replica'
       ? ((b.row.replica?.composite ?? 0) - (a.row.replica?.composite ?? 0))
         || String(a.row.districtName ?? '').localeCompare(String(b.row.districtName ?? ''), 'ar')
-      : compareCalibratedRows(a.row, b.row)))
-    .map((entry, index) => ({
-      rank: index + 1,
-      directorateId: entry.row.dbId ?? null,
-      districtName: entry.row.districtName,
-      governorate: entry.row.governorate,
-      composite: round(valueOf(entry.row) ?? 0, 4),
-      replicaComposite: Number.isFinite(entry.row.replica?.composite) ? round(entry.row.replica.composite, 4) : null,
-      projectType: entry.row.project?.label ?? '',
-      decision: entry.row.values?.reviewerDecision ?? '',
-      confidence: entry.row.confidence?.text ?? '',
-      sensitivity: entry.row.sensitivity?.weight ?? null,
-      population: Number.isFinite(Number(entry.row.values?.population)) ? Number(entry.row.values.population) : null,
-    }));
+      : compareCalibratedRows(a.row, b.row)));
+
+  // The page shows «مؤهلة» (ranked.length) next to «مرشحون في آخر تشغيل»
+  // (meta.calibratedRanked). Deriving the counts below from the very lists built
+  // here keeps the two in lock-step, so an anomalous/partial row can never
+  // inflate the visible totals the operator is reading.
+  const severeCount = rankedEntries.filter((entry) => entry.row.calibrated?.severe === true).length;
+
+  const ranked = rankedEntries.map((entry, index) => ({
+    rank: index + 1,
+    directorateId: entry.row.dbId ?? null,
+    districtName: entry.row.districtName,
+    governorate: entry.row.governorate,
+    composite: round(valueOf(entry.row) ?? 0, 4),
+    replicaComposite: Number.isFinite(entry.row.replica?.composite) ? round(entry.row.replica.composite, 4) : null,
+    projectType: entry.row.project?.label ?? '',
+    decision: entry.row.values?.reviewerDecision ?? '',
+    confidence: entry.row.confidence?.text ?? '',
+    sensitivity: entry.row.sensitivity?.weight ?? null,
+    population: Number.isFinite(Number(entry.row.values?.population)) ? Number(entry.row.values.population) : null,
+  }));
 
   const waiting = entries
     .filter((entry) => !entry.verdict.complete && !entry.verdict.anomalous)
@@ -246,7 +265,8 @@ function buildRanking(analysis, options = {}) {
       completeness: entry.row.completeness ?? null,
       missingLabels: entry.verdict.missingLabels,
     }))
-    .sort((a, b) => (b.completeness?.ratio ?? 0) - (a.completeness?.ratio ?? 0));
+    .sort((a, b) => (b.completeness?.ratio ?? 0) - (a.completeness?.ratio ?? 0)
+      || String(a.districtName ?? '').localeCompare(String(b.districtName ?? ''), 'ar'));
 
   const blocked = entries
     .filter((entry) => entry.verdict.complete && !entry.verdict.anomalous
@@ -292,7 +312,12 @@ function buildRanking(analysis, options = {}) {
     waiting,
     blocked,
     anomalies,
-    meta: analysis.summary ?? null,
+    // Reflect the buckets actually built here, not the engine's raw counts, so
+    // «مؤهلة» (ranked.length) and «مرشحون في آخر تشغيل» (meta.calibratedRanked)
+    // cannot diverge for the same dataset.
+    meta: analysis.summary
+      ? { ...analysis.summary, calibratedRanked: ranked.length, calibratedBlocked: blocked.length, severeCount }
+      : null,
     calibration: options.calibration ?? null,
   };
 }
@@ -334,4 +359,4 @@ function buildSheets(database, options = {}) {
   };
 }
 
-module.exports = { buildSheets, buildDashboard, buildIndicators, buildRanking, rankableVerdict, compareCalibratedRows };
+module.exports = { buildSheets, buildDashboard, buildIndicators, buildRanking, rankableVerdict, isRankableCalibrated, compareCalibratedRows };
