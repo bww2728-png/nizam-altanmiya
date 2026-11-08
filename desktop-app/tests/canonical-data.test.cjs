@@ -328,6 +328,40 @@ test('project promotion rejects ambiguous mappings and foreign batch/region pair
   }
 });
 
+
+test('region classification separates directorate project-cost attributes from project and indicator tables', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-region-classes-'));
+  const filePath = path.join(directory, 'mixed-regions.xlsx');
+  const db = openDatabase();
+  try {
+    const workbook = new ExcelJS.Workbook();
+    const directorates = workbook.addWorksheet('المديريات');
+    directorates.getRow(1).values = ['اسم المديرية', 'المحافظة', 'تكلفة المشروع', 'عدد السكان'];
+    directorates.getRow(2).values = ['مديرية تجريبية', 'تعز', '500000', '25000'];
+
+    const projects = workbook.addWorksheet('المشاريع');
+    projects.getRow(1).values = ['اسم المشروع', 'رمز المشروع', 'التكلفة التقديرية', 'العملة'];
+    projects.getRow(2).values = ['تأهيل مدرسة', 'P-100', '15000', 'USD'];
+
+    const indicators = workbook.addWorksheet('المؤشرات');
+    indicators.getRow(1).values = ['اسم المؤشر', 'الفترة', 'القيمة', 'وحدة القياس'];
+    indicators.getRow(2).values = ['نسبة تغطية المياه', '2026-Q1', '72', '%'];
+
+    await workbook.xlsx.writeFile(filePath);
+    const staged = await canonical.stageWorkbook(db, filePath);
+    const { regions } = canonical.listWorkbookImportRegions(db, staged.batchId);
+    const bySheet = Object.fromEntries(regions.map(region => [region.sheetName, region.candidateType]));
+
+    assert.equal(bySheet['المديريات'], 'directorate-candidate',
+      'a directorate attribute named project cost must not classify the whole table as projects');
+    assert.equal(bySheet['المشاريع'], 'project-candidate');
+    assert.equal(bySheet['المؤشرات'], 'indicator-candidate');
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('staging rejects empty files before creating a batch', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-canonical-empty-'));
   const filePath = path.join(directory, 'empty.xlsx');
