@@ -392,7 +392,7 @@ app.whenReady().then(async () => {
         rows: card?.querySelectorAll('table.data tbody tr').length ?? 0,
         text: (card?.innerText || '').slice(0, 1400),
         sheetNames: [...(card?.querySelectorAll('table.data tbody tr td:first-child') ?? [])].map((node) => node.textContent.trim()),
-        visible: Boolean(rect && rect.top >= 0 && rect.top < window.innerHeight && rect.height > 0),
+        visible: Boolean(rect && rect.bottom > 0 && rect.top < window.innerHeight && rect.height > 0),
         top: rect?.top ?? null,
       };
     })()`);
