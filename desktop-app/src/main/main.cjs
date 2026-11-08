@@ -14,6 +14,7 @@ const {
 const security = require('./security.cjs');
 const { analyze } = require('./analysis/engine.cjs');
 const { readDirectorateWorkbook } = require('./analysis/template-reader.cjs');
+const canonicalData = require('./analysis/canonical-data.cjs');
 const { mappingTable } = require('./analysis/mapping.cjs');
 const { defaultWeights, validateWeights } = require('./analysis/composite.cjs');
 const persist = require('./analysis/persist.cjs');
@@ -401,25 +402,59 @@ function registerHandlers() {
     filePath = assertAllowedTemplatePath(assertTemplatePath(filePath));
     sendImportProgress(event.sender, { phase: 'reading', message: 'جارٍ قراءة الملف...' });
     const db = requireDatabase();
-    const read = await readDirectorateWorkbook(filePath);
-    sendImportProgress(event.sender, { phase: 'plan', message: `قُرئ الملف (${read.rows?.length ?? 0} صفًا) — جارٍ بناء خطة الاستيراد...` });
+    let read;
+    let directorateReadError = null;
+    try {
+      read = await readDirectorateWorkbook(filePath);
+    } catch (error) {
+      // A workbook can contain projects, sector datasets or source registers
+      // without a directorate table. It still belongs in the durable review
+      // inbox; it simply must not be coerced into a directorate record.
+      directorateReadError = String(error?.message ?? 'لم يُكتشف جدول مديريات.');
+      read = {
+        fileName: path.basename(filePath),
+        sheetName: null,
+        rows: [],
+        warnings: [{ row: null, code: 'no-directorate-table', message: directorateReadError }],
+      };
+    }
+    sendImportProgress(event.sender, { phase: 'staging', message: 'جارٍ حفظ الملف الأصلي وجميع الأوراق والخلايا والصور القابلة للاستخراج في منطقة مراجعة محلية مشفّرة...' });
+    const staging = await canonicalData.stageWorkbook(db, filePath, read.workbook ?? null);
+    if (Object.prototype.hasOwnProperty.call(read, 'workbook')) delete read.workbook;
+    sendImportProgress(event.sender, { phase: 'plan', message: `حُفظت ${staging.sheetCount} ورقة في منطقة الاستقبال؛ جارٍ إعداد خطة المديريات إن وُجدت...` });
     const plan = buildImportPlan(db, read, { fileName: read.fileName, sheetName: read.sheetName });
-    pendingPlan = { filePath, read, plan };
+    pendingPlan = { filePath, read, plan, staging };
     persist.logAccess(db, {
       action: 'excel-scan',
       entity: 'workbook',
       entityId: filePath,
-      detail: `rows=${plan.totalRows};created=${plan.scope.create};updated=${plan.scope.update};blocked=${plan.scope.blocked}`,
+      detail: `batch=${staging.batchId};sheets=${staging.sheetCount};rows=${staging.rowCount};cells=${staging.cellCount};directorateRows=${plan.totalRows}`,
     });
-    auditRead('import:scan', { entity: 'workbook', entityId: filePath, rowCount: plan.totalRows });
-    sendImportProgress(event.sender, { phase: 'done', message: `الخطة جاهزة: ${plan.totalRows} صفًا.` });
-    return { canceled: false, filePath, ...security.redactPlanSummary(summarizePlan(plan), currentProfile()) };
+    auditRead('import:scan', { entity: 'workbook', entityId: filePath, rowCount: staging.rowCount, detail: `batch=${staging.batchId}` });
+    sendImportProgress(event.sender, { phase: 'done', message: directorateReadError
+      ? 'حُفظ الملف للمراجعة؛ لم يُكتشف جدول مديريات قابل للاستيراد المباشر.'
+      : `الخطة جاهزة: ${plan.totalRows} صف مديريات، وحُفظت بنية الملف كاملةً في المراجعة.` });
+    return {
+      canceled: false,
+      filePath,
+      ...security.redactPlanSummary(summarizePlan(plan), currentProfile()),
+      staging,
+      stagingOnly: Boolean(directorateReadError),
+      stagingMessage: directorateReadError,
+    };
   });
 
   ipcMain.handle('import:plan', () => {
     if (!pendingPlan) throw new Error('لم يُقرأ أي ملف بعد. اختر ملف القالب أولًا.');
     auditRead('import:plan', { entity: 'workbook', entityId: pendingPlan.filePath, rowCount: pendingPlan.plan.totalRows });
     return security.redactPlanSummary(summarizePlan(pendingPlan.plan, 5000), currentProfile());
+  });
+
+  ipcMain.handle('import:history', (_event, request = {}) => {
+    const db = requireDatabase();
+    const history = canonicalData.listWorkbookImports(db, request.limit ?? 30);
+    auditRead('import:history', { entity: 'workbook_import_batches', rowCount: history.length });
+    return history;
   });
 
   ipcMain.handle('import:apply', (event, request = {}) => {
@@ -431,7 +466,10 @@ function registerHandlers() {
     // marks the start and end of that transaction instead of faking per-row
     // ticks that would only be delivered after it finished anyway.
     sendImportProgress(event.sender, { phase: 'apply', current: 0, total, message: `جارٍ تطبيق الخطة على ${total} صفًا...` });
-    const result = applyImportPlan(db, pendingPlan.plan, { decisions: request.decisions, force: request.force });
+    const result = pendingPlan.plan.rows?.length
+      ? applyImportPlan(db, pendingPlan.plan, { decisions: request.decisions, force: request.force })
+      : { applied: 0, created: 0, updated: 0, refused: [], skipped: [], total: 0 };
+    canonicalData.completeWorkbookImport(db, pendingPlan.staging.batchId, result);
     invalidateSheets();
     auditRead('import:apply', {
       entity: 'directorates',
