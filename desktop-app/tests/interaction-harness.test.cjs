@@ -39,6 +39,9 @@ test('Electron E2E opens the native file dialog path and verifies the workbook i
   assert.match(harness, /اختيار ملف القالب/);
   assert.match(harness, /فحص بنية ملف Excel/);
   assert.match(harness, /inventoryUi\.sheetNames/);
+  assert.match(harness, /inventoryUi\.visible/);
+  assert.match(harness, /14-فهرس-الأوراق\.png/);
+  assert.match(harness, /scrollIntoView\(\{ behavior: 'instant', block: 'start' \}\)/);
 });
 
 test('Electron E2E checks keyboard focus visibility', () => {

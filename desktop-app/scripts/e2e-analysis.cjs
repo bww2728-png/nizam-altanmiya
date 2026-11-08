@@ -377,24 +377,34 @@ app.whenReady().then(async () => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [SAMPLE] });
     const scanClicked = await clickByText(window, '.btn.primary.sheen', 'اختيار ملف القالب');
     await waitFor(window, `document.body.innerText.includes('فحص بنية ملف Excel')`, 60000);
+    await waitFor(window, `(() => {
+      const text = document.body.innerText;
+      return text.includes('فُحصت 8 ورقة') && !text.includes('جارٍ بناء خطة الاستيراد');
+    })()`, 30000);
     const inventoryUi = await window.webContents.executeJavaScript(`(() => {
       const card = [...document.querySelectorAll('.card')].find((item) =>
         item.querySelector('.card-head h2')?.textContent.trim() === 'فحص بنية ملف Excel'
       );
+      if (card) card.scrollIntoView({ behavior: 'instant', block: 'start' });
+      const rect = card?.getBoundingClientRect();
       return {
         present: Boolean(card),
         rows: card?.querySelectorAll('table.data tbody tr').length ?? 0,
         text: (card?.innerText || '').slice(0, 1400),
         sheetNames: [...(card?.querySelectorAll('table.data tbody tr td:first-child') ?? [])].map((node) => node.textContent.trim()),
+        visible: Boolean(rect && rect.top >= 0 && rect.top < window.innerHeight && rect.height > 0),
+        top: rect?.top ?? null,
       };
     })()`);
+    await sleep(250);
     check(
       'import',
-      'واجهة المراجعة تعرض فهرس الأوراق قبل اعتماد الاستيراد',
-      scanClicked && inventoryUi.present && inventoryUi.rows > 0 && inventoryUi.sheetNames.includes('قاعدة البيانات الشاملة'),
+      'واجهة المراجعة تعرض فهرس الأوراق المرئي قبل اعتماد الاستيراد',
+      scanClicked && inventoryUi.present && inventoryUi.visible && inventoryUi.rows > 0 && inventoryUi.sheetNames.includes('قاعدة البيانات الشاملة'),
       JSON.stringify(inventoryUi)
     );
     await screenshot(window, '8-الاستيراد.png');
+    await screenshot(window, '14-فهرس-الأوراق.png');
 
     // ---------- 4. Access profile ----------
     const toggled = await clickBySelector(window, '.topbar button.chip.clickable', 'تبديل وضع الوصول');
