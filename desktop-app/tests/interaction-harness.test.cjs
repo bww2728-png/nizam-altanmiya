@@ -36,7 +36,7 @@ test('Electron E2E blocks and reports Chromium HTTP, HTTPS and WebSocket request
 
 test('Electron E2E opens the native file dialog path and verifies the workbook inventory UI', () => {
   assert.match(harness, /dialog\.showOpenDialog = async/);
-  assert.match(harness, /اختيار ملف القالب/);
+  assert.match(harness, /اختيار ملف Excel/);
   assert.match(harness, /فحص بنية ملف Excel/);
   assert.match(harness, /inventoryUi\.sheetNames/);
   assert.match(harness, /inventoryUi\.visible/);
