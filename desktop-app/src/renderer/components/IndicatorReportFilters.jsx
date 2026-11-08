@@ -55,7 +55,7 @@ export default function IndicatorReportFilters({ registry, accessProfile, value,
         <Badge tone="gold">{criteria.length} شرط</Badge>
       </div>
       <div className="indicator-report-settings">
-        <label>مسار الدرجة والرتبة<select className="input" value={value.mode} onChange={(event) => update({ mode: event.target.value })}><option value="calibrated">المعاير — لا يخلط مع مطابقة القالب</option><option value="replica">مطابقة القالب — المسار المرجعي</option></select></label>
+        <label>مسار الدرجة والرتبة<select className="input" value={value.mode} onChange={(event) => update({ mode: event.target.value })}><option value="calibrated">المعاير — نقاط مرجعية ثابتة</option><option value="replica">المعادلة المرجعية</option></select></label>
         <label>القيم المعروضة والمفلترة<select className="input" value={value.view} onChange={(event) => update({ view: event.target.value })}><option value="values">القيم الأصلية للمؤشر</option><option value="scores">درجات الاحتياج 0–100</option><option value="contributions">المساهمة في المركّب</option></select></label>
         <label>الترتيب<select className="input" value={value.sort} onChange={(event) => update({ sort: event.target.value })}><option value="rank">الرتبة في المسار المختار</option><option value="composite">درجة المركّب</option>{registry.map((indicator) => <option key={indicator.code} value={indicator.code}>{indicator.header}</option>)}</select></label>
         <label>الاتجاه<select className="input" value={value.direction} onChange={(event) => update({ direction: event.target.value })}><option value="desc">تنازلي</option><option value="asc">تصاعدي</option></select></label>
