@@ -605,8 +605,20 @@ function promoteProjectRegion(database, request = {}) {
       : (promotedCount >= totalRegionRows ? 'projects-promoted' : 'projects-partially-promoted');
     database.prepare('UPDATE workbook_import_regions SET review_status = ? WHERE id = ?')
       .run(promotedCount >= totalRegionRows ? 'promoted' : (promotedCount > 0 ? 'partially-promoted' : 'mapped'), regionId);
+    const previousBatch = database.prepare('SELECT result_json FROM workbook_import_batches WHERE id = ?').get(batchId);
+    const previousResult = safeJsonParse(previousBatch?.result_json, {}) ?? {};
+    const projectPromotion = {
+      regionId,
+      applied,
+      refused,
+      skipped: Math.max(0,totalRegionRows-normalizedRows.length),
+      status,
+      promotedAt: now,
+    };
+    const projectPromotions = Array.isArray(previousResult.projectPromotions) ? previousResult.projectPromotions : [];
+    const combinedResult = { ...previousResult, projectPromotions: [...projectPromotions, projectPromotion] };
     database.prepare('UPDATE workbook_import_batches SET status = ?,result_json = ?,updated_at = ? WHERE id = ?')
-      .run(status,json({entityType:'project',applied,refused,skipped:Math.max(0,totalRegionRows-normalizedRows.length)}),now,batchId);
+      .run(status,json(combinedResult),now,batchId);
     return { applied, refused, skipped: Math.max(0,totalRegionRows-normalizedRows.length), total: normalizedRows.length, status };
   })();
 }
@@ -615,11 +627,20 @@ function completeWorkbookImport(database, batchId, result = {}) {
   const id = Number(batchId);
   if (!Number.isInteger(id) || id <= 0) throw new Error('معرّف دفعة الاستيراد غير صالح.');
   const applied = Number(result.applied ?? 0);
-  const status = applied > 0
+  const directorateStatus = applied > 0
     ? (Number(result.refused?.length ?? 0) || Number(result.skipped?.length ?? 0) ? 'directorates-partially-applied' : 'directorates-applied')
     : 'reviewed-without-directorate-write';
+  const previousBatch = database.prepare('SELECT result_json FROM workbook_import_batches WHERE id = ?').get(id);
+  const previousResult = safeJsonParse(previousBatch?.result_json, {}) ?? {};
+  const promotedProjects = database.prepare("SELECT COUNT(*) AS count FROM workbook_import_promotions WHERE batch_id = ? AND entity_type = 'project'").get(id).count;
+  const status = promotedProjects > 0 && applied > 0
+    ? 'directorates-and-projects-applied'
+    : promotedProjects > 0
+      ? 'projects-applied-without-directorate-write'
+      : directorateStatus;
+  const combinedResult = { ...previousResult, directorateImport: result };
   database.prepare("UPDATE workbook_import_batches SET status=?,result_json=?,updated_at=? WHERE id=?")
-    .run(status, json(result), new Date().toISOString(), id);
+    .run(status, json(combinedResult), new Date().toISOString(), id);
   return { batchId: id, status };
 }
 
