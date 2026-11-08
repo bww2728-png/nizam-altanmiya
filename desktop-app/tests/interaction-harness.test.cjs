@@ -7,6 +7,8 @@ const test = require('node:test');
 
 const root = path.join(__dirname, '..');
 const harness = fs.readFileSync(path.join(root, 'scripts/e2e-analysis.cjs'), 'utf8');
+const main = fs.readFileSync(path.join(root, 'src/main/main.cjs'), 'utf8');
+const offlinePolicy = fs.readFileSync(path.join(root, 'src/main/offline-policy.cjs'), 'utf8');
 
 test('Electron E2E drives real pointer input and checks the true hit target', () => {
   assert.match(harness, /sendInputEvent\(\{ type: 'mouseMove'/);
@@ -24,14 +26,18 @@ test('Electron E2E records before/after screenshots and per-action traces', () =
   assert.match(harness, /12-تتبع-التفاعلات\.json/);
 });
 
-test('Electron E2E blocks and reports Chromium HTTP, HTTPS and WebSocket requests', () => {
-  assert.match(harness, /webRequest\.onBeforeRequest/);
-  assert.match(harness, /http:\/\/\*\/\*/);
-  assert.match(harness, /https:\/\/\*\/\*/);
-  assert.match(harness, /ws:\/\/\*\/\*/);
-  assert.match(harness, /wss:\/\/\*\/\*/);
-  assert.match(harness, /callback\(\{ cancel: true \}\)/);
-  assert.match(harness, /networkAttempts\.length === 0/);
+test('Electron E2E validates centralized Node, Electron and Chromium offline guards', () => {
+  assert.match(main, /installOfflineNetworkGuards\(\{ electronNet: net \}\)/);
+  assert.match(main, /installOfflineSessionGuard\(session\.defaultSession\)/);
+  assert.match(offlinePolicy, /webRequest\.onBeforeRequest/);
+  assert.match(offlinePolicy, /http:\/\/\*\/\*/);
+  assert.match(offlinePolicy, /https:\/\/\*\/\*/);
+  assert.match(offlinePolicy, /ws:\/\/\*\/\*/);
+  assert.match(offlinePolicy, /wss:\/\/\*\/\*/);
+  assert.match(offlinePolicy, /callback\(\{ cancel: true \}\)/);
+  assert.match(offlinePolicy, /recordBlockedAttempt\('renderer'/);
+  assert.match(harness, /getOfflineNetworkAudit/);
+  assert.match(harness, /networkAttemptCount === 0/);
 });
 
 test('Electron E2E opens the native file dialog path and verifies the workbook inventory UI', () => {
