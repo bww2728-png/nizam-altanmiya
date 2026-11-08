@@ -24,7 +24,7 @@ test('workbooks without a directorate table are retained as unapproved review ba
   assert.match(main, /no-directorate-table/);
   assert.match(main, /rows: \[\]/);
   assert.match(main, /stagingOnly: Boolean\(directorateReadError\)/);
-  assert.match(main, /if \(pendingPlan\.plan\.rows\?\.length\)/);
+  assert.match(main, /pendingPlan\.plan\.rows\?\.length\s*\?/);
 });
 
 test('renderer bridge exposes a bounded workbook intake history query', () => {
