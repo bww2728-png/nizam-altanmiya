@@ -19,3 +19,9 @@ export const INDICATORS_META = [
   { code: 'stalledProject', excel: 'AX', header: 'تعثر (0/1)', direction: 'needUp', unit: '0/1' },
   { code: 'aidPerCapita', excel: 'AY', header: 'مساعدات/فرد كجم', direction: 'needDown', unit: 'كجم/فرد' },
 ];
+
+/** Higher is more needy when the direction is needUp. */
+export const NEED_LABEL = {
+  needUp: 'كلما ارتفع زاد الاحتياج',
+  needDown: 'كلما ارتفع قلّ الاحتياج',
+};

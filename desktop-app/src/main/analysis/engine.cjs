@@ -48,7 +48,7 @@ function analyze(rows, options = {}) {
     };
   });
 
-  // 2. Mode A — faithful replication of column AZ.
+  // 2. Mode A — weighted composite (linear sum of the twelve dimensions).
   const replicaRun = replicaComposite(analysed, { weights });
   analysed.forEach((row, index) => {
     const result = replicaRun.results[index];
@@ -99,17 +99,23 @@ function analyze(rows, options = {}) {
   const comparison = compareRanks(analysed, { kThreshold });
 
   // 6. Sensitivity — weight perturbation for mode B, sample perturbation for mode A.
-  const sensitivity = analyzeSensitivity(analysed, { weights, mode: 'calibrated', kThreshold });
-  const sampleSensitivity = analyzeSampleSensitivity(analysed, weights);
+  //    Skipped when the caller explicitly opts out (options.sensitivity === false,
+  //    e.g. the sheets payload which never renders it): every row's sensitivity
+  //    becomes null. Absent or true keeps today's behaviour untouched.
+  const withSensitivity = options.sensitivity !== false;
+  const sensitivity = withSensitivity ? analyzeSensitivity(analysed, { weights, mode: 'calibrated', kThreshold }) : null;
+  const sampleSensitivity = withSensitivity ? analyzeSampleSensitivity(analysed, weights) : null;
   // `detail` is produced in row order, so match it by position. Matching by name
   // would attach one directorate's shift to a same-name district elsewhere.
   const sampleShiftByRow = new Map();
-  sampleSensitivity.detail.forEach((item, index) => {
-    const row = analysed[index];
-    if (row) sampleShiftByRow.set(row, item.maxShift);
-  });
+  if (sampleSensitivity) {
+    sampleSensitivity.detail.forEach((item, index) => {
+      const row = analysed[index];
+      if (row) sampleShiftByRow.set(row, item.maxShift);
+    });
+  }
   for (const row of analysed) {
-    const entry = sensitivity.perRow.get(row);
+    const entry = sensitivity?.perRow.get(row);
     row.sensitivity = entry
       ? {
         minRank: entry.minRank, maxRank: entry.maxRank, rankRange: entry.rankRange,
@@ -137,7 +143,7 @@ function analyze(rows, options = {}) {
     calibratedBlocked: calibratedRanking.blocked.length,
     severeCount: analysed.filter((row) => row.calibrated.severe).length,
     fragileCount: analysed.filter((row) => row.sensitivity?.fragile).length,
-    sampleSensitivityTruncated: Boolean(sampleSensitivity.truncated),
+    sampleSensitivityTruncated: Boolean(sampleSensitivity?.truncated),
     averageWeightCoverage: analysed.length
       ? analysed.reduce((sum, row) => sum + (row.calibrated.weightCoverage ?? 0), 0) / analysed.length
       : 0,
@@ -156,8 +162,8 @@ function analyze(rows, options = {}) {
       minWeightCoverage: CALIBRATION.minWeightCoverage,
       template: TEMPLATE,
       modes: {
-        replica: 'مطابقة حرفية لمعادلة AZ في القالب (الفراغ = صفر)',
-        calibrated: 'معايرة مطلقة بنقاط مرجعية ثابتة + تعداد الأبعاد المتدهورة',
+        replica: 'المؤشر المرجّح: جمع خطي للأبعاد الموزونة (الفراغ = صفر)',
+        calibrated: 'مؤشر الاحتياج المعاير: نقاط مرجعية ثابتة + تعداد الأبعاد المتدهورة',
       },
     },
     rows: analysed,

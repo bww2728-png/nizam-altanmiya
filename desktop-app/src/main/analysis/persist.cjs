@@ -262,6 +262,12 @@ function rowFromDirectorate(record) {
     rowNumber: record.source_row ?? null,
     districtName: record.district,
     governorate: record.governorate,
+    // Provenance travels with the row so the directorate card can show where a
+    // record came from without a second query.
+    sourceFile: record.source_file ?? null,
+    sourceSheet: record.source_sheet ?? null,
+    createdAt: record.created_at ?? null,
+    updatedAt: record.updated_at ?? null,
     values,
     rawValues,
     sources: {},
@@ -621,119 +627,9 @@ function getLastCalibration(database) {
   return parseJson(getSetting(database, CALIBRATION_KEY, null), null);
 }
 
-/**
- * Store one OCR recognition as a reviewable draft.
- *
- * Every proposal lands with `decision = 'pending'` — there is deliberately no
- * auto-accept path — and keeps the engine's line confidence next to the header
- * match score, because the two mean different things and the reviewer needs
- * both to judge a value.
- *
- * @returns {{draftId:number, fields:number, reviewCount:number}}
- */
-function saveOcrDraft(database, draft = {}) {
-  const createdAt = nowIso();
-  const parsed = draft.parsed ?? {};
-  const fields = parsed.fields ?? {};
-  const payload = safeJson({
-    fields,
-    unmatched: parsed.unmatched ?? [],
-    warnings: parsed.warnings ?? [],
-    crossField: parsed.crossField ?? [],
-    summary: parsed.summary ?? null,
-  }, '{}');
-
-  const write = database.transaction(() => {
-    const info = database.prepare(`
-      INSERT INTO ocr_drafts (file_name, file_type, file_size, text, confidence, fields_json, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)
-    `).run(
-      draft.fileName ?? null,
-      draft.fileType ?? null,
-      Number.isFinite(Number(draft.fileSize)) ? Number(draft.fileSize) : null,
-      String(draft.text ?? '').slice(0, 400000),
-      Number.isFinite(Number(draft.confidence)) ? Number(draft.confidence) : null,
-      payload,
-      createdAt,
-      createdAt,
-    );
-    const draftId = Number(info.lastInsertRowid);
-    const insertField = database.prepare(`
-      INSERT INTO ocr_field_confidence
-        (draft_id, field_key, header, raw_text, parsed_value, engine_confidence, header_score, decision, reviewed_value, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?)
-    `);
-    for (const [key, entry] of Object.entries(fields)) {
-      insertField.run(
-        draftId,
-        key,
-        entry.header ?? null,
-        entry.raw ?? null,
-        entry.value === null || entry.value === undefined ? null : String(entry.value),
-        Number.isFinite(Number(entry.confidence)) ? Number(entry.confidence) : null,
-        Number.isFinite(Number(entry.score)) ? Number(entry.score) : null,
-        createdAt,
-      );
-    }
-    return draftId;
-  });
-
-  const draftId = write();
-  const reviewCount = Object.values(fields).filter((entry) => entry.needsReview).length;
-  return { draftId, fields: Object.keys(fields).length, reviewCount };
-}
-
-function recordOcrDecision(database, request = {}) {
-  const draftId = toPositiveId(request.draftId);
-  const fieldKey = String(request.fieldKey ?? '').trim();
-  if (!fieldKey) throw new Error('مفتاح الحقل مطلوب لتسجيل قرار المراجعة.');
-  const decision = ['accepted', 'rejected', 'edited', 'pending'].includes(request.decision) ? request.decision : null;
-  if (!decision) throw new Error('قرار المراجعة غير معروف.');
-  const result = database.prepare(`
-    UPDATE ocr_field_confidence SET decision = ?, reviewed_value = ?
-    WHERE draft_id = ? AND field_key = ?
-  `).run(decision, request.value === undefined || request.value === null ? null : String(request.value), draftId, fieldKey);
-  if (!result.changes) throw new Error('الحقل غير موجود في هذه المسودة.');
-  database.prepare('UPDATE ocr_drafts SET updated_at = ? WHERE id = ?').run(nowIso(), draftId);
-  return { success: true };
-}
-
-function listOcrDrafts(database, limit = 50) {
-  return database.prepare(`
-    SELECT d.id, d.file_name, d.file_type, d.confidence, d.status, d.created_at, d.updated_at,
-           (SELECT COUNT(*) FROM ocr_field_confidence f WHERE f.draft_id = d.id) AS field_count,
-           (SELECT COUNT(*) FROM ocr_field_confidence f WHERE f.draft_id = d.id AND f.decision = 'pending') AS pending_count
-    FROM ocr_drafts d ORDER BY d.id DESC LIMIT ?
-  `).all(Math.min(500, Math.max(1, Number(limit) || 50)));
-}
-
-function getOcrDraft(database, draftId) {
-  const numeric = toPositiveId(draftId);
-  const draft = database.prepare('SELECT * FROM ocr_drafts WHERE id = ?').get(numeric);
-  if (!draft) throw new Error('مسودة القراءة غير موجودة.');
-  const fields = database.prepare('SELECT * FROM ocr_field_confidence WHERE draft_id = ? ORDER BY id').all(numeric);
-  return {
-    id: draft.id,
-    fileName: draft.file_name,
-    fileType: draft.file_type,
-    fileSize: draft.file_size,
-    confidence: draft.confidence,
-    status: draft.status,
-    createdAt: draft.created_at,
-    text: String(draft.text ?? '').slice(0, 50000),
-    payload: parseJson(draft.fields_json, {}),
-    fields: fields.map((field) => ({
-      fieldKey: field.field_key,
-      header: field.header,
-      rawText: field.raw_text,
-      parsedValue: field.parsed_value,
-      engineConfidence: field.engine_confidence,
-      headerScore: field.header_score,
-      decision: field.decision,
-      reviewedValue: field.reviewed_value,
-    })),
-  };
-}
+// OCR persistence was removed with the OCR feature. The ocr_drafts and
+// ocr_field_confidence tables stay in the schema (an existing table is never
+// dropped) but nothing reads or writes them.
 
 function getWeights(database) {
   const active = database.prepare('SELECT * FROM analysis_weights WHERE active = 1 ORDER BY id DESC LIMIT 1').get();
@@ -1035,10 +931,6 @@ module.exports = {
   restoreDirectorateVersion,
   setLastCalibration,
   getLastCalibration,
-  saveOcrDraft,
-  recordOcrDecision,
-  listOcrDrafts,
-  getOcrDraft,
   CALIBRATION_KEY,
   VERSION_KEEP,
   getWeights,

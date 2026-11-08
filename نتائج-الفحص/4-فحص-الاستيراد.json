@@ -1,0 +1,32 @@
+{
+  "generatedAt": "2026-11-08T05:10:26.022Z",
+  "group": "import",
+  "total": 4,
+  "passed": 4,
+  "checks": [
+    {
+      "group": "import",
+      "name": "فحص الملف يكتشف الورقة وصف الرؤوس",
+      "ok": true,
+      "detail": "{\"canceled\":false,\"sheet\":\"قاعدة البيانات الشاملة\",\"headerRow\":2,\"matched\":40,\"totalRows\":20,\"planRows\":20,\"created\":20,\"updated\":0,\"refused\":0,\"total\":20}"
+    },
+    {
+      "group": "import",
+      "name": "كل أعمدة الإدخال الـ39 مطابقة",
+      "ok": true,
+      "detail": "matched=40"
+    },
+    {
+      "group": "import",
+      "name": "الخطة تعرض 20 صفًا وتُطبَّق في القاعدة المشفّرة",
+      "ok": true,
+      "detail": "{\"canceled\":false,\"sheet\":\"قاعدة البيانات الشاملة\",\"headerRow\":2,\"matched\":40,\"totalRows\":20,\"planRows\":20,\"created\":20,\"updated\":0,\"refused\":0,\"total\":20}"
+    },
+    {
+      "group": "import",
+      "name": "لا صفوف مرفوضة أثناء التطبيق",
+      "ok": true,
+      "detail": "refused=0"
+    }
+  ]
+}

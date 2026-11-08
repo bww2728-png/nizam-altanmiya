@@ -14,7 +14,23 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const NM = path.join(__dirname, '..', 'desktop-app', 'node_modules');
-const { createCanvas, loadImage } = require(path.join(NM, '@napi-rs', 'canvas'));
+// `@napi-rs/canvas` is a dev-only dependency used solely by this asset tool; it
+// is NOT part of the runtime (no OCR, no image code ships). It is no longer
+// installed with the app, so resolve it on demand and fail with an actionable
+// message instead of a bare MODULE_NOT_FOUND when the tool is used.
+let createCanvas;
+let loadImage;
+try {
+  ({ createCanvas, loadImage } = require(path.join(NM, '@napi-rs', 'canvas')));
+} catch {
+  try {
+    ({ createCanvas, loadImage } = require('@napi-rs/canvas'));
+  } catch {
+    console.error('make-icon needs the dev-only package @napi-rs/canvas.');
+    console.error('Install it first:  npm i -D @napi-rs/canvas  (inside desktop-app), then re-run.');
+    process.exit(1);
+  }
+}
 
 const SOURCE = path.join(__dirname, '..', 'assets', 'brand-source.jpg');
 

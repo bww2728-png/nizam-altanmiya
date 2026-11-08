@@ -95,12 +95,12 @@ async function screenshot(cdp, file) {
         taglines: document.querySelectorAll('.welcome-taglines li').length,
         subtitle: (document.querySelector('.welcome-subtitle') || {}).textContent || '',
         passwordFields: document.querySelectorAll('input[type=password]').length,
-        button: (document.querySelector('.welcome-screen .primary-button') || {}).textContent || ''
+        button: (document.querySelector('.welcome-card .btn.primary') || {}).textContent || ''
       })`
     );
     await screenshot(cdp, path.join(appDir, 'screenshot-welcome.png'));
 
-    await evaluate(cdp, `document.querySelector('.welcome-screen .primary-button').click()`);
+    await evaluate(cdp, `document.querySelector('.welcome-card .btn.primary').click()`);
     for (let i = 0; i < 40; i++) {
       if (await evaluate(cdp, `document.querySelectorAll('.nav-item').length > 0`)) break;
       await sleep(400);
@@ -109,8 +109,8 @@ async function screenshot(cdp, file) {
       cdp,
       `({
         nav: document.querySelectorAll('.nav-item').length,
-        heroBanner: !!document.querySelector('.overview-hero-banner'),
-        sidebarLogo: !!document.querySelector('.brand-icon img'),
+        heroBanner: !!document.querySelector('.hero'),
+        sidebarLogo: !!document.querySelector('.brand-lockup img'),
         error: (document.querySelector('.error-banner') || {}).textContent || ''
       })`
     );
@@ -120,7 +120,7 @@ async function screenshot(cdp, file) {
       report.welcome.banner === true &&
       report.welcome.taglines === 4 &&
       report.welcome.passwordFields === 0 &&
-      report.dashboard.nav === 4 &&
+      report.dashboard.nav === 8 &&
       report.dashboard.heroBanner === true &&
       report.dashboard.sidebarLogo === true &&
       !report.dashboard.error;

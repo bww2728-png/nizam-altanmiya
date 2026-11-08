@@ -156,7 +156,7 @@ test('serialized analysis crosses the IPC boundary as plain data', async () => {
   assert.ok(Array.isArray(clone.sensitivity.weight.perRow));
 });
 
-test('the Excel export contains the template layout and the analysis sheets', async () => {
+test('the Excel export contains the data sheet, the analysis sheets and the methodology', async () => {
   const ExcelJS = require('exceljs');
   const read = await readDirectorateWorkbook(FIXTURE);
   const analysis = analyze(read.rows);
@@ -169,23 +169,61 @@ test('the Excel export contains the template layout and the analysis sheets', as
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.readFile(filePath);
     const names = reopened.worksheets.map((sheet) => sheet.name);
-    for (const expected of ['قاعدة البيانات الشاملة', 'الترتيب والأولويات', 'فجوات البيانات', 'الحساسية', 'الأوزان والمعايرة', 'سجل التدقيق']) {
+    for (const expected of [
+      'قاعدة البيانات الشاملة',
+      'الترتيب والأولويات',
+      'قيم شاذة',
+      'فجوات البيانات',
+      'استقرار الترتيب',
+      'المنهجية والأوزان',
+      'بيانات الإصدار',
+      'سجل التدقيق',
+    ]) {
       assert.ok(names.includes(expected), `missing sheet: ${expected}`);
     }
+    assert.equal(names.length, 8, 'the export carries exactly eight sheets');
 
-    const template = reopened.getWorksheet('قاعدة البيانات الشاملة');
-    assert.equal(template.getRow(1).getCell(1).value, 'اسم المديرية');
-    assert.equal(template.getRow(2).getCell(1).value, 'مديرية الشعر');
-    // AZ is column 52 in the A..BH layout.
-    assert.equal(template.getRow(1).getCell(52).value, 'المركب (مطابقة القالب)');
-    assert.ok(Math.abs(template.getRow(2).getCell(52).value - 0.2) < 1e-12);
+    const data = reopened.getWorksheet('قاعدة البيانات الشاملة');
+    assert.equal(data.getRow(1).getCell(1).value, 'اسم المديرية');
+    assert.equal(data.getRow(2).getCell(1).value, 'مديرية الشعر');
+    // AZ (52) is the priority index; BG (59) keeps the weighted composite so the
+    // two paths can be compared without leaving the sheet.
+    assert.equal(data.getRow(1).getCell(52).value, 'مؤشر الأولوية');
+    assert.equal(data.getRow(1).getCell(59).value, 'المؤشر المرجّح المباشر');
+    assert.ok(Math.abs(data.getRow(2).getCell(59).value - 0.2) < 1e-12);
+
+    // Official wording: the export never names its input workbook.
+    const headerRow = data.getRow(1);
+    for (let column = 1; column <= headerRow.cellCount; column += 1) {
+      const header = String(headerRow.getCell(column).value ?? '');
+      assert.ok(!header.includes('القالب'), `header leaks the input workbook name: ${header}`);
+      assert.ok(!header.includes('مطابقة'), `header leaks the legacy wording: ${header}`);
+    }
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
+test('the audit sheet blanks file identities but keeps numeric entity ids', async () => {
+  const read = await readDirectorateWorkbook(FIXTURE);
+  const analysis = analyze(read.rows);
+  const workbook = await buildAnalysisWorkbook(analysis, {
+    audit: [
+      { id: 1, action: 'excel-scan', entity: 'workbook', entity_id: 'C:\\data\\القالب المحدث.xlsx', detail: '', created_at: 't' },
+      { id: 2, action: 'excel-import', entity: 'directorates', entity_id: 'القالب المحدث.xlsx', detail: '', created_at: 't' },
+      { id: 3, action: 'edit', entity: 'directorates', entity_id: '7', detail: '', created_at: 't' },
+    ],
+  });
+
+  const sheet = workbook.getWorksheet('سجل التدقيق');
+  // Column 4 is «المعرّف» (entity_id); data starts at row 2.
+  assert.equal(sheet.getRow(2).getCell(4).value, '—', 'a workbook path is blanked');
+  assert.equal(sheet.getRow(3).getCell(4).value, '—', 'an import entity_id that is a file name is blanked');
+  assert.equal(String(sheet.getRow(4).getCell(4).value), '7', 'a numeric entity id is kept');
+});
+
 test('renderer indicator metadata matches the engine schema', async () => {
-  const { INDICATORS_META } = await import('../src/renderer/analysis/indicatorsMeta.mjs');
+  const { INDICATORS_META } = await import('../src/renderer/lib/indicatorsMeta.mjs');
   const { INDICATORS } = require('../src/main/analysis/schema.cjs');
 
   assert.equal(INDICATORS_META.length, INDICATORS.length);
@@ -208,6 +246,9 @@ test('the PDF report HTML is RTL, complete and escapes user text', async () => {
   assert.match(html, /حرمان حاد|محجوبة/);
   assert.ok(!html.includes('<script'), 'no script tags in the generated report');
   assert.match(html, /Content-Security-Policy/, 'the report must carry a CSP');
+  assert.ok(!html.includes('القالب'), 'the report must not name its input workbook');
+  assert.match(html, /مقارنة المسارين/, 'the two analytical paths must be shown side by side');
+  assert.match(html, /خط الحرمان/, 'the methodology section must state the deprivation line');
 });
 
 test('a saved run preserves the blocked verdict and the missing-field list', async () => {

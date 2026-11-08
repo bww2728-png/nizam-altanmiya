@@ -19,32 +19,10 @@ async function run() {
     result.modules.sqlite = 'FAIL: ' + error.message;
   }
   try {
-    const { createCanvas } = require('@napi-rs/canvas');
-    const canvas = createCanvas(8, 8);
-    canvas.getContext('2d').fillRect(0, 0, 8, 8);
-    result.modules.canvas = canvas.toBuffer('image/png').length > 0;
-  } catch (error) {
-    result.modules.canvas = 'FAIL: ' + error.message;
-  }
-  try {
     require('exceljs');
-    require('mammoth');
-    result.modules.office = true;
+    result.modules.exceljs = true;
   } catch (error) {
-    result.modules.office = 'FAIL: ' + error.message;
-  }
-  try {
-    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-    result.modules.pdfjs = typeof pdfjs.getDocument === 'function';
-  } catch (error) {
-    result.modules.pdfjs = 'FAIL: ' + error.message;
-  }
-  try {
-    const tesseract = require('tesseract.js');
-    const lang = require('@tesseract.js-data/ara');
-    result.modules.tesseract = { createWorker: typeof tesseract.createWorker, langPath: Boolean(lang.langPath) };
-  } catch (error) {
-    result.modules.tesseract = 'FAIL: ' + error.message;
+    result.modules.exceljs = 'FAIL: ' + error.message;
   }
   result.modules.store = null;
   try {

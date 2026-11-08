@@ -1,5 +1,7 @@
 # سجل التجهيز والبناء — نظام التنمية المحلية 0.1.0
 
+> **ملاحظة:** هذا السجل يوثّق البناء الأول (0.1.0) بتاريخ 2026-11-06 بمسارات PDF/Word/OCR. أُزيلت مسارات OCR/PDF/Word بالكامل لاحقًا، وأصبح **الاستيراد من Excel هو المسار الوحيد**. راجع قسم «تحديث 2026-11-08 — الإدخال الآلي من Excel فقط» في نهاية الملف. الأقسام أعلاه محفوظة كسجل تاريخي.
+
 المصدر: `%USERPROFILE%\Desktop\نظام الوزاره (3).zip`
 مجلد العمل: `C:\dev\nizam-altanmiya`
 تاريخ البناء: 2026-11-06 · Electron 45.2.3 · Node 24.18 (بناء) / 24.22 (زمن تشغيل Electron)
@@ -87,3 +89,20 @@
 - البيانات في `%APPDATA%\local-development-intelligence\development-data.db` ولا تُحذف عند إلغاء التثبيت.
 - ملف `desktop-app/ara.traineddata` (2.4 MB) غير مستخدم من الكود (OCR يستخدم `@tesseract.js-data/ara`) وغير مضمّن في الحزمة.
 - تقليص الحجم الممكن لاحقًا: استثناء `better-sqlite3-multiple-ciphers/prebuilds` لغير win32-x64 (~20 MB) وبعض كانات `@napi-rs` لغير Windows.
+
+## تحديث 2026-11-08 — الإدخال الآلي من Excel فقط
+
+إعادة توجيه النظام إلى مسار إدخال واحد: ملف Excel. أُزيلت مسارات OCR واستخراج المحتوى من PDF/Word بالكامل.
+
+| الملف | التغيير |
+| --- | --- |
+| `desktop-app/src/main/ocr-pipeline.cjs`, `importers.cjs`, `repository.cjs`, `analysis/ocr-entry.cjs`, `analysis/bridge.cjs` | محذوفة. |
+| `desktop-app/src/main/main.cjs` | إزالة 10 قنوات OCR/استخراج/تصدير قديمة؛ 29 قناة متطابقة 1:1 مع `preload.cjs`؛ خلفية النافذة `#0b1322`. |
+| `desktop-app/package.json` | إزالة الاعتماديات: `@napi-rs/canvas`, `@tesseract.js-data/ara`, `mammoth`, `pdfjs-dist`, `tesseract.js`، و`asarUnpack` الخاص بها. بقي: `better-sqlite3-multiple-ciphers`, `exceljs`, `lucide-react`, `react`, `react-dom`. |
+| `desktop-app/src/main/analysis/import-plan.cjs` | خطة استيراد: فحص → قرارات لكل صف → تطبيق في معاملة واحدة، مع حجر الصف الخطأ واستمرار البقية. |
+| `desktop-app/src/renderer/` | واجهة جديدة بالكامل (7 شاشات: اللوحة، المؤشرات الـ 12، ترتيب الأولويات، الاستيراد الآلي، تصحيح البيانات، قاعدة البيانات الشاملة، بطاقة مديرية) بتصميم داكن كحلي/ذهبي وحركات ظهور واختفاء. |
+| `desktop-app/src/main/analysis/pdf.cjs`, `exporter.cjs` | مخرجات رسمية: لا تذكر ملف الإدخال، تعرض مساري القياس (المؤشر المرجّح + مؤشر الاحتياج المعاير) وفروقهما، وتوثّق المنهجية (k=4/12، خط الحرمان 0.6) وحدود التقرير. Excel: 7 أوراق (قاعدة البيانات، الترتيب، الفجوات، استقرار الترتيب، المنهجية والأوزان، بيانات الإصدار، سجل التدقيق). |
+| `desktop-app/scripts/e2e-analysis.cjs` | إعادة كتابة كاملة على 20 مديرية: 37 فحصًا للدخول والاستيراد والشاشات ووضع الوصول والتصدير، مع تقرير عيوب مصنّف وتقرير تجربة استخدام. النتيجة: 37/37. |
+
+التحقق: `node --test tests/*.test.cjs` → 77/77 ناجحة؛ `npx vite build` ناجح؛ `npx electron scripts/e2e-analysis.cjs` → 37/37.
+

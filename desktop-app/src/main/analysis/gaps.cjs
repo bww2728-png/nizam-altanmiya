@@ -39,7 +39,17 @@ function analyzeGaps(records) {
   for (const record of records) {
     const values = record.values ?? {};
 
+    // A value that was read but could not be parsed (invalid-* / ratio-out-of-range)
+    // is already reported with its own reason. Reporting it a second time as
+    // `missing-mandatory` would double the findings for one cell, so an unparsable
+    // key is exempted — the same rule `import-plan` follows when it builds a plan.
+    const unparsable = new Set();
+    for (const warning of record.warnings ?? []) {
+      if (String(warning.code).startsWith('invalid') || warning.code === 'ratio-out-of-range') unparsable.add(warning.key);
+    }
+
     for (const field of MANDATORY_FIELDS) {
+      if (unparsable.has(field.key)) continue;
       const value = values[field.key];
       const present = field.key === 'frontLine' || field.key === 'projectStatus'
         ? value !== null && value !== undefined && String(value).trim() !== ''
@@ -60,7 +70,7 @@ function analyzeGaps(records) {
       } else if (warning.code === 'placeholder') {
         add(record, issue('warning', 'placeholder-value', warning.key,
           `القيمة «${warning.raw}» في ${label} نص بديل وليست بيانات.`, { raw: warning.raw }));
-      } else if (String(warning.code).startsWith('invalid')) {
+      } else if (String(warning.code).startsWith('invalid') || warning.code === 'ratio-out-of-range') {
         add(record, issue('blocker', 'invalid-value', warning.key,
           `القيمة «${warning.raw}» في ${label} غير قابلة للتحويل؛ تُعامل كفراغ مع تسجيل السبب.`, { raw: warning.raw }));
       }
