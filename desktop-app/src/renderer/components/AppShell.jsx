@@ -4,6 +4,7 @@ import {
   LockKeyhole, LogOut, PenLine, RefreshCw, RotateCcw, ShieldCheck, Users,
 } from 'lucide-react';
 import { cx, fmtDate } from '../lib/format.js';
+import ThemeToggle from './ThemeToggle.jsx';
 import logoBadge from '../assets/logo-badge.png';
 
 /**
@@ -46,7 +47,7 @@ export const NAV_LABELS = Object.fromEntries(NAV_GROUPS.flatMap((group) => group
 
 export default function AppShell({
   route, phase, onNavigate, children, profile, profileLabel, onToggleProfile,
-  onLock, onBackup, onRestore, onRefresh, refreshing, generatedAt, counts = {},
+  onLock, onBackup, onRestore, onRefresh, refreshing, generatedAt, counts = {}, theme, onToggleTheme,
 }) {
   return (
     <div className="app-shell">
@@ -88,6 +89,7 @@ export default function AppShell({
         </nav>
 
         <div className="sidebar-bottom">
+          <ThemeToggle theme={theme} onToggle={onToggleTheme} />
           <button className="nav-item lock-action" onClick={onLock}>
             <LogOut size={18} />
             <span>قفل قاعدة البيانات</span>
