@@ -183,11 +183,14 @@ async function stageWorkbook(database, filePath, workbookOption = null) {
       // Keep non-ministry datasets discoverable without guessing their schema:
       // three or more distinct textual headers plus actual tabular data are a
       // review candidate, never an automatic import decision.
+      const structuralHeaderHints = ['اسم', 'رقم', 'تاريخ', 'قيمه', 'مبلغ', 'تكلفه', 'حاله', 'جهه', 'محافظه', 'مديريه', 'قطاع', 'وصف', 'نوع', 'مؤشر', 'كميه', 'موقع', 'رمز'];
+      const hasStructuralHint = normalizedHeaders.some(header => structuralHeaderHints.some(hint => header.includes(normalizeLabel(hint))));
       const genericHeaderCandidate = mapping.matched.length < 2
         && nonemptyHeaders.length >= 3
         && nonemptyHeaders.length <= 40
         && distinctHeaders.size >= 3
         && nonemptyHeaders.every(value => value.length <= 100)
+        && hasStructuralHint
         && hasDataBelow;
       if (mapping.matched.length < 2 && !genericHeaderCandidate) continue;
       const keys = mapping.matched.map(item => item.key);
