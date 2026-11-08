@@ -305,13 +305,17 @@ function readWorkbookSheetPreview(database, batchId, sheetId, limit = 20) {
   if (!metadata) throw new Error('الورقة المطلوبة لا تنتمي إلى دفعة الاستيراد المحددة.');
   const rows = database.prepare(
     'SELECT row_number, is_hidden, has_formula, cell_count, cells_json FROM workbook_import_rows WHERE batch_id = ? AND sheet_id = ? ORDER BY row_number LIMIT ?'
-  ).all(batch, sheet, bounded).map(row => ({
-    rowNumber: row.row_number,
-    hidden: Boolean(row.is_hidden),
-    hasFormula: Boolean(row.has_formula),
-    cellCount: row.cell_count,
-    cells: JSON.parse(row.cells_json),
-  }));
+  ).all(batch, sheet, bounded).map(row => {
+    const allCells = JSON.parse(row.cells_json);
+    return {
+      rowNumber: row.row_number,
+      hidden: Boolean(row.is_hidden),
+      hasFormula: Boolean(row.has_formula),
+      cellCount: row.cell_count,
+      cells: allCells.slice(0, 24),
+      cellsTruncated: allCells.length > 24,
+    };
+  });
   return { batchId: batch, sheet: metadata, rows, limit: bounded, truncated: rows.length < metadata.nonempty_row_count };
 }
 
