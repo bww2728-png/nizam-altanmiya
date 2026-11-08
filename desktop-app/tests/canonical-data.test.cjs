@@ -168,34 +168,44 @@ test('project regions require explicit row approval and preserve project/funding
     sheet.getRow(1).values = [
       'اسم المشروع', 'رمز المشروع', 'التكلفة التقديرية', 'رمز العملة',
       'تاريخ البداية', 'تاريخ النهاية', 'جهة التمويل', 'مبلغ التمويل',
-      'المحافظة', 'المديرية', 'القطاع',
+      'المحافظة', 'المديرية', 'القطاع', 'عملة التمويل',
     ];
     sheet.getRow(2).values = [
       'تأهيل شبكة مياه', 'PRJ-001', '١٬٢٥٠', 'YER',
       '2026-01-01', '2026-12-31', 'UNDP', '250',
-      'تعز', 'المعافر', 'المياه',
+      'تعز', 'المعافر', 'المياه', 'USD',
     ];
     sheet.getRow(3).values = [
       'إنشاء مدرسة', 'PRJ-002', 'تكلفة غير واضحة', 'YER',
       '2026-02-01', '2026-11-30', '', '',
-      'تعز', 'المعافر', 'التعليم',
+      'تعز', 'المعافر', 'التعليم', '',
     ];
     sheet.getRow(4).values = [
       'مشروع مخفي', 'PRJ-003', '500', 'YER',
       '2026-03-01', '2026-10-30', '', '',
-      'تعز', 'المعافر', 'المياه',
+      'تعز', 'المعافر', 'المياه', '',
     ];
     sheet.getRow(4).hidden = true;
     sheet.getRow(5).values = [
       'مشروع بصيغة', 'PRJ-004', null, 'YER',
       '2026-04-01', '2026-10-30', '', '',
-      'تعز', 'المعافر', 'المياه',
+      'تعز', 'المعافر', 'المياه', '',
     ];
     sheet.getCell('C5').value = { formula: '100+200', result: 300 };
     sheet.getRow(6).values = [
       'مشروع برمز مكرر', 'PRJ-001', '900', 'YER',
       '2026-05-01', '2026-10-30', '', '',
-      'تعز', 'المعافر', 'المياه',
+      'تعز', 'المعافر', 'المياه', '',
+    ];
+    sheet.getRow(7).values = [
+      'تكلفة بلا عملة', 'PRJ-005', '500', '',
+      '2026-06-01', '2026-10-30', '', '',
+      'تعز', 'المعافر', 'المياه', '',
+    ];
+    sheet.getRow(8).values = [
+      'تمويل بلا عملة', 'PRJ-006', '', '',
+      '2026-06-01', '2026-10-30', 'شريك محلي', '500',
+      'تعز', 'المعافر', 'المياه', '',
     ];
     await workbook.xlsx.writeFile(filePath);
 
@@ -204,25 +214,25 @@ test('project regions require explicit row approval and preserve project/funding
     const [region] = catalog.regions.filter(item => item.candidateType === 'project-candidate');
     assert.ok(region, 'a project-like table with directorate columns must be classified as a project region');
     assert.equal(region.sheetName, 'المشاريع');
-    assert.equal(region.totalRows, 5);
+    assert.equal(region.totalRows, 7);
 
     const preview = canonical.readWorkbookImportRegion(db, staged.batchId, region.id, 0, 30);
-    assert.equal(preview.rows.length, 5);
+    assert.equal(preview.rows.length, 7);
     assert.equal(preview.rows.find(row => row.rowNumber === 4).hidden, true);
     assert.equal(preview.rows.find(row => row.rowNumber === 5).hasFormula, true);
 
     const columnMap = {
       project_name: 1, project_code: 2, estimated_cost: 3, currency_code: 4,
       start_date: 5, end_date: 6, funding_partner: 7, funding_amount: 8,
-      governorate: 9, district: 10, sector: 11,
+      governorate: 9, district: 10, sector: 11, funding_currency: 12,
     };
-    const approvedRows = [2, 3, 4, 5, 6];
+    const approvedRows = [2, 3, 4, 5, 6, 7, 8];
     const result = canonical.promoteProjectRegion(db, {
       batchId: staged.batchId, regionId: region.id, columnMap, approvedRows,
     });
 
     assert.equal(result.applied.length, 1);
-    assert.equal(result.refused.length, 4);
+    assert.equal(result.refused.length, 6);
     assert.equal(result.applied[0].rowNumber, 2);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM projects').get().n, 1);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM project_funding').get().n, 1);
@@ -233,6 +243,7 @@ test('project regions require explicit row approval and preserve project/funding
     const funding = db.prepare('SELECT * FROM project_funding').get();
     assert.equal(funding.partner_name, 'UNDP');
     assert.equal(funding.amount, 250);
+    assert.equal(funding.currency_code, 'USD');
 
     const promotion = db.prepare('SELECT * FROM workbook_import_promotions').get();
     assert.equal(promotion.entity_type, 'project');
