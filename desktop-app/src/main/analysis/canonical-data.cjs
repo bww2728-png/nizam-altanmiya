@@ -631,6 +631,97 @@ function promoteProjectRegion(database, request = {}) {
   })();
 }
 
+
+function listCanonicalProjects(database, request = {}) {
+  const limit = Math.max(1, Math.min(100, Number(request.limit) || 30));
+  const offset = Math.max(0, Math.min(1000000, Number(request.offset) || 0));
+  const search = String(request.search ?? '').trim().slice(0, 120);
+  const status = String(request.status ?? '').trim().slice(0, 80);
+  const conditions = [];
+  const params = [];
+  if (search) {
+    conditions.push("(instr(lower(coalesce(p.name,'')),lower(?)) > 0 OR instr(lower(coalesce(p.code,'')),lower(?)) > 0 OR instr(lower(coalesce(p.description,'')),lower(?)) > 0)");
+    params.push(search, search, search);
+  }
+  if (status) {
+    conditions.push("p.status = ?");
+    params.push(status);
+  }
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+  const total = database.prepare('SELECT COUNT(*) AS count FROM projects p ' + where).get(...params).count;
+  const rows = database.prepare(\`
+    SELECT p.id,p.code,p.name,p.description,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
+      p.start_date,p.end_date,p.created_at,p.updated_at,
+      geo.name AS geographic_unit_name, geo.unit_type AS geographic_unit_type,
+      sector.name_ar AS sector_name,
+      source.file_name AS source_file,
+      (SELECT COUNT(*) FROM project_funding f WHERE f.project_id = p.id) AS funding_count,
+      (SELECT COUNT(*) FROM workbook_import_promotions promotion
+        JOIN workbook_import_rows source_row ON source_row.id = promotion.row_id
+        JOIN data_quality_issues issue ON issue.row_id = source_row.id
+        WHERE promotion.entity_type = 'project' AND promotion.target_id = p.id AND issue.status = 'open') AS open_quality_issues,
+      (SELECT promotion.source_location FROM workbook_import_promotions promotion
+        WHERE promotion.entity_type = 'project' AND promotion.target_id = p.id LIMIT 1) AS source_location
+    FROM projects p
+    LEFT JOIN geographic_units geo ON geo.id = p.geographic_unit_id
+    LEFT JOIN sectors sector ON sector.id = p.sector_id
+    LEFT JOIN data_sources source ON source.id = p.source_id
+    \${where}
+    ORDER BY p.updated_at DESC,p.id DESC
+    LIMIT ? OFFSET ?
+  \`).all(...params, limit, offset);
+  return {
+    rows: rows.map(row => ({
+      ...row,
+      estimatedCost: row.estimated_cost,
+      actualCost: row.actual_cost,
+      currencyCode: row.currency_code,
+      geographicUnitName: row.geographic_unit_name,
+      geographicUnitType: row.geographic_unit_type,
+      sectorName: row.sector_name,
+      sourceFile: row.source_file,
+      fundingCount: row.funding_count,
+      openQualityIssues: row.open_quality_issues,
+      sourceLocation: row.source_location,
+    })),
+    total, limit, offset, hasPrevious: offset > 0, hasNext: offset + rows.length < total,
+  };
+}
+
+function getCanonicalProject(database, projectId) {
+  const id = Number(projectId);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('معرّف المشروع غير صالح.');
+  const project = database.prepare(\`
+    SELECT p.id,p.code,p.name,p.description,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
+      p.start_date,p.end_date,p.created_at,p.updated_at,
+      geo.name AS geographic_unit_name,geo.unit_type AS geographic_unit_type,
+      sector.name_ar AS sector_name,source.file_name AS source_file
+    FROM projects p
+    LEFT JOIN geographic_units geo ON geo.id = p.geographic_unit_id
+    LEFT JOIN sectors sector ON sector.id = p.sector_id
+    LEFT JOIN data_sources source ON source.id = p.source_id
+    WHERE p.id = ?
+  \`).get(id);
+  if (!project) throw new Error('المشروع المطلوب غير موجود.');
+  const funding = database.prepare('SELECT id,partner_name,amount,currency_code,funding_date,created_at FROM project_funding WHERE project_id = ? ORDER BY id').all(id);
+  const provenance = database.prepare(\`
+    SELECT promotion.source_location,promotion.mapping_json,promotion.mapped_values_json,
+      batch.file_name,batch.sha256,batch.created_at AS received_at
+    FROM workbook_import_promotions promotion
+    JOIN workbook_import_batches batch ON batch.id = promotion.batch_id
+    WHERE promotion.entity_type = 'project' AND promotion.target_id = ?
+    ORDER BY promotion.id DESC LIMIT 1
+  \`).get(id);
+  const issues = database.prepare(\`
+    SELECT issue.id,issue.severity,issue.issue_code,issue.message,issue.status,issue.created_at
+    FROM data_quality_issues issue
+    JOIN workbook_import_promotions promotion ON promotion.row_id = issue.row_id
+    WHERE promotion.entity_type = 'project' AND promotion.target_id = ?
+    ORDER BY issue.id DESC
+  \`).all(id);
+  return { project, funding, provenance: provenance ?? null, issues };
+}
+
 function completeWorkbookImport(database, batchId, result = {}) {
   const id = Number(batchId);
   if (!Number.isInteger(id) || id <= 0) throw new Error('معرّف دفعة الاستيراد غير صالح.');
@@ -667,4 +758,4 @@ function listWorkbookImports(database, limit = 30) {
   return database.prepare("SELECT b.id,b.file_name,b.file_size,b.sha256,b.sheet_count,b.row_count,b.cell_count,b.media_count,b.media_stored_count,b.truncated,b.status,b.created_at,b.updated_at,(SELECT COUNT(*) FROM workbook_import_regions r WHERE r.batch_id=b.id) AS region_count,(SELECT COUNT(*) FROM workbook_import_rows w WHERE w.batch_id=b.id) AS stored_row_count FROM workbook_import_batches b ORDER BY b.id DESC LIMIT ?").all(bounded);
 }
 
-module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, migrateCanonicalData, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, completeWorkbookImport, listWorkbookImports };
+module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, migrateCanonicalData, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, listCanonicalProjects, getCanonicalProject, completeWorkbookImport, listWorkbookImports };
