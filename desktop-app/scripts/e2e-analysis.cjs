@@ -365,11 +365,11 @@ app.whenReady().then(async () => {
     await screenshot(window, '4-ترتيب-الأولويات.png');
 
     await clickByText(window, '.side-nav .nav-item', 'قاعدة البيانات الشاملة');
-    await waitFor(window, `document.querySelectorAll('table.data tbody tr').length === 20 && document.body.innerText.replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 1632)).includes('20 مديرية مخزّنة')`, 30000);
+    await waitFor(window, `document.querySelectorAll('table.data tbody tr').length === 20 && document.body.innerText.replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 1632)).includes('من 20 مديرية')`, 30000);
     const databaseText = await bodyText(window);
     const databaseRows = await window.webContents.executeJavaScript(`document.querySelectorAll('table.data tbody tr').length`);
     const normalizedDatabaseText = databaseText.replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 1632));
-    check('pages', 'قاعدة البيانات تعرض العشرين سجلًا', normalizedDatabaseText.includes('20 مديرية مخزّنة') && databaseRows === 20, `rows=${databaseRows}`);
+    check('pages', 'قاعدة البيانات تعرض العشرين سجلًا', normalizedDatabaseText.includes('من 20 مديرية') && databaseRows === 20, `rows=${databaseRows}`);
     await screenshot(window, '5-قاعدة-البيانات.png');
 
     const cardOpened = await clickByText(window, 'table.data tbody tr button', 'البطاقة');
