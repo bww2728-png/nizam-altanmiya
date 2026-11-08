@@ -1,18 +1,20 @@
 name: Release
 
-# Builds the Windows installer and publishes it as a single, published GitHub
-# Release whenever a version tag (v*) is pushed. The release carries the
-# installer, its blockmap and latest.yml, which the installed app's auto-updater
-# reads through the public GitHub Releases API.
+# Publish the Windows installer whenever the application version is bumped on
+# main. The release is created from the exact merge commit, and the package
+# version is the source of truth for the tag (for example, 0.5.3 -> v0.5.3).
 #
-# electron-builder is run with --publish never on purpose: it builds and writes
-# latest.yml locally, and the release is created here with the GitHub CLI so all
-# assets always land in one release (electron-builder's own publisher can split
-# them across releases).
+# The installed app is offline-only: latest.yml is included as build metadata
+# alongside the installer, but updates are distributed through local installers
+# rather than an in-app network updater.
+
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+    paths:
+      - 'desktop-app/package.json'
+      - 'desktop-app/package-lock.json'
   workflow_dispatch:
 
 permissions:
@@ -20,7 +22,9 @@ permissions:
 
 jobs:
   release:
+    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
+    timeout-minutes: 45
 
     defaults:
       run:
@@ -57,18 +61,31 @@ jobs:
       - name: Build renderer
         run: npm run build
 
-      - name: Package installer
+      - name: Package Windows x64 NSIS installer
         run: npx electron-builder --win nsis --x64 --publish never
 
-      - name: Publish release
+      - name: Publish versioned GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF_NAME}"
+          version="$(node -p 'require("./package.json").version')"
+          tag="v${version}"
+          shopt -s nullglob
           assets=(release/*.exe release/*.blockmap release/latest.yml)
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "${assets[@]}" --clobber
+
+          if [[ ${#assets[@]} -lt 3 ]]; then
+            echo "Expected installer, blockmap and latest.yml; found ${#assets[@]} release assets." >&2
+            printf 'Found: %s\n' "${assets[@]}" >&2
+            exit 1
+          fi
+
+          echo "Publishing ${tag} from commit ${GITHUB_SHA}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${assets[@]}" --clobber
           else
-            gh release create "$tag" "${assets[@]}" --title "$tag" --notes "Automated release $tag"
+            gh release create "${tag}" "${assets[@]}" \
+              --title "${tag}" \
+              --notes "Automated Windows x64 desktop release ${tag}. Built from ${GITHUB_SHA}." \
+              --target "${GITHUB_SHA}"
           fi
