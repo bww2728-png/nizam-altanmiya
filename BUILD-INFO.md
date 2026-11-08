@@ -106,3 +106,41 @@
 
 التحقق: `node --test tests/*.test.cjs` → 77/77 ناجحة؛ `npx vite build` ناجح؛ `npx electron scripts/e2e-analysis.cjs` → 37/37.
 
+## تحديث 2026-11-08 — الدمج على main وتصليب الجولة الرابعة
+
+دُمج الفرع `feature/excel-import-v1` في `main` بدمج غير سريع، ثم حُذف الأصل اليتيم وحُلّت عيوب مراجعة ما بعد الدمج.
+
+| الالتزام | المحتوى |
+| --- | --- |
+| `fdd67e7` | الإدخال الآلي من Excel فقط + الواجهة الداكنة + التقارير الرسمية. |
+| `1a96339` | إغلاق تسريبات وضع `shared` (إعادة الاشتقاق عبر `analyzeShared`، فلترة `import_warnings`، تصفير المشتقات) + توحيد «الحرمان الحاد يتصدّر» + تقسيم تام في `buildRanking`. |
+| `33e91ec` | حذف `desktop-app/ara.traineddata` اليتيم (2.4MB، بلا مستهلك بعد إزالة OCR). |
+| `0a136c9` | دمج الفرع في `main` بلا تعارضات. |
+| `8a4c977` | تصليب الجولة الرابعة (أدناه). |
+
+التصليب في `8a4c977`:
+
+- `engine.cjs`: `fragileCount`/`sampleSensitivityTruncated` تُعيد `null` عند تخطّي الحساسية (كانت `0` مضلّلة)؛ `summary` يضم `governorates` مطابقًا لقاعدة لوحة المعلومات.
+- مسند واحد مشترك `isRankableCalibrated` تستخدمه ورقة Excel وPDF والتصدير فلا تتباعد.
+- `sheets.cjs`: `meta` يحاذي الدلاء المرئية فلا تختلف «مؤهلة» عن «مرشحون في آخر تشغيل»؛ بطاقة «الحرمان الحاد» في PDF من نفس المجموعة المرتّبة.
+- `persist.cjs`: الحفظ اليدوي يمسح تحذير الاستيراد فقط للمفاتيح التي تغيّرت قيمتها فعلًا (كان يمحو كل التحذيرات بعد أي تعديل خلية).
+- `gaps.cjs`: أكواد السجلات المتقاطعة (مثل `duplicate-district`) تُدخل `byCode`.
+- `security.cjs`/`main.cjs`: `maskEngineRow` يُصفّر المشتقات ويُرشّح التحذيرات؛ حمولات الأوراق تُجرَّد عبر `maskInputRows`.
+- `import-plan.cjs`: إزالة الأكواد الميتة `invalid-text`/`invalid-ratio`.
+
+التحقق: `node --test tests/*.test.cjs` → **120 (119 نجاح، 1 متخطّى)**؛ `npx vite build` ناجح؛ `npx electron scripts/e2e-analysis.cjs` → **37/37**.
+
+## تثبيت 0.5.0 على الجهاز (2026-11-08)
+
+| البند | القيمة |
+| --- | --- |
+| المثبّت | `desktop-app/release/Local-Development-Intelligence-0.5.0-x64.exe` (139.5 MB) |
+| النسخة قبل | 0.3.0 |
+| النسخة بعد | 0.5.0 (`ProductVersion=0.5.0.0`، FileVersion `0.5.0`) |
+| مسار التثبيت | `%LOCALAPPDATA%\Programs\local-development-intelligence` |
+| `app.asar` المثبّت | 63 MB بتاريخ البناء |
+
+- تعذّر تنزيل Electron عبر الشبكة (`read ECONNRESET`) رغم وجود الـzip في الكاش، فبُني المثبّت باستخدام `build.electronDist` مؤقتًا يشير إلى الـzip المحلي في كاش electron-builder، ثم أُعيد `package.json` إلى حالته الملتزمة.
+- التثبيت تم بصمت (`/S`) فوق 0.3.0، وبيانات المستخدم في `%APPDATA%\local-development-intelligence\development-data.db` لم تُمَس.
+- اختبار إقلاع: التطبيق المثبّت انطلق بنجاح (4 عمليات Electron) ثم أُغلق.
+
