@@ -221,6 +221,12 @@ test('project regions require explicit row approval and preserve project/funding
     assert.equal(preview.rows.find(row => row.rowNumber === 4).hidden, true);
     assert.equal(preview.rows.find(row => row.rowNumber === 5).hasFormula, true);
 
+    // Preserve directorate intake results when a project region from the same
+    // workbook is reviewed and promoted later.
+    canonical.completeWorkbookImport(db, staged.batchId, {
+      applied: 20, created: 20, updated: 0, refused: [], skipped: [],
+    });
+
     const columnMap = {
       project_name: 1, project_code: 2, estimated_cost: 3, currency_code: 4,
       start_date: 5, end_date: 6, funding_partner: 7, funding_amount: 8,
@@ -251,6 +257,18 @@ test('project regions require explicit row approval and preserve project/funding
     assert.deepEqual(JSON.parse(promotion.mapping_json), columnMap);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM data_quality_issues WHERE issue_code LIKE 'unmatched-project-%'").get().n, 2);
     assert.equal(canonical.readWorkbookImportRegion(db, staged.batchId, region.id).rows.find(row => row.rowNumber === 2).promoted, true);
+    let batchResult = JSON.parse(db.prepare('SELECT result_json FROM workbook_import_batches WHERE id = ?').get(staged.batchId).result_json);
+    assert.equal(batchResult.directorateImport.applied, 20);
+    assert.equal(batchResult.projectPromotions.length, 1);
+    assert.equal(db.prepare('SELECT status FROM workbook_import_batches WHERE id = ?').get(staged.batchId).status, 'directorates-and-projects-partially-applied');
+
+    // A later directorate completion must not erase the project import record.
+    canonical.completeWorkbookImport(db, staged.batchId, {
+      applied: 20, created: 20, updated: 0, refused: [], skipped: [],
+    });
+    batchResult = JSON.parse(db.prepare('SELECT result_json FROM workbook_import_batches WHERE id = ?').get(staged.batchId).result_json);
+    assert.equal(batchResult.projectPromotions.length, 1);
+    assert.equal(batchResult.projectPromotions[0].applied.length, 1);
 
     const repeated = canonical.promoteProjectRegion(db, {
       batchId: staged.batchId, regionId: region.id, columnMap, approvedRows: [2],
@@ -258,6 +276,9 @@ test('project regions require explicit row approval and preserve project/funding
     assert.equal(repeated.applied.length, 0);
     assert.match(repeated.refused[0].reason, /سبق اعتماده/);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM projects').get().n, 1);
+    batchResult = JSON.parse(db.prepare('SELECT result_json FROM workbook_import_batches WHERE id = ?').get(staged.batchId).result_json);
+    assert.equal(batchResult.directorateImport.applied, 20);
+    assert.equal(batchResult.projectPromotions.length, 2);
   } finally {
     db.close();
     fs.rmSync(directory, { recursive: true, force: true });
