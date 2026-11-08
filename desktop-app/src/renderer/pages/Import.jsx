@@ -188,7 +188,12 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
         </div>
       )}
 
-      {plan?.staging && <DurableStaging staging={plan.staging} status={plan.stagingStatus ?? plan.staging.status} stagingOnly={plan.stagingOnly} message={plan.stagingMessage} />}
+      {plan?.staging && (
+        <>
+          <DurableStaging staging={plan.staging} status={plan.stagingStatus ?? plan.staging.status} stagingOnly={plan.stagingOnly} message={plan.stagingMessage} />
+          <ProjectRegionReview staging={plan.staging} />
+        </>
+      )}
       <ImportHistory rows={importHistory} />
 
       {step === 'idle' && <Starter busy={busy} onChoose={chooseFile} />}
@@ -644,6 +649,318 @@ function DurableStaging({ staging, status, stagingOnly, message }) {
         <span className="chip">الصورة ومعلومات المرساة عند توفرها</span>
         <span className="chip warn">لا يوجد ربط آلي بين صفوف المشاريع أو الصور والمديريات</span>
       </Notice>
+    </Card>
+  );
+}
+
+
+const PROJECT_REVIEW_FIELDS = [
+  { key: 'project_name', label: 'اسم المشروع', required: true },
+  { key: 'project_code', label: 'رمز المشروع' },
+  { key: 'description', label: 'وصف المشروع' },
+  { key: 'status', label: 'حالة المشروع' },
+  { key: 'estimated_cost', label: 'التكلفة التقديرية' },
+  { key: 'actual_cost', label: 'التكلفة الفعلية' },
+  { key: 'currency_code', label: 'رمز العملة' },
+  { key: 'start_date', label: 'تاريخ البداية' },
+  { key: 'end_date', label: 'تاريخ النهاية' },
+  { key: 'governorate', label: 'المحافظة' },
+  { key: 'district', label: 'المديرية' },
+  { key: 'sector', label: 'القطاع' },
+  { key: 'funding_partner', label: 'جهة التمويل' },
+  { key: 'funding_amount', label: 'مبلغ التمويل' },
+  { key: 'funding_currency', label: 'عملة التمويل' },
+];
+
+function normalizeProjectHeader(value) {
+  return String(value ?? '').normalize('NFKD')
+    .replace(/[\u064B-\u065F\u0670\u06D6-\u06ED]/g, '')
+    .replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
+    .replace(/[()[\]{}%٪:：،,.;/\\|_–—-]+/g, ' ')
+    .replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function suggestedProjectField(label) {
+  const value = normalizeProjectHeader(label);
+  const rules = [
+    ['project_name', ['اسم المشروع', 'المشروع']],
+    ['project_code', ['رمز المشروع', 'كود المشروع', 'رقم المشروع']],
+    ['description', ['وصف المشروع', 'وصف']],
+    ['status', ['حالة المشروع', 'وضع المشروع']],
+    ['estimated_cost', ['التكلفة التقديرية', 'تكلفة تقديرية', 'تكلفة المشروع']],
+    ['actual_cost', ['التكلفة الفعلية', 'المبلغ المصروف']],
+    ['currency_code', ['رمز العملة', 'العملة']],
+    ['start_date', ['تاريخ البداية', 'تاريخ البدء']],
+    ['end_date', ['تاريخ النهاية', 'تاريخ الانتهاء']],
+    ['governorate', ['المحافظة', 'اسم المحافظة']],
+    ['district', ['المديرية', 'اسم المديرية']],
+    ['sector', ['القطاع', 'اسم القطاع']],
+    ['funding_partner', ['جهة التمويل', 'الجهة الممولة', 'المانح']],
+    ['funding_amount', ['مبلغ التمويل', 'قيمة التمويل']],
+    ['funding_currency', ['عملة التمويل']],
+  ];
+  return rules.find(([, aliases]) => aliases.some(alias => value === normalizeProjectHeader(alias)))?.[0] ?? null;
+}
+
+function stagedCellValue(row, column) {
+  if (!column) return '';
+  const cell = row.cells?.find(item => item.column === Number(column));
+  return String(cell?.text ?? '').trim();
+}
+
+function ProjectRegionReview({ staging }) {
+  const [regionData, setRegionData] = useState(null);
+  const [regionError, setRegionError] = useState('');
+  const [selectedRegionId, setSelectedRegionId] = useState('');
+  const [columnMap, setColumnMap] = useState({});
+  const [regionPreview, setRegionPreview] = useState(null);
+  const [offset, setOffset] = useState(0);
+  const [selectedRows, setSelectedRows] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [promotion, setPromotion] = useState(null);
+
+  const loadRegions = useCallback(async () => {
+    try {
+      setRegionError('');
+      const result = await window.localApp.importRegions({ batchId: staging.batchId });
+      setRegionData(result);
+      if (result?.restricted) return;
+      const projectRegions = (result.regions ?? []).filter(region => region.candidateType === 'project-candidate');
+      setSelectedRegionId(current => current && projectRegions.some(region => String(region.id) === String(current))
+        ? current : String(projectRegions[0]?.id ?? ''));
+    } catch (error) {
+      setRegionError(errText(error) || 'تعذر تحميل مناطق البيانات المرشحة.');
+    }
+  }, [staging.batchId]);
+
+  useEffect(() => { loadRegions(); }, [loadRegions]);
+
+  const selectedRegion = useMemo(
+    () => regionData?.regions?.find(region => String(region.id) === String(selectedRegionId)) ?? null,
+    [regionData, selectedRegionId]
+  );
+
+  const loadRegionPage = useCallback(async (nextOffset = 0) => {
+    if (!selectedRegionId) return;
+    setBusy(true);
+    setRegionError('');
+    try {
+      const result = await window.localApp.importRegionPreview({
+        batchId: staging.batchId,
+        regionId: Number(selectedRegionId),
+        offset: nextOffset,
+        limit: 30,
+      });
+      setRegionPreview(result);
+      setOffset(nextOffset);
+    } catch (error) {
+      setRegionError(errText(error) || 'تعذر تحميل صفوف المنطقة المحددة.');
+      setRegionPreview(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [staging.batchId, selectedRegionId]);
+
+  useEffect(() => {
+    if (selectedRegionId) loadRegionPage(0);
+    else setRegionPreview(null);
+  }, [selectedRegionId, loadRegionPage]);
+
+  const chooseRegion = (value) => {
+    setSelectedRegionId(value);
+    setOffset(0);
+    setSelectedRows({});
+    setPromotion(null);
+    const candidate = regionData?.regions?.find(region => String(region.id) === String(value));
+    const guesses = {};
+    for (const header of candidate?.headers ?? []) {
+      const key = suggestedProjectField(header.label);
+      if (key && guesses[key] === undefined) guesses[key] = header.column;
+    }
+    setColumnMap(guesses);
+  };
+
+  const selectedCount = Object.values(selectedRows).filter(Boolean).length;
+  const eligibleRows = regionPreview?.rows?.filter(row => !row.hidden && !row.hasFormula && !row.promoted) ?? [];
+  const allEligibleSelected = eligibleRows.length > 0 && eligibleRows.every(row => selectedRows[row.rowNumber]);
+
+  const togglePageSelection = () => {
+    setSelectedRows(current => {
+      const next = { ...current };
+      for (const row of eligibleRows) next[row.rowNumber] = !allEligibleSelected;
+      return next;
+    });
+  };
+
+  const promote = async () => {
+    const approvedRows = Object.entries(selectedRows).filter(([, checked]) => checked).map(([row]) => Number(row));
+    if (!columnMap.project_name || approvedRows.length === 0) return;
+    setBusy(true);
+    setRegionError('');
+    try {
+      const result = await window.localApp.promoteProjects({
+        batchId: staging.batchId,
+        regionId: Number(selectedRegionId),
+        columnMap,
+        approvedRows,
+      });
+      setPromotion(result);
+      setSelectedRows({});
+      await loadRegions();
+      await loadRegionPage(offset);
+    } catch (error) {
+      setRegionError(errText(error) || 'تعذر اعتماد المشاريع المحددة.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const projectRegions = regionData?.regions?.filter(region => region.candidateType === 'project-candidate') ?? [];
+
+  return (
+    <Card title="مراجعة الجداول الإضافية واعتماد المشاريع" subtitle="الربط المقترح لا يكتب شيئًا تلقائيًا؛ يجب مراجعة الأعمدة واختيار الصفوف ثم اعتمادها صراحةً.">
+      {regionError && <ErrorBanner message={regionError} />}
+      {regionData?.restricted && <Notice tone="warn" title="المراجعة غير متاحة في وضع المشاركة">{regionData.message}</Notice>}
+      {!regionData?.restricted && projectRegions.length === 0 && (
+        <Notice tone="info" title="لم يُكتشف جدول مشاريع مرشح">
+          حُفظت مناطق الأوراق الأخرى للمراجعة، لكن لا توجد منطقة تحمل إشارات كافية لتصنيفها جدول مشاريع. لا يحاول النظام تخمين نوعها.
+        </Notice>
+      )}
+      {projectRegions.length > 0 && (
+        <>
+          <div className="row between" style={{ gap: 12, flexWrap: 'wrap' }}>
+            <div className="stack tight">
+              <strong>مناطق المشاريع المرشحة: {projectRegions.length}</strong>
+              <span className="muted" style={{ fontSize: '0.82rem' }}>الدفعة: {staging.batchId} · اختر منطقة واحدة للمراجعة المستقلة.</span>
+            </div>
+            <select className="input" value={selectedRegionId} onChange={event => chooseRegion(event.target.value)} disabled={busy}>
+              {projectRegions.map(region => (
+                <option key={region.id} value={region.id}>
+                  {region.sheetName} · صف الرؤوس {region.headerRow} · {region.totalRows} صف
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {selectedRegion && (
+            <>
+              <div className="stat-strip" style={{ marginTop: 12 }}>
+                <MiniStat label="صفوف المنطقة" value={fmtNumber(selectedRegion.totalRows, 0)} />
+                <MiniStat label="معتمدة سابقًا" value={fmtNumber(selectedRegion.promotedRows, 0)} />
+                <MiniStat label="درجة الاكتشاف" value={Math.round(selectedRegion.confidence * 100) + '%'} />
+                <MiniStat label="صفحة المراجعة" value={regionPreview ? (Math.floor(offset / 30) + 1) + ' / ' + Math.max(1, Math.ceil((regionPreview.totalRows ?? 0) / 30)) : '—'} />
+              </div>
+
+              <div className="quote" style={{ marginTop: 14 }}>
+                <strong>ربط أعمدة الملف بحقول المشروع</strong>
+                <p className="muted" style={{ fontSize: '0.8rem', marginTop: 6 }}>
+                  يعرض النظام اقتراحات أولية بحسب عناوين الأعمدة. راجع كل اختيار قبل الاعتماد؛ الحقول غير المربوطة تبقى غير مستوردة.
+                </p>
+                <div className="grid-2" style={{ marginTop: 10 }}>
+                  {PROJECT_REVIEW_FIELDS.map(field => (
+                    <label className="stack tight" key={field.key}>
+                      <span>{field.label}{field.required ? ' *' : ''}</span>
+                      <select
+                        className="input"
+                        value={columnMap[field.key] ?? ''}
+                        onChange={event => setColumnMap(current => {
+                          const next = { ...current };
+                          if (!event.target.value) delete next[field.key];
+                          else next[field.key] = Number(event.target.value);
+                          return next;
+                        })}
+                        disabled={busy}
+                      >
+                        <option value="">غير مربوط</option>
+                        {(selectedRegion.headers ?? []).map(header => (
+                          <option key={header.column} value={header.column}>{header.label} · عمود {header.column}</option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {regionPreview?.restricted && <Notice tone="warn" title="المعاينة محجوبة">{regionPreview.message}</Notice>}
+              {regionPreview?.rows && (
+                <div className="stack" style={{ marginTop: 14 }}>
+                  <div className="row between" style={{ flexWrap: 'wrap' }}>
+                    <strong>مراجعة الصفوف المحفوظة</strong>
+                    <div className="btn-row">
+                      <button className="btn small ghost" onClick={togglePageSelection} disabled={busy || eligibleRows.length === 0}>
+                        {allEligibleSelected ? 'إلغاء اختيار الصفحة' : 'اختيار الصفوف المؤهلة في الصفحة'}
+                      </button>
+                    </div>
+                  </div>
+                  {regionPreview.rows.map(row => (
+                    <div className="quote" key={row.id}>
+                      <div className="row between" style={{ flexWrap: 'wrap' }}>
+                        <label className="row gap-sm">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(selectedRows[row.rowNumber])}
+                            onChange={event => setSelectedRows(current => ({ ...current, [row.rowNumber]: event.target.checked }))}
+                            disabled={busy || row.hidden || row.hasFormula || row.promoted}
+                          />
+                          <strong>صف {row.rowNumber}</strong>
+                        </label>
+                        <div className="chip-row">
+                          {row.hidden && <Badge tone="warn">مخفي</Badge>}
+                          {row.hasFormula && <Badge tone="warn">يتضمن صيغة</Badge>}
+                          {row.promoted && <Badge tone="ok">معتمد</Badge>}
+                        </div>
+                      </div>
+                      <div className="chip-row" style={{ marginTop: 8 }}>
+                        <span className="chip"><strong>المشروع:</strong> {stagedCellValue(row, columnMap.project_name) || '—'}</span>
+                        {columnMap.project_code && <span className="chip"><strong>الرمز:</strong> {stagedCellValue(row, columnMap.project_code) || '—'}</span>}
+                        {columnMap.estimated_cost && <span className="chip"><strong>التكلفة:</strong> {stagedCellValue(row, columnMap.estimated_cost) || '—'}</span>}
+                        {columnMap.status && <span className="chip"><strong>الحالة:</strong> {stagedCellValue(row, columnMap.status) || '—'}</span>}
+                      </div>
+                      <details style={{ marginTop: 8 }}>
+                        <summary>عرض جميع الخلايا ({row.cellCount})</summary>
+                        <div className="chip-row" style={{ marginTop: 8 }}>
+                          {row.cells.map(cell => (
+                            <span className="chip" key={cell.address} title={cell.formula ? 'الصيغة: ' + cell.formula : undefined}>
+                              <strong>{cell.address}</strong>: {cell.formula ? '=' + cell.formula : (cell.text || 'فارغ')}
+                            </span>
+                          ))}
+                        </div>
+                      </details>
+                    </div>
+                  ))}
+                  <div className="row between">
+                    <button className="btn small ghost" onClick={() => loadRegionPage(Math.max(0, offset - 30))} disabled={busy || !regionPreview.hasPrevious}>
+                      الصفحة السابقة
+                    </button>
+                    <span className="muted">عرض {regionPreview.rows.length} من {regionPreview.totalRows}</span>
+                    <button className="btn small ghost" onClick={() => loadRegionPage(offset + 30)} disabled={busy || !regionPreview.hasNext}>
+                      الصفحة التالية
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {promotion && (
+                <Notice tone={promotion.refused?.length ? 'warn' : 'info'} title="نتيجة اعتماد المشاريع">
+                  <span className="chip">أُضيفت: {promotion.applied?.length ?? 0}</span>
+                  <span className="chip">رُفضت: {promotion.refused?.length ?? 0}</span>
+                  <span className="chip">الحالة: {promotion.status}</span>
+                  {promotion.refused?.map(item => (
+                    <span className="chip warn" key={item.rowNumber}>صف {item.rowNumber}: {item.reason}</span>
+                  ))}
+                </Notice>
+              )}
+
+              <div className="row between" style={{ marginTop: 14, flexWrap: 'wrap' }}>
+                <span className="muted">الصفوف المحددة صراحةً: {selectedCount}</span>
+                <button className="btn primary" onClick={promote} disabled={busy || !columnMap.project_name || selectedCount === 0}>
+                  {busy ? 'جارٍ الاعتماد...' : 'اعتماد المشاريع المحددة في قاعدة البيانات'}
+                </button>
+              </div>
+            </>
+          )}
+        </>
+      )}
     </Card>
   );
 }
