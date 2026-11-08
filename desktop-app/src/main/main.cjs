@@ -522,6 +522,44 @@ function registerHandlers() {
     return preview;
   });
 
+  ipcMain.handle('import:regions', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') {
+      return { restricted: true, message: 'مراجعة وربط الجداول غير المصنفة متاحان في وضع المالك فقط.' };
+    }
+    const db = requireDatabase();
+    const result = canonicalData.listWorkbookImportRegions(db, request.batchId);
+    auditRead('import:regions', { entity: 'workbook_import_regions', rowCount: result.regions.length, detail: 'batch=' + result.batch.id });
+    return result;
+  });
+
+  ipcMain.handle('import:region-preview', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') {
+      return { restricted: true, message: 'عرض الصفوف الخام متاح في وضع المالك فقط.' };
+    }
+    const db = requireDatabase();
+    const result = canonicalData.readWorkbookImportRegion(
+      db, request.batchId, request.regionId, request.offset ?? 0, request.limit ?? 30
+    );
+    auditRead('import:region-preview', {
+      entity: 'workbook_import_region', entityId: result.regionId,
+      rowCount: result.rows.length, detail: 'batch=' + result.batchId + ';offset=' + result.offset,
+    });
+    return result;
+  });
+
+  ipcMain.handle('import:promote-projects', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('اعتماد المشاريع يتطلب وضع المالك.');
+    const db = requireDatabase();
+    const result = canonicalData.promoteProjectRegion(db, request);
+    invalidateSheets();
+    auditRead('import:promote-projects', {
+      entity: 'projects', rowCount: result.applied.length,
+      result: result.refused.length ? 'partial' : 'ok',
+      detail: 'batch=' + request.batchId + ';region=' + request.regionId + ';refused=' + result.refused.length,
+    });
+    return result;
+  });
+
   ipcMain.handle('import:apply', (event, request = {}) => {
     const db = requireDatabase();
     if (!pendingPlan) throw new Error('لا توجد خطة استيراد جاهزة. اختر ملف القالب أولًا.');
