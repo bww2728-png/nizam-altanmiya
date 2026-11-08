@@ -120,8 +120,8 @@ async function pointerClick(window, selector, text = null, label = '') {
   const beforeImage = await window.webContents.capturePage();
   fs.writeFileSync(path.join(EVIDENCE, beforeFile), beforeImage.toPNG());
 
-  // Send actual mouse movement/down/up through Electron. A synthetic DOM
-  // HTMLElement.click() would bypass hit testing and cannot prove clickability.
+  // Send actual mouse movement/down/up through Electron. Synthetic DOM event
+  // dispatch bypasses hit testing and cannot prove physical clickability.
   window.webContents.sendInputEvent({ type: 'mouseMove', x: target.x, y: target.y });
   window.webContents.sendInputEvent({ type: 'mouseDown', x: target.x, y: target.y, button: 'left', clickCount: 1 });
   window.webContents.sendInputEvent({ type: 'mouseUp', x: target.x, y: target.y, button: 'left', clickCount: 1 });
@@ -458,6 +458,7 @@ app.whenReady().then(async () => {
       writeGroup('5-فحص-الشاشات.json', 'pages');
       writeGroup('6-فحص-وضع-الوصول.json', 'security');
       writeGroup('7-فحص-التصدير.json', 'export');
+      writeGroup('13-فحص-الوصولية.json', 'accessibility');
       check(
         'security',
         'لا توجد محاولات اتصال HTTP/HTTPS/WebSocket من جلسة Chromium',
