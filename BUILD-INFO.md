@@ -161,10 +161,10 @@
 | المحرّك | `electron-updater@6.8.11` (تبعيته في `dependencies`). |
 | المصدر | `build.publish` → مزوّد `github` للمالك `bww2728-png` والمستودع `nizam-altanmiya`، مع `releaseType: "release"` (المحدّث يتجاهل المسودات). |
 | في التطبيق | `desktop-app/src/main/main.cjs`: يفحص `autoUpdater` عند الإقلاع بعد 8 ثوانٍ ثم كل 6 ساعات، ويحمل التحديث تلقائيًا ويثبّته عند الخروج، مع اقتصار التشغيل على إصدار Windows المثبّت. |
-| حماية الاتصال | `desktop-app/src/main/offline-policy.cjs`: تُحظر اتصالات التطبيق العامة؛ يُسمح فقط بطلبات HTTPS لبيانات وأصول إصدارات GitHub الرسمية للمستودع. |
+| الشبكة | لا حرّاس اتصال ولا allowlist: أُزيل `offline-policy.cjs` بقرار المالك (2026-11-08). الشبكة مفتوحة كما في 0.5.2، والبيانات تبقى محلية. |
 | الجسر | `desktop-app/src/main/preload.cjs`: `updateStatus`, `checkForUpdates`, `installUpdate`, `onUpdateStatus`. |
 | الواجهة | `desktop-app/src/renderer/App.jsx`: مكوّن `UpdateBanner` يعرض التوفر والتنزيل والاكتمال والخطأ. |
-| CI | `.github/workflows/release.yml` عند تغيير رقم إصدار التطبيق على `main` (windows-latest): `npm ci` → اختبارات وبناء → إنشاء إصدار GitHub واحد بأصول المثبّت و`blockmap` و`latest.yml`. |
+| CI | `.github/workflows/release.yml` على **كل دفع إلى `main`** (windows-latest): `npm ci` → `npm test` (بوابة) → `scripts/ci-version.cjs` (إصدار تلقائي) → بناء → نشر إصدار GitHub واحد بأصول المثبّت و`blockmap` و`latest.yml`. |
 
 ### الإصدارات والتحقق
 
@@ -183,15 +183,34 @@
 
 ### طريقة إصدار تحديث
 
-1. ارفع `version` في `desktop-app/package.json` وطابقه في `package-lock.json`.
-2. ادفع التغيير إلى `main`؛ يبدأ CI اختبار التطبيق وبناءه وينشئ إصدار GitHub تلقائيًا.
-3. يبحث التطبيق المثبّت عن الإصدار الرسمي بعد الإقلاع كل 6 ساعات، وينزّله ويطلب إعادة التشغيل لتثبيته.
+1. التزم أي تغيير وادفعه إلى `main`.
+2. يشغّل ذلك سير العمل `Release` تلقائيًا: يفحص الاختبارات، يشتق إصدارًا أعلى (`major.minor.<GITHUB_RUN_NUMBER>`) عبر `desktop-app/scripts/ci-version.cjs`، يبني المثبّت، وينشره إصدارًا عامًا.
+3. التطبيق المثبّت يكتشف الإصدار الأعلى خلال 8 ثوانٍ من الإقلاع (ثم كل 6 ساعات)، ينزّله، ويثبّته عند الإغلاق.
+4. لا حاجة إلى رفع رقم الإصدار يدويًا ولا إلى وسم يدوي: `GITHUB_RUN_NUMBER` يتزايد دائمًا، و`patch` لا يتراجع.
 
-هذا يسمح للتطبيق بالاتصال بمصدر التحديثات الرسمي فقط؛ تبقى قاعدة البيانات والتحليلات محليتين، ولا يُفتح اتصال عام بالإنترنت.
+لا قيود شبكية على التطبيق بعد إزالة الحراسة؛ تبقى قاعدة البيانات والتحليلات محلية، ولا يرسل التطبيق بياناته إلى أي جهة.
 
 ### ملاحظات
 
-- الحزمة **غير موقّعة**؛ SmartScreen قد يعرض تحذيرًا. التحديث التلقائي يعمل دون توقيع.
-- «أي تغيير» يعني رفع رقم الإصدار على `main`؛ لا يُبنى إصدار جديد مع كل التزام.
+- الحزمة **غير موقّعة**؛ SmartScreen قد يعرض تحذيرًا. التحديث التلقائي يعمل دون توقيع، وجذر الثقة هو حساب GitHub نفسه.
+- «أي تغيير» يعني أي دفع إلى `main`: يُبنى إصدار من كل دفع (لا يعتمد على وسم يدوي).
 - كاش المحدّث: `%LOCALAPPDATA%\local-development-intelligence-updater`.
+
+## تحديث 2026-11-08 — التحديث التلقائي على كل دفع، وإلغاء سياسة الحراسة
+
+القرار (بناءً على طلب المالك): أي تغيير في المستودع يجب أن يصل تلقائيًا إلى البرنامج المثبّت، مع إلغاء حرّاس الشبكة بالكامل. أُعيد البناء فوق `main` المدموج (`c4aa903`, PR #3) للحفاظ على ميزة التقارير المفلترة.
+
+| الملف | التغيير |
+| --- | --- |
+| `desktop-app/src/main/offline-policy.cjs` | محذوف. |
+| `desktop-app/tests/offline-policy.test.cjs` | محذوف. |
+| `desktop-app/src/main/main.cjs` | إزالة الاستيراد والحرّاس (`installOfflineNetworkGuards`/`installOfflineSessionGuard`) وإزالة `net`/`session` من استيراد Electron؛ إعادة `updateStatus` إلى الحالة المحلية؛ تحصين المحدّث (رتابة `downloaded`، تنظيف المؤقتات، `disableWebInstaller`، `allowDowngrade=false`). |
+| `desktop-app/scripts/e2e-analysis.cjs` | إزالة فحص الشبكة وتتبّع `offline-policy`. |
+| `desktop-app/tests/interaction-harness.test.cjs` | إزالة فحص الحرّاس؛ تحديث فحص سير العمل للإصدار التلقائي. |
+| `desktop-app/tests/auto-update.test.cjs` | جديد: يثبّت ربط المحدّث والقنوات ونشر GitHub وتزايد الإصدار. |
+| `desktop-app/scripts/ci-version.cjs` | جديد: يشتق `major.minor.<GITHUB_RUN_NUMBER>` ويضمن ألا يتراجع `patch`. |
+| `.github/workflows/release.yml` | إعادة كتابة: كل دفع إلى `main`، بوابة `npm test`، إصدار تلقائي، بناء NSIS، نشر إصدار عام. |
+| `desktop-app/package.json` / `package-lock.json` | الأساس `0.6.0`. |
+
+التحقق المحلي: `node --test` → 170 (169 نجاح، 1 متخطّى، 0 فشل)؛ `npx vite build` ناجح؛ `npx electron scripts/e2e-analysis.cjs` → 50/50.
 

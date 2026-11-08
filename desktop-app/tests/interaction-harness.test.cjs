@@ -7,8 +7,6 @@ const test = require('node:test');
 
 const root = path.join(__dirname, '..');
 const harness = fs.readFileSync(path.join(root, 'scripts/e2e-analysis.cjs'), 'utf8');
-const main = fs.readFileSync(path.join(root, 'src/main/main.cjs'), 'utf8');
-const offlinePolicy = fs.readFileSync(path.join(root, 'src/main/offline-policy.cjs'), 'utf8');
 const releaseWorkflow = fs.readFileSync(path.join(root, '../.github/workflows/release.yml'), 'utf8');
 
 test('Electron E2E drives real pointer input and checks the true hit target', () => {
@@ -25,23 +23,6 @@ test('Electron E2E records before/after screenshots and per-action traces', () =
   assert.match(harness, /beforeFile/);
   assert.match(harness, /afterFile/);
   assert.match(harness, /12-تتبع-التفاعلات\.json/);
-});
-
-test('Electron E2E validates network guards and the update-only allowlist', () => {
-  assert.match(main, /installOfflineNetworkGuards\(\{ electronNet: net, allowedNetworkRequest: isAllowedUpdateRequest \}\)/);
-  assert.match(offlinePolicy, /automaticUpdatesEnabled: true/);
-  assert.match(offlinePolicy, /function isAllowedUpdateRequest/);
-  assert.match(offlinePolicy, /github\.com/);
-  assert.match(main, /installOfflineSessionGuard\(session\.defaultSession\)/);
-  assert.match(offlinePolicy, /webRequest\.onBeforeRequest/);
-  assert.match(offlinePolicy, /http:\/\/\*\/\*/);
-  assert.match(offlinePolicy, /https:\/\/\*\/\*/);
-  assert.match(offlinePolicy, /ws:\/\/\*\/\*/);
-  assert.match(offlinePolicy, /wss:\/\/\*\/\*/);
-  assert.match(offlinePolicy, /callback\(\{ cancel: true \}\)/);
-  assert.match(offlinePolicy, /recordBlockedAttempt\('renderer'/);
-  assert.match(harness, /getOfflineNetworkAudit/);
-  assert.match(harness, /networkAttemptCount === 0/);
 });
 
 test('Electron E2E opens the native file dialog path and verifies the workbook inventory UI', () => {
@@ -66,11 +47,20 @@ test('Electron E2E verifies the new data review screens with real interactions',
   assert.match(harness, /حفظ القياس/);
 });
 
-test('Windows release workflow builds the renderer before launching Electron E2E', () => {
-  const tests = releaseWorkflow.indexOf('name: Run unit and integration tests');
+test('Release workflow gates every push to main with tests before packaging', () => {
+  assert.match(releaseWorkflow, /branches:\s*\[main\]/);
+  assert.doesNotMatch(releaseWorkflow, /paths:/);
+  const tests = releaseWorkflow.indexOf('name: Unit and integration tests');
+  const version = releaseWorkflow.indexOf('name: Compute release version');
   const build = releaseWorkflow.indexOf('name: Build renderer');
-  const e2e = releaseWorkflow.indexOf('name: Run full Electron end-to-end checks');
-  assert.ok(tests >= 0 && build > tests && e2e > build);
+  const pack = releaseWorkflow.indexOf('name: Package installer');
+  const publish = releaseWorkflow.indexOf('name: Publish release');
+  assert.ok(tests >= 0, 'test gate is present');
+  assert.ok(version > tests && build > version && pack > build && publish > pack, 'pipeline steps are ordered');
+  assert.match(releaseWorkflow, /run: npm test/);
+  assert.match(releaseWorkflow, /scripts\/ci-version\.cjs/);
+  assert.match(releaseWorkflow, /if: github\.ref == 'refs\/heads\/main'/);
+  assert.match(releaseWorkflow, /--publish never/);
 });
 
 test('theme toggle persists the preference and exposes accessible light and dark modes', () => {

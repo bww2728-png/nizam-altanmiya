@@ -1,6 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, net, session } = require('electron');
-const { installOfflineNetworkGuards, installOfflineSessionGuard, isAllowedUpdateRequest, updateStatus } = require('./offline-policy.cjs');
-installOfflineNetworkGuards({ electronNet: net, allowedNetworkRequest: isAllowedUpdateRequest });
+const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -305,9 +303,22 @@ function validateCalibration(kThreshold, deprivationLine) {
   }
 }
 
+/** Timers owned by the updater so they can be cleared on quit. */
+const updateTimers = { initial: null, interval: null };
+
+/**
+ * Merge a status patch and forward it when the window can still receive it.
+ *
+ * Once an update is downloaded the ready state is sticky: a later poll or a
+ * transient network error must not hide the restart action in the banner.
+ */
 function pushUpdateStatus(next) {
+  if (lastUpdateStatus.state === 'downloaded' && next.state && next.state !== 'downloaded') {
+    const superseded = next.version && next.version !== lastUpdateStatus.version;
+    if (!superseded) return;
+  }
   lastUpdateStatus = { ...lastUpdateStatus, ...next };
-  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
     mainWindow.webContents.send('update:status', lastUpdateStatus);
   }
 }
@@ -317,17 +328,38 @@ function setupAutoUpdate() {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.allowPrerelease = false;
+  // Never fetch an installer over the web-installer path; only the packaged
+  // NSIS update is allowed, and an older version may never replace a newer one.
+  autoUpdater.disableWebInstaller = true;
+  autoUpdater.allowDowngrade = false;
 
   autoUpdater.on('checking-for-update', () => pushUpdateStatus({ state: 'checking' }));
   autoUpdater.on('update-available', info => pushUpdateStatus({ state: 'available', version: info?.version }));
   autoUpdater.on('update-not-available', () => pushUpdateStatus({ state: 'not-available' }));
   autoUpdater.on('download-progress', progress => pushUpdateStatus({ state: 'downloading', percent: Math.round(progress?.percent ?? 0) }));
   autoUpdater.on('update-downloaded', info => pushUpdateStatus({ state: 'downloaded', version: info?.version }));
-  autoUpdater.on('error', error => pushUpdateStatus({ state: 'error', message: String(error?.message ?? error) }));
+  autoUpdater.on('error', error => pushUpdateStatus({ state: 'error', message: String(error?.message ?? error).slice(0, 300) }));
 
-  const checkForUpdates = () => { autoUpdater.checkForUpdates().catch(() => {}); };
-  setTimeout(checkForUpdates, UPDATE_CHECK_DELAY_MS);
-  setInterval(checkForUpdates, UPDATE_CHECK_INTERVAL_MS);
+  // Every check keeps a catch: a machine with no connection must not surface an
+  // unhandled rejection, and a failed check is already reported by the error event.
+  // Once a build is downloaded the poll stops so the ready state stays put.
+  const checkForUpdates = () => {
+    if (lastUpdateStatus.state === 'downloaded') return;
+    autoUpdater.checkForUpdates().catch(() => {});
+  };
+  updateTimers.initial = setTimeout(checkForUpdates, UPDATE_CHECK_DELAY_MS);
+  updateTimers.interval = setInterval(checkForUpdates, UPDATE_CHECK_INTERVAL_MS);
+  // Never keep the process alive just for the update poll.
+  if (updateTimers.initial.unref) updateTimers.initial.unref();
+  if (updateTimers.interval.unref) updateTimers.interval.unref();
+}
+
+/** Clear the updater timers on quit so nothing fires during teardown. */
+function stopAutoUpdate() {
+  if (updateTimers.initial) clearTimeout(updateTimers.initial);
+  if (updateTimers.interval) clearInterval(updateTimers.interval);
+  updateTimers.initial = null;
+  updateTimers.interval = null;
 }
 
 /**
@@ -1352,13 +1384,13 @@ function registerHandlers() {
     return { canceled: false, ...result };
   });
 
-  ipcMain.handle('update:status', () => ({ ...updateStatus(app.getVersion()), ...lastUpdateStatus, currentVersion: app.getVersion() }));
+  ipcMain.handle('update:status', () => ({ ...lastUpdateStatus, currentVersion: app.getVersion() }));
   ipcMain.handle('update:check', async () => {
-    if (!app.isPackaged || process.platform !== 'win32' || !autoUpdater) return { ...updateStatus(app.getVersion()), currentVersion: app.getVersion() };
+    if (!app.isPackaged || process.platform !== 'win32' || !autoUpdater) return { ...lastUpdateStatus, currentVersion: app.getVersion() };
     try {
       await autoUpdater.checkForUpdates();
     } catch (error) {
-      pushUpdateStatus({ state: 'error', message: String(error?.message ?? error) });
+      pushUpdateStatus({ state: 'error', message: String(error?.message ?? error).slice(0, 300) });
     }
     return { ...lastUpdateStatus, currentVersion: app.getVersion() };
   });
@@ -1400,7 +1432,6 @@ if (!gotSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
-    installOfflineSessionGuard(session.defaultSession);
     // A packaged build has no menu: the default menu exposes DevTools and file
     // dialogs that bypass the field policy.
     if (app.isPackaged) Menu.setApplicationMenu(null);
@@ -1412,6 +1443,7 @@ if (!gotSingleInstanceLock) {
 }
 
 app.on('before-quit', () => {
+  stopAutoUpdate();
   if (database) database.close();
   database = undefined;
 });

@@ -118,13 +118,14 @@ export default function App() {
     };
 
     // The bridge is optional: the renderer also runs in a plain browser during dev.
+    // Subscribe before the first fetch so a status pushed during that await is
+    // not overwritten by the older snapshot.
+    const unsubscribe = bridge?.onUpdateStatus?.(apply);
     try {
       bridge?.updateStatus?.()?.then?.(apply)?.catch?.(() => {});
     } catch (cause) {
       void cause;
     }
-
-    const unsubscribe = bridge?.onUpdateStatus?.(apply);
     return () => {
       active = false;
       if (typeof unsubscribe === 'function') unsubscribe();

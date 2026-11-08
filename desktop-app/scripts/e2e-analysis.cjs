@@ -26,7 +26,6 @@ const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'template-v3.3.xlsx');
 const EVIDENCE = path.join(ROOT, '..', 'نتائج-الفحص');
 const USER_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-e2e-'));
 const SAMPLE = path.join(USER_DATA, 'sample-20.xlsx');
-const { getOfflineNetworkAudit } = require(path.join(ROOT, 'src', 'main', 'offline-policy.cjs'));
 const interactionTrace = [];
 const rendererRuntimeErrors = [];
 
@@ -687,21 +686,10 @@ app.whenReady().then(async () => {
       writeGroup('6-فحص-وضع-الوصول.json', 'security');
       writeGroup('7-فحص-التصدير.json', 'export');
       writeGroup('13-فحص-الوصولية.json', 'accessibility');
-      const networkAudit = getOfflineNetworkAudit();
-      const networkAttemptCount = networkAudit.nodeAttempts.length
-        + networkAudit.electronAttempts.length
-        + networkAudit.rendererAttempts.length;
-      check(
-        'security',
-        'لا توجد محاولات اتصال شبكي من Node أو Electron أو Chromium',
-        networkAttemptCount === 0,
-        JSON.stringify(networkAudit)
-      );
       fs.writeFileSync(path.join(EVIDENCE, '12-تتبع-التفاعلات.json'), JSON.stringify({
         generatedAt: new Date().toISOString(),
         method: 'scrollIntoView on nearest scroll container, then Electron webContents.sendInputEvent with elementFromPoint hit-testing',
         interactionCount: interactionTrace.length,
-        networkAudit,
         interactions: interactionTrace,
       }, null, 2), 'utf8');
 
