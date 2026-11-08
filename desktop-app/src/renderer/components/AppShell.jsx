@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-  Activity, DatabaseZap, FileSpreadsheet, LayoutDashboard, ListOrdered,
+  Activity, Briefcase, DatabaseZap, FileSpreadsheet, LayoutDashboard, ListOrdered,
   LockKeyhole, LogOut, PenLine, RefreshCw, RotateCcw, ShieldCheck, Users,
 } from 'lucide-react';
 import { cx, fmtDate } from '../lib/format.js';
@@ -27,6 +27,7 @@ export const NAV_GROUPS = [
     caption: 'البيانات',
     items: [
       { id: 'import', label: 'الاستيراد الآلي', icon: FileSpreadsheet },
+      { id: 'projects', label: 'سجل المشاريع', icon: Briefcase },
       { id: 'correction', label: 'تصحيح البيانات', icon: PenLine },
       { id: 'database', label: 'قاعدة البيانات الشاملة', icon: DatabaseZap },
     ],
