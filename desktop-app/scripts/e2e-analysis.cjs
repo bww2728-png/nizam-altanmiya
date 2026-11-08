@@ -19,32 +19,15 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { app, BrowserWindow, session, dialog } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 
 const ROOT = path.join(__dirname, '..');
 const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'template-v3.3.xlsx');
 const EVIDENCE = path.join(ROOT, '..', 'نتائج-الفحص');
 const USER_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-e2e-'));
 const SAMPLE = path.join(USER_DATA, 'sample-20.xlsx');
-const networkAttempts = [];
+const { getOfflineNetworkAudit } = require(path.join(ROOT, 'src', 'main', 'offline-policy.cjs'));
 const interactionTrace = [];
-
-// Block and record browser-session network requests during this end-to-end run.
-// This validates Chromium-originated HTTP(S)/WebSocket traffic, not native OS
-// networking initiated by arbitrary Node/Electron modules.
-app.on('ready', () => {
-  session.defaultSession.webRequest.onBeforeRequest(
-    { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] },
-    (details, callback) => {
-      networkAttempts.push({
-        url: details.url,
-        method: details.method,
-        resourceType: details.resourceType,
-      });
-      callback({ cancel: true });
-    }
-  );
-});
 
 app.setPath('userData', USER_DATA);
 require(path.join(ROOT, 'src', 'main', 'main.cjs'));
@@ -541,17 +524,21 @@ app.whenReady().then(async () => {
       writeGroup('6-فحص-وضع-الوصول.json', 'security');
       writeGroup('7-فحص-التصدير.json', 'export');
       writeGroup('13-فحص-الوصولية.json', 'accessibility');
+      const networkAudit = getOfflineNetworkAudit();
+      const networkAttemptCount = networkAudit.nodeAttempts.length
+        + networkAudit.electronAttempts.length
+        + networkAudit.rendererAttempts.length;
       check(
         'security',
-        'لا توجد محاولات اتصال HTTP/HTTPS/WebSocket من جلسة Chromium',
-        networkAttempts.length === 0,
-        networkAttempts.slice(0, 10).map((item) => `${item.method} ${item.url}`).join(' | ')
+        'لا توجد محاولات اتصال شبكي من Node أو Electron أو Chromium',
+        networkAttemptCount === 0,
+        JSON.stringify(networkAudit)
       );
       fs.writeFileSync(path.join(EVIDENCE, '12-تتبع-التفاعلات.json'), JSON.stringify({
         generatedAt: new Date().toISOString(),
         method: 'scrollIntoView on nearest scroll container, then Electron webContents.sendInputEvent with elementFromPoint hit-testing',
         interactionCount: interactionTrace.length,
-        networkAttempts,
+        networkAudit,
         interactions: interactionTrace,
       }, null, 2), 'utf8');
 
