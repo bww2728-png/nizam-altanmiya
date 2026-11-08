@@ -649,7 +649,7 @@ function listCanonicalProjects(database, request = {}) {
   }
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   const total = database.prepare('SELECT COUNT(*) AS count FROM projects p ' + where).get(...params).count;
-  const rows = database.prepare(\`
+  const rows = database.prepare(`
     SELECT p.id,p.code,p.name,p.description,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
       p.start_date,p.end_date,p.created_at,p.updated_at,
       geo.name AS geographic_unit_name, geo.unit_type AS geographic_unit_type,
@@ -666,10 +666,10 @@ function listCanonicalProjects(database, request = {}) {
     LEFT JOIN geographic_units geo ON geo.id = p.geographic_unit_id
     LEFT JOIN sectors sector ON sector.id = p.sector_id
     LEFT JOIN data_sources source ON source.id = p.source_id
-    \${where}
+    ${where}
     ORDER BY p.updated_at DESC,p.id DESC
     LIMIT ? OFFSET ?
-  \`).all(...params, limit, offset);
+  `).all(...params, limit, offset);
   return {
     rows: rows.map(row => ({
       ...row,
@@ -691,7 +691,7 @@ function listCanonicalProjects(database, request = {}) {
 function getCanonicalProject(database, projectId) {
   const id = Number(projectId);
   if (!Number.isSafeInteger(id) || id <= 0) throw new Error('معرّف المشروع غير صالح.');
-  const project = database.prepare(\`
+  const project = database.prepare(`
     SELECT p.id,p.code,p.name,p.description,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
       p.start_date,p.end_date,p.created_at,p.updated_at,
       geo.name AS geographic_unit_name,geo.unit_type AS geographic_unit_type,
@@ -701,24 +701,24 @@ function getCanonicalProject(database, projectId) {
     LEFT JOIN sectors sector ON sector.id = p.sector_id
     LEFT JOIN data_sources source ON source.id = p.source_id
     WHERE p.id = ?
-  \`).get(id);
+  `).get(id);
   if (!project) throw new Error('المشروع المطلوب غير موجود.');
   const funding = database.prepare('SELECT id,partner_name,amount,currency_code,funding_date,created_at FROM project_funding WHERE project_id = ? ORDER BY id').all(id);
-  const provenance = database.prepare(\`
+  const provenance = database.prepare(`
     SELECT promotion.source_location,promotion.mapping_json,promotion.mapped_values_json,
       batch.file_name,batch.sha256,batch.created_at AS received_at
     FROM workbook_import_promotions promotion
     JOIN workbook_import_batches batch ON batch.id = promotion.batch_id
     WHERE promotion.entity_type = 'project' AND promotion.target_id = ?
     ORDER BY promotion.id DESC LIMIT 1
-  \`).get(id);
-  const issues = database.prepare(\`
+  `).get(id);
+  const issues = database.prepare(`
     SELECT issue.id,issue.severity,issue.issue_code,issue.message,issue.status,issue.created_at
     FROM data_quality_issues issue
     JOIN workbook_import_promotions promotion ON promotion.row_id = issue.row_id
     WHERE promotion.entity_type = 'project' AND promotion.target_id = ?
     ORDER BY issue.id DESC
-  \`).all(id);
+  `).all(id);
   return { project, funding, provenance: provenance ?? null, issues };
 }
 
