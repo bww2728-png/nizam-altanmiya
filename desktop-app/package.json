@@ -47,7 +47,8 @@
       {
         "provider": "github",
         "owner": "bww2728-png",
-        "repo": "nizam-altanmiya"
+        "repo": "nizam-altanmiya",
+        "releaseType": "release"
       }
     ],
     "asarUnpack": [
