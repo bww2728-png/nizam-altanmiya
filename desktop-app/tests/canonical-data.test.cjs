@@ -241,9 +241,12 @@ test('project regions require explicit row approval and preserve project/funding
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM data_quality_issues WHERE issue_code LIKE 'unmatched-project-%'").get().n, 2);
     assert.equal(canonical.readWorkbookImportRegion(db, staged.batchId, region.id).rows.find(row => row.rowNumber === 2).promoted, true);
 
-    assert.throws(() => canonical.promoteProjectRegion(db, {
+    const repeated = canonical.promoteProjectRegion(db, {
       batchId: staged.batchId, regionId: region.id, columnMap, approvedRows: [2],
-    }), /سبق اعتماده/);
+    });
+    assert.equal(repeated.applied.length, 0);
+    assert.match(repeated.refused[0].reason, /سبق اعتماده/);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM projects').get().n, 1);
   } finally {
     db.close();
     fs.rmSync(directory, { recursive: true, force: true });
