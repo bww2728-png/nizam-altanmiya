@@ -160,10 +160,11 @@
 | --- | --- |
 | المحرّك | `electron-updater@6.8.11` (تبعيته في `dependencies`). |
 | المصدر | `build.publish` → مزوّد `github` للمالك `bww2728-png` والمستودع `nizam-altanmiya`، مع `releaseType: "release"` (المحدّث يتجاهل المسودات). |
-| في التطبيق | `desktop-app/src/main/main.cjs`: استيراد محمي لـ `autoUpdater`، و`setupAutoUpdate()` يفحص عند الإقلاع (بعد 8 ثوانٍ) ثم كل 6 ساعات، ويبثّ الحالة عبر `update:status`. |
+| في التطبيق | `desktop-app/src/main/main.cjs`: يفحص `autoUpdater` عند الإقلاع بعد 8 ثوانٍ ثم كل 6 ساعات، ويحمل التحديث تلقائيًا ويثبّته عند الخروج، مع اقتصار التشغيل على إصدار Windows المثبّت. |
+| حماية الاتصال | `desktop-app/src/main/offline-policy.cjs`: تُحظر اتصالات التطبيق العامة؛ يُسمح فقط بطلبات HTTPS لبيانات وأصول إصدارات GitHub الرسمية للمستودع. |
 | الجسر | `desktop-app/src/main/preload.cjs`: `updateStatus`, `checkForUpdates`, `installUpdate`, `onUpdateStatus`. |
-| الواجهة | `desktop-app/src/renderer/App.jsx`: مكوّن `UpdateBanner` (متاح/تنزيل/اكتمل/خطأ) + أنماط `.update-banner` في `styles/app.css`. |
-| CI | `.github/workflows/release.yml` على وسم `v*` (windows-latest): `npm ci` → `vite build` → `electron-builder --publish never` → إنشاء إصدار واحد عبر `gh release create/upload`. تجاوزنا ناشر electron-builder لأنه قسّم الأصول بين إصدارين. |
+| الواجهة | `desktop-app/src/renderer/App.jsx`: مكوّن `UpdateBanner` يعرض التوفر والتنزيل والاكتمال والخطأ. |
+| CI | `.github/workflows/release.yml` عند تغيير رقم إصدار التطبيق على `main` (windows-latest): `npm ci` → اختبارات وبناء → إنشاء إصدار GitHub واحد بأصول المثبّت و`blockmap` و`latest.yml`. |
 
 ### الإصدارات والتحقق
 
@@ -182,13 +183,15 @@
 
 ### طريقة إصدار تحديث
 
-1. ارفع `version` في `desktop-app/package.json`.
-2. التزم وادفع إلى `main`.
-3. أنشئ وسمًا مطابقًا (`vX.Y.Z`) وادفعه → يبنيه CI وينشره، ويلتقطه التطبيق المثبّت تلقائيًا.
+1. ارفع `version` في `desktop-app/package.json` وطابقه في `package-lock.json`.
+2. ادفع التغيير إلى `main`؛ يبدأ CI اختبار التطبيق وبناءه وينشئ إصدار GitHub تلقائيًا.
+3. يبحث التطبيق المثبّت عن الإصدار الرسمي بعد الإقلاع كل 6 ساعات، وينزّله ويطلب إعادة التشغيل لتثبيته.
+
+هذا يسمح للتطبيق بالاتصال بمصدر التحديثات الرسمي فقط؛ تبقى قاعدة البيانات والتحليلات محليتين، ولا يُفتح اتصال عام بالإنترنت.
 
 ### ملاحظات
 
 - الحزمة **غير موقّعة**؛ SmartScreen قد يعرض تحذيرًا. التحديث التلقائي يعمل دون توقيع.
-- «أي تغيير» يعني وسم إصدار جديد (لا يُبنى إصدار من كل التزام)، بناءً على قرار البناء على وسم.
+- «أي تغيير» يعني رفع رقم الإصدار على `main`؛ لا يُبنى إصدار جديد مع كل التزام.
 - كاش المحدّث: `%LOCALAPPDATA%\local-development-intelligence-updater`.
 

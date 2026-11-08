@@ -1,28 +1,55 @@
 'use strict';
 
-/**
- * Runtime policy for the Ministry's offline desktop deployment.
- *
- * Build/release automation may use network services outside the installed app.
- * The installed application itself must not call remote APIs, telemetry,
- * cloud AI, or automatic update services.
- */
+const UPDATE_REPOSITORY_PATH = '/bww2728-png/nizam-altanmiya';
+const UPDATE_ASSET_HOSTS = new Set([
+  'release-assets.githubusercontent.com',
+  'objects.githubusercontent.com',
+  'github-releases.githubusercontent.com',
+]);
+
 const OFFLINE_RUNTIME_POLICY = Object.freeze({
-  mode: 'offline-only',
+  mode: 'restricted-network',
   networkAllowed: false,
+  updateNetworkAllowed: true,
   cloudAiAllowed: false,
   localAiModelIncluded: false,
-  automaticUpdatesEnabled: false,
-  updateDistribution: 'local-installer-package',
+  automaticUpdatesEnabled: true,
+  updateDistribution: 'github-releases',
 });
 
-function offlineUpdateStatus(currentVersion = '') {
+function updateStatus(currentVersion = '') {
   return {
-    state: 'offline-only',
+    state: 'idle',
     currentVersion: String(currentVersion || ''),
-    message: 'يعمل النظام محليًا دون اتصال بالإنترنت. تُثبَّت التحديثات من حزمة محلية معتمدة.',
+    message: 'يعمل النظام محليًا، وتُستخدم الشبكة للتحقق من تحديثات التطبيق الرسمية فقط.',
     updateDistribution: OFFLINE_RUNTIME_POLICY.updateDistribution,
   };
+}
+
+function isAllowedUpdateRequest(input) {
+  try {
+    const options = typeof input === 'string' || input instanceof URL ? { url: input } : (input ?? {});
+    const rawUrl = options.url;
+    let requestUrl;
+    if (rawUrl instanceof URL) requestUrl = rawUrl;
+    else if (typeof rawUrl === 'string') requestUrl = new URL(rawUrl);
+    else {
+      const protocol = options.protocol ?? 'https:';
+      const hostname = options.hostname ?? options.host;
+      const pathname = options.path ?? '/';
+      requestUrl = new URL(`${protocol}//${hostname}${pathname}`);
+    }
+    const method = String(options.method ?? 'GET').toUpperCase();
+    if (method !== 'GET' || requestUrl.protocol !== 'https:' || requestUrl.port || requestUrl.username || requestUrl.password) return false;
+    const hostname = requestUrl.hostname.toLowerCase();
+    if (UPDATE_ASSET_HOSTS.has(hostname)) return true;
+    if (hostname !== 'github.com') return false;
+    const path = requestUrl.pathname;
+    if (path === `${UPDATE_REPOSITORY_PATH}/releases.atom` || path === `${UPDATE_REPOSITORY_PATH}/releases/latest`) return true;
+    return new RegExp(`^${UPDATE_REPOSITORY_PATH}/releases/download/v?\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?/[A-Za-z0-9._-]+$`).test(path);
+  } catch {
+    return false;
+  }
 }
 
 
@@ -65,6 +92,9 @@ function installOfflineNetworkGuards(options = {}) {
   };
   const electronNet = options.electronNet ?? null;
   const globalObject = options.globalObject ?? globalThis;
+  const allowedNetworkRequest = options.allowedNetworkRequest ?? (() => false);
+  const originalElectronRequest = electronNet?.request;
+  const originalElectronFetch = electronNet?.fetch;
   const restorers = [];
 
   const patch = (target, key, replacement) => {
@@ -111,8 +141,14 @@ function installOfflineNetworkGuards(options = {}) {
     patch(globalObject, 'WebSocket', block('node', 'global.WebSocket'));
   }
 
-  patch(electronNet, 'request', block('electron', 'electron.net.request'));
-  patch(electronNet, 'fetch', function offlineElectronFetchBlocked() {
+  patch(electronNet, 'request', function restrictedElectronRequest(requestOptions, ...args) {
+    if (allowedNetworkRequest(requestOptions)) {
+      return Reflect.apply(originalElectronRequest, electronNet, [requestOptions, ...args]);
+    }
+    throw recordBlockedAttempt('electron', 'electron.net.request');
+  });
+  patch(electronNet, 'fetch', function restrictedElectronFetch(input, ...args) {
+    if (allowedNetworkRequest(input)) return Reflect.apply(originalElectronFetch, electronNet, [input, ...args]);
     const error = recordBlockedAttempt('electron', 'electron.net.fetch');
     return Promise.reject(error);
   });
@@ -153,4 +189,4 @@ function clearOfflineNetworkAudit() {
   OFFLINE_NETWORK_AUDIT.rendererAttempts.length = 0;
 }
 
-module.exports = { OFFLINE_RUNTIME_POLICY, offlineUpdateStatus, installOfflineNetworkGuards, installOfflineSessionGuard, getOfflineNetworkAudit, clearOfflineNetworkAudit };
+module.exports = { OFFLINE_RUNTIME_POLICY, updateStatus, isAllowedUpdateRequest, installOfflineNetworkGuards, installOfflineSessionGuard, getOfflineNetworkAudit, clearOfflineNetworkAudit };

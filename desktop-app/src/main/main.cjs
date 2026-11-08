@@ -1,6 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, net, session } = require('electron');
-const { installOfflineNetworkGuards, installOfflineSessionGuard } = require('./offline-policy.cjs');
-installOfflineNetworkGuards({ electronNet: net });
+const { installOfflineNetworkGuards, installOfflineSessionGuard, isAllowedUpdateRequest, updateStatus } = require('./offline-policy.cjs');
+installOfflineNetworkGuards({ electronNet: net, allowedNetworkRequest: isAllowedUpdateRequest });
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -45,6 +45,11 @@ let sheetsCache = null;
 let sessionId = crypto.randomUUID();
 /** Canonical path of the last workbook the main process returned from a file dialog. */
 let dialogSelectedPath = null;
+let autoUpdater = null;
+let lastUpdateStatus = { state: 'idle' };
+const UPDATE_CHECK_DELAY_MS = 8_000;
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+try { ({ autoUpdater } = require('electron-updater')); } catch { autoUpdater = null; }
 
 const COLUMN_BY_KEY = DIRECTORATE_COLUMNS;
 
@@ -300,10 +305,30 @@ function validateCalibration(kThreshold, deprivationLine) {
   }
 }
 
-// ---- Offline runtime policy -------------------------------------------------
-// The installed application must remain usable without network access.
-// Updates are distributed as administrator-provided local installer packages.
-const { offlineUpdateStatus } = require('./offline-policy.cjs');
+function pushUpdateStatus(next) {
+  lastUpdateStatus = { ...lastUpdateStatus, ...next };
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+    mainWindow.webContents.send('update:status', lastUpdateStatus);
+  }
+}
+
+function setupAutoUpdate() {
+  if (!app.isPackaged || process.platform !== 'win32' || !autoUpdater) return;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowPrerelease = false;
+
+  autoUpdater.on('checking-for-update', () => pushUpdateStatus({ state: 'checking' }));
+  autoUpdater.on('update-available', info => pushUpdateStatus({ state: 'available', version: info?.version }));
+  autoUpdater.on('update-not-available', () => pushUpdateStatus({ state: 'not-available' }));
+  autoUpdater.on('download-progress', progress => pushUpdateStatus({ state: 'downloading', percent: Math.round(progress?.percent ?? 0) }));
+  autoUpdater.on('update-downloaded', info => pushUpdateStatus({ state: 'downloaded', version: info?.version }));
+  autoUpdater.on('error', error => pushUpdateStatus({ state: 'error', message: String(error?.message ?? error) }));
+
+  const checkForUpdates = () => { autoUpdater.checkForUpdates().catch(() => {}); };
+  setTimeout(checkForUpdates, UPDATE_CHECK_DELAY_MS);
+  setInterval(checkForUpdates, UPDATE_CHECK_INTERVAL_MS);
+}
 
 /**
  * The application window.
@@ -1327,12 +1352,21 @@ function registerHandlers() {
     return { canceled: false, ...result };
   });
 
-  // ---- Offline update policy ----------------------------------------------
-  // These compatibility channels never access the network or install software.
-  // Administrators distribute signed/verified installer packages separately.
-  ipcMain.handle('update:status', () => offlineUpdateStatus(app.getVersion()));
-  ipcMain.handle('update:check', async () => offlineUpdateStatus(app.getVersion()));
-  ipcMain.handle('update:install', () => false);
+  ipcMain.handle('update:status', () => ({ ...updateStatus(app.getVersion()), ...lastUpdateStatus, currentVersion: app.getVersion() }));
+  ipcMain.handle('update:check', async () => {
+    if (!app.isPackaged || process.platform !== 'win32' || !autoUpdater) return { ...updateStatus(app.getVersion()), currentVersion: app.getVersion() };
+    try {
+      await autoUpdater.checkForUpdates();
+    } catch (error) {
+      pushUpdateStatus({ state: 'error', message: String(error?.message ?? error) });
+    }
+    return { ...lastUpdateStatus, currentVersion: app.getVersion() };
+  });
+  ipcMain.handle('update:install', () => {
+    if (!autoUpdater || lastUpdateStatus.state !== 'downloaded') return false;
+    setImmediate(() => autoUpdater.quitAndInstall());
+    return true;
+  });
 
 }
 
@@ -1372,6 +1406,7 @@ if (!gotSingleInstanceLock) {
     if (app.isPackaged) Menu.setApplicationMenu(null);
     registerHandlers();
     createWindow();
+    setupAutoUpdate();
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   });
 }

@@ -4,41 +4,55 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
-const { OFFLINE_RUNTIME_POLICY, offlineUpdateStatus, installOfflineNetworkGuards, installOfflineSessionGuard, getOfflineNetworkAudit, clearOfflineNetworkAudit } = require('../src/main/offline-policy.cjs');
+const { OFFLINE_RUNTIME_POLICY, updateStatus, isAllowedUpdateRequest, installOfflineNetworkGuards, installOfflineSessionGuard, getOfflineNetworkAudit, clearOfflineNetworkAudit } = require('../src/main/offline-policy.cjs');
 
 const ROOT = path.join(__dirname, '..');
 
-test('runtime policy explicitly forbids network, cloud AI, local AI models and automatic updates', () => {
+test('runtime policy allows only scoped update connectivity', () => {
   assert.deepEqual(OFFLINE_RUNTIME_POLICY, {
-    mode: 'offline-only',
+    mode: 'restricted-network',
     networkAllowed: false,
+    updateNetworkAllowed: true,
     cloudAiAllowed: false,
     localAiModelIncluded: false,
-    automaticUpdatesEnabled: false,
-    updateDistribution: 'local-installer-package',
+    automaticUpdatesEnabled: true,
+    updateDistribution: 'github-releases',
   });
 });
 
-test('update status describes local package distribution without initiating an update', () => {
-  assert.deepEqual(offlineUpdateStatus('0.5.2'), {
-    state: 'offline-only',
-    currentVersion: '0.5.2',
-    message: 'يعمل النظام محليًا دون اتصال بالإنترنت. تُثبَّت التحديثات من حزمة محلية معتمدة.',
-    updateDistribution: 'local-installer-package',
+test('update status explains that only official updates use the network', () => {
+  assert.deepEqual(updateStatus('0.5.3'), {
+    state: 'idle',
+    currentVersion: '0.5.3',
+    message: 'يعمل النظام محليًا، وتُستخدم الشبكة للتحقق من تحديثات التطبيق الرسمية فقط.',
+    updateDistribution: 'github-releases',
   });
 });
 
-test('packaged main process contains no automatic updater bootstrap or remote update call', () => {
+test('update allowlist accepts official release metadata and assets only', () => {
+  for (const request of [
+    { protocol: 'https:', hostname: 'github.com', path: '/bww2728-png/nizam-altanmiya/releases.atom' },
+    { protocol: 'https:', hostname: 'github.com', path: '/bww2728-png/nizam-altanmiya/releases/latest' },
+    { protocol: 'https:', hostname: 'github.com', path: '/bww2728-png/nizam-altanmiya/releases/download/v0.5.4/Local-Development-Intelligence-0.5.4-x64.exe' },
+    { protocol: 'https:', hostname: 'release-assets.githubusercontent.com', path: '/download/test' },
+  ]) assert.equal(isAllowedUpdateRequest(request), true);
+  for (const request of [
+    { protocol: 'http:', hostname: 'github.com', path: '/bww2728-png/nizam-altanmiya/releases/latest' },
+    { protocol: 'https:', hostname: 'github.com', path: '/other/repo/releases/latest' },
+    { protocol: 'https:', hostname: 'github.com', path: '/bww2728-png/nizam-altanmiya/releases/download/v0.5.4/not-safe.exe', method: 'POST' },
+    { protocol: 'https:', hostname: 'api.github.com', path: '/repos/bww2728-png/nizam-altanmiya' },
+    'https://example.invalid/update.yml',
+  ]) assert.equal(isAllowedUpdateRequest(request), false);
+});
+
+test('packaged main process initializes the restricted automatic updater', () => {
   const source = fs.readFileSync(path.join(ROOT, 'src/main/main.cjs'), 'utf8');
-  assert.doesNotMatch(source, /require\(['"]electron-updater['"]\)/);
-  assert.doesNotMatch(source, /checkForUpdates\s*\(/);
-  assert.doesNotMatch(source, /setupAutoUpdate\s*\(/);
-  assert.match(source, /ipcMain\.handle\('update:check', async \(\) => offlineUpdateStatus/);
-  assert.match(source, /ipcMain\.handle\('update:install', \(\) => false\)/);
-  assert.match(source, /installOfflineNetworkGuards\(\{ electronNet: net \}\)/);
+  assert.match(source, /require\(['"]electron-updater['"]\)/);
+  assert.match(source, /autoUpdater\.checkForUpdates\(\)/);
+  assert.match(source, /setupAutoUpdate\(\)/);
+  assert.match(source, /installOfflineNetworkGuards\(\{ electronNet: net, allowedNetworkRequest: isAllowedUpdateRequest \}\)/);
   assert.match(source, /installOfflineSessionGuard\(session\.defaultSession\)/);
 });
-
 
 test('Node and Electron network APIs are blocked and recorded by the runtime guard', async () => {
   clearOfflineNetworkAudit();
@@ -58,7 +72,12 @@ test('Node and Electron network APIs are blocked and recorded by the runtime gua
     request() { return 'request'; },
     fetch: async () => ({ ok: true }),
   };
-  const guard = installOfflineNetworkGuards({ modules, globalObject, electronNet });
+  const guard = installOfflineNetworkGuards({
+    modules,
+    globalObject,
+    electronNet,
+    allowedNetworkRequest: isAllowedUpdateRequest,
+  });
   try {
     for (const [api, call] of [
       ['http.request', () => modules.http.request('https://example.invalid')],
@@ -75,6 +94,8 @@ test('Node and Electron network APIs are blocked and recorded by the runtime gua
     await assert.rejects(globalObject.fetch('https://example.invalid'), { code: 'ERR_OFFLINE_RUNTIME_BLOCKED' });
     assert.throws(() => new globalObject.WebSocket('wss://example.invalid'), { code: 'ERR_OFFLINE_RUNTIME_BLOCKED' });
     await assert.rejects(electronNet.fetch('https://example.invalid'), { code: 'ERR_OFFLINE_RUNTIME_BLOCKED' });
+    assert.equal(electronNet.request({ protocol: 'https:', hostname: 'github.com', path: '/bww2728-png/nizam-altanmiya/releases.atom' }), 'request');
+    assert.deepEqual(await electronNet.fetch('https://release-assets.githubusercontent.com/download/update.exe'), { ok: true });
 
     const audit = getOfflineNetworkAudit();
     assert.equal(audit.nodeAttempts.length, 9);
@@ -98,9 +119,9 @@ test('Electron renderer session requests are cancelled and audited', () => {
   assert.equal(installOfflineSessionGuard({}), false);
 });
 
-test('renderer exposes the offline-only update status as an informational state', () => {
+test('renderer exposes visible states for automatic update progress', () => {
   const source = fs.readFileSync(path.join(ROOT, 'src/renderer/App.jsx'), 'utf8');
-  assert.match(source, /'offline-only'/);
-  assert.match(source, /دون اتصال بالإنترنت/);
-  assert.match(source, /حزمة محلية معتمدة/);
+  assert.match(source, /'downloading'/);
+  assert.match(source, /جارٍ تنزيل التحديث/);
+  assert.doesNotMatch(source, /offline-only/);
 });
