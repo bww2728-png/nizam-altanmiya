@@ -5,6 +5,8 @@ import { ErrorBanner, Loading, ToastStack } from './components/ui.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import ImportPage from './pages/Import.jsx';
 import Projects from './pages/Projects.jsx';
+import IndicatorObservations from './pages/IndicatorObservations.jsx';
+import DataQuality from './pages/DataQuality.jsx';
 import Correction from './pages/Correction.jsx';
 import Indicators from './pages/Indicators.jsx';
 import Ranking from './pages/Ranking.jsx';
@@ -276,6 +278,10 @@ export default function App() {
     switch (route) {
       case 'projects':
         return <Projects notify={notify} refreshKey={refreshKey} />;
+      case 'observations':
+        return <IndicatorObservations notify={notify} />;
+      case 'quality':
+        return <DataQuality notify={notify} />;
       case 'import':
         return <ImportPage onNavigate={navigate} notify={notify} onApplied={refresh} />;
       case 'correction':

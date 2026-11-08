@@ -24,7 +24,8 @@ const { defaultWeights, validateWeights } = require('./analysis/composite.cjs');
 const persist = require('./analysis/persist.cjs');
 const { serializeAnalysis } = require('./analysis/serialize.cjs');
 const { exportAnalysisWorkbook } = require('./analysis/exporter.cjs');
-const { exportAnalysisPdf } = require('./analysis/pdf.cjs');
+const { exportAnalysisPdf, exportDatabaseReportPdf, exportIndicatorsReportPdf } = require('./analysis/pdf.cjs');
+const { INPUT_FIELDS } = require('./analysis/schema.cjs');
 const { DIRECTORATE_COLUMNS } = require('./analysis/store-schema.cjs');
 const { buildImportPlan, summarizePlan, applyImportPlan } = require('./analysis/import-plan.cjs');
 const { buildSheets, buildRanking } = require('./analysis/sheets.cjs');
@@ -570,6 +571,106 @@ function registerHandlers() {
     return result;
   });
 
+  ipcMain.handle('projects:references', () => {
+    if (currentProfile() !== 'owner') throw new Error('مراجع المشاريع متاحة في وضع المالك فقط.');
+    return canonicalData.listCanonicalReferences(requireDatabase());
+  });
+
+  ipcMain.handle('observations:list', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') return { restricted: true, message: 'سجل القياسات المعيارية متاح في وضع المالك فقط.' };
+    const result = canonicalData.listIndicatorObservations(requireDatabase(),request);
+    auditRead('observations:list',{ entity:'indicator_observations',rowCount:result.rows.length,detail:'offset='+result.offset+';limit='+result.limit });
+    return result;
+  });
+
+  ipcMain.handle('observations:save', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('إدخال قياسات المؤشرات يتطلب وضع المالك.');
+    const result = canonicalData.saveIndicatorObservation(requireDatabase(),request);
+    auditRead('observations:save',{ entity:'indicator_observations',entityId:result.id,result:result.action });
+    return result;
+  });
+
+  ipcMain.handle('quality:list', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') return { restricted: true, message: 'سجل جودة البيانات متاح في وضع المالك فقط.' };
+    const result = canonicalData.listDataQualityIssues(requireDatabase(),request);
+    auditRead('quality:list',{ entity:'data_quality_issues',rowCount:result.rows.length,detail:'status='+String(request.status ?? 'open') });
+    return result;
+  });
+
+  ipcMain.handle('quality:resolve', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('تسوية ملاحظات الجودة تتطلب وضع المالك.');
+    const result = canonicalData.resolveDataQualityIssue(requireDatabase(),request.issueId,request.resolution);
+    auditRead('quality:resolve',{ entity:'data_quality_issues',entityId:result.id,result:'resolved' });
+    return result;
+  });
+
+  ipcMain.handle('projects:save', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('إنشاء أو تعديل المشاريع يتطلب وضع المالك.');
+    const db = requireDatabase();
+    const result = canonicalData.saveCanonicalProject(db, request);
+    invalidateSheets();
+    auditRead('projects:save', { entity: 'projects', entityId: result.id, result: result.action });
+    return result;
+  });
+
+  ipcMain.handle('projects:add-funding', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('إضافة التمويل تتطلب وضع المالك.');
+    const db = requireDatabase();
+    const result = canonicalData.addProjectFunding(db, request.projectId, request);
+    auditRead('projects:add-funding', { entity: 'project_funding', entityId: result.id, result: 'created', detail: 'project=' + result.projectId });
+    return result;
+  });
+
+  ipcMain.handle('projects:resolve-quality', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('تسوية ملاحظات الجودة تتطلب وضع المالك.');
+    const db = requireDatabase();
+    const result = canonicalData.resolveProjectQualityIssue(db, request.projectId, request.issueId, request.resolution);
+    auditRead('projects:resolve-quality', { entity: 'data_quality_issues', entityId: result.issueId, result: 'resolved', detail: 'project=' + result.projectId });
+    return result;
+  });
+
+  ipcMain.handle('projects:add-attachment', async (_event, projectId) => {
+    if (currentProfile() !== 'owner') throw new Error('إرفاق الملفات يتطلب وضع المالك.');
+    const db = requireDatabase();
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'اختر مرفقًا للمشروع',
+      properties: ['openFile'],
+      filters: [{ name: 'صور أو مستندات', extensions: ['pdf', 'png', 'jpg', 'jpeg', 'webp'] }],
+    });
+    if (canceled || !filePaths.length) return { canceled: true };
+    const selected = path.resolve(filePaths[0]);
+    const stats = fs.lstatSync(selected);
+    if (!stats.isFile() || stats.isSymbolicLink()) throw new Error('المرفق المحدد ليس ملفًا عاديًا.');
+    if (stats.size <= 0 || stats.size > canonicalData.LIMITS.mediaItemBytes) throw new Error('حجم المرفق يجب أن يكون بين بايت واحد و20 ميغابايت.');
+    const content = fs.readFileSync(selected);
+    const result = canonicalData.addProjectAttachment(db, projectId, { originalName: path.basename(selected), content });
+    auditRead('projects:add-attachment', { entity: 'managed_attachments', entityId: result.id, result: 'created', detail: 'project=' + result.projectId });
+    return { canceled: false, ...result };
+  });
+
+  ipcMain.handle('projects:export-attachment', async (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('تصدير المرفقات يتطلب وضع المالك.');
+    const attachment = canonicalData.getProjectAttachment(requireDatabase(),request.projectId,request.attachmentId);
+    const extension = String(attachment.extension ?? '').replace(/^\./,'').toLowerCase();
+    if (!['pdf','png','jpg','jpeg','webp'].includes(extension)) throw new Error('امتداد المرفق المحفوظ غير مدعوم للتصدير.');
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'حفظ نسخة من المرفق',
+      defaultPath: attachment.original_name,
+      filters: [{ name: 'مرفق محفوظ', extensions: [extension] }],
+    });
+    if (canceled || !filePath) return { canceled: true };
+    const target = path.resolve(filePath);
+    try {
+      const stats = fs.lstatSync(target);
+      if (stats.isSymbolicLink() || stats.isDirectory()) throw new Error('مسار التصدير يجب أن يكون ملفًا عاديًا.');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    await fs.promises.writeFile(target,attachment.content,{ mode: 0o600 });
+    auditRead('projects:export-attachment',{ entity:'managed_attachments',entityId:attachment.id,result:'exported',detail:'project='+request.projectId+';sha256='+attachment.sha256 });
+    return { canceled:false,filePath:target,originalName:attachment.original_name,sizeBytes:attachment.size_bytes };
+  });
+
   ipcMain.handle('import:regions', (_event, request = {}) => {
     if (currentProfile() !== 'owner') {
       return { restricted: true, message: 'مراجعة وربط الجداول غير المصنفة متاحان في وضع المالك فقط.' };
@@ -602,6 +703,19 @@ function registerHandlers() {
     invalidateSheets();
     auditRead('import:promote-projects', {
       entity: 'projects', rowCount: result.applied.length,
+      result: result.refused.length ? 'partial' : 'ok',
+      detail: 'batch=' + request.batchId + ';region=' + request.regionId + ';refused=' + result.refused.length,
+    });
+    return result;
+  });
+
+  ipcMain.handle('import:promote-indicators', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('اعتماد المؤشرات يتطلب وضع المالك.');
+    const db = requireDatabase();
+    const result = canonicalData.promoteIndicatorRegion(db, request);
+    invalidateSheets();
+    auditRead('import:promote-indicators', {
+      entity: 'indicator_observations', rowCount: result.applied.length,
       result: result.refused.length ? 'partial' : 'ok',
       detail: 'batch=' + request.batchId + ';region=' + request.regionId + ';refused=' + result.refused.length,
     });
@@ -916,7 +1030,64 @@ function registerHandlers() {
     return { canceled: false, filePath };
   });
 
+  ipcMain.handle('analysis:export-filtered-pdf', async (_event, request = {}) => {
+    const db = requireDatabase();
+    const profile = security.getAccessProfile(db);
+    const input = request && typeof request === 'object' ? request : {};
+    if (!['database', 'indicators'].includes(input.type)) throw new Error('نوع التقرير المطلوب غير صالح.');
+    const filters = input.filters && typeof input.filters === 'object' ? input.filters : {};
+    const search = typeof filters.search === 'string' ? filters.search.trim().slice(0, 200) : '';
+    const governorate = typeof filters.governorate === 'string' ? filters.governorate.trim().slice(0, 120) : '';
+    const allColumns = filters.allColumns === true;
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'تصدير التقرير المخصص',
+      defaultPath: `تقرير-${input.type === 'indicators' ? 'المؤشرات' : 'قاعدة-البيانات'}-${new Date().toISOString().slice(0, 10)}.pdf`,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    });
+    if (canceled || !filePath) return { canceled: true };
+
+    let result;
+    if (input.type === 'database') {
+      const rows = persist.listDirectorates(db, { search, governorate, limit: 3000 });
+      const masked = maskDbRows(rows, profile);
+      const defaultKeys = new Set([
+        'districtName', 'governorate', 'population', 'waterCoverage', 'pavedRoads',
+        'revenue', 'schools', 'govFacilities', 'valueChains', 'projectCost', 'projectStatus',
+      ]);
+      const fields = INPUT_FIELDS.filter((field) => allColumns || defaultKeys.has(field.key));
+      result = await exportDatabaseReportPdf({ BrowserWindow }, filePath, {
+        rows: masked.rows,
+        columns: fields.map((field) => ({ key: field.key, header: field.header, type: field.type, dbColumn: COLUMN_BY_KEY[field.key] })),
+        filters: { search, governorate, allColumns },
+      });
+      auditRead('analysis:export-filtered-pdf', {
+        entity: 'directorates', rowCount: rows.length, fields: masked.masked.join(','),
+        result: masked.masked.length ? 'masked' : 'ok', detail: 'type=database',
+      });
+    } else if (input.type === 'indicators') {
+      const view = ['values', 'scores', 'contributions'].includes(input.view) ? input.view : 'values';
+      const payload = sheetPayloads().indicators;
+      const rows = payload.rows.filter((row) => (!governorate || row.governorate === governorate)
+        && (!search || `${row.districtName} ${row.governorate}`.includes(search)));
+      result = await exportIndicatorsReportPdf({ BrowserWindow }, filePath, {
+        rows, registry: payload.registry, filters: { search, governorate }, view,
+      });
+      auditRead('analysis:export-filtered-pdf', {
+        entity: 'directorates', rowCount: rows.length, result: profile === 'shared' ? 'masked' : 'ok',
+        detail: `type=indicators;view=${view}`,
+      });
+    } else {
+      throw new Error('نوع التقرير المطلوب غير صالح.');
+    }
+    persist.logAccess(db, {
+      action: 'export-pdf', entity: 'file', entityId: filePath,
+      detail: `profile=${profile};type=${input.type};search=${Boolean(search)};governorate=${Boolean(governorate)}`,
+    });
+    return { canceled: false, ...result };
+  });
+
   ipcMain.handle('analysis:export-pdf', async () => {
+
     const db = requireDatabase();
     const profile = security.getAccessProfile(db);
     const source = lastAnalysis ?? rebuildAnalysis(db);

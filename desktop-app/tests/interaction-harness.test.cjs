@@ -9,6 +9,7 @@ const root = path.join(__dirname, '..');
 const harness = fs.readFileSync(path.join(root, 'scripts/e2e-analysis.cjs'), 'utf8');
 const main = fs.readFileSync(path.join(root, 'src/main/main.cjs'), 'utf8');
 const offlinePolicy = fs.readFileSync(path.join(root, 'src/main/offline-policy.cjs'), 'utf8');
+const releaseWorkflow = fs.readFileSync(path.join(root, '../.github/workflows/release.yml'), 'utf8');
 
 test('Electron E2E drives real pointer input and checks the true hit target', () => {
   assert.match(harness, /sendInputEvent\(\{ type: 'mouseMove'/);
@@ -53,4 +54,18 @@ test('Electron E2E opens the native file dialog path and verifies the workbook i
 test('Electron E2E checks keyboard focus visibility', () => {
   assert.match(harness, /keyCode: 'TAB'/);
   assert.match(harness, /:focus-visible/);
+});
+
+test('Electron E2E verifies the new data review screens with real interactions', () => {
+  assert.match(harness, /سجل قياسات المؤشرات/);
+  assert.match(harness, /جودة البيانات/);
+  assert.match(harness, /تسوية مع حفظ السبب/);
+  assert.match(harness, /حفظ القياس/);
+});
+
+test('Windows release workflow builds the renderer before launching Electron E2E', () => {
+  const tests = releaseWorkflow.indexOf('name: Run unit and integration tests');
+  const build = releaseWorkflow.indexOf('name: Build renderer');
+  const e2e = releaseWorkflow.indexOf('name: Run full Electron end-to-end checks');
+  assert.ok(tests >= 0 && build > tests && e2e > build);
 });

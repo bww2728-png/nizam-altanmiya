@@ -86,7 +86,10 @@ export default function Database({ catalogue, notify, refreshKey, onOpenCard }) 
 
   async function exportPdf() {
     try {
-      const result = await window.localApp.exportAnalysisPdf();
+      const result = await window.localApp.exportFilteredPdf({
+        type: 'database',
+        filters: { search: search.trim(), governorate, allColumns },
+      });
       if (!result?.canceled) notify?.({ tone: 'ok', message: `صُدّر التقرير إلى ${result.filePath}` });
     } catch (cause) {
       notify?.({ tone: 'bad', message: errText(cause) || 'تعذر تصدير التقرير.' });

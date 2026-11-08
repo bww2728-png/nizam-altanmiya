@@ -26,11 +26,22 @@ contextBridge.exposeInMainWorld('localApp', {
   importPlan: () => ipcRenderer.invoke('import:plan'),
   canonicalProjects: (request) => ipcRenderer.invoke('projects:list', request),
   canonicalProject: (projectId) => ipcRenderer.invoke('projects:get', projectId),
+  canonicalProjectReferences: () => ipcRenderer.invoke('projects:references'),
+  indicatorObservations: (request) => ipcRenderer.invoke('observations:list', request),
+  saveIndicatorObservation: (request) => ipcRenderer.invoke('observations:save', request),
+  dataQualityIssues: (request) => ipcRenderer.invoke('quality:list', request),
+  resolveDataQualityIssue: (request) => ipcRenderer.invoke('quality:resolve', request),
+  saveCanonicalProject: (request) => ipcRenderer.invoke('projects:save', request),
+  addProjectFunding: (request) => ipcRenderer.invoke('projects:add-funding', request),
+  resolveProjectQualityIssue: (request) => ipcRenderer.invoke('projects:resolve-quality', request),
+  addProjectAttachment: (projectId) => ipcRenderer.invoke('projects:add-attachment', projectId),
+  exportProjectAttachment: (request) => ipcRenderer.invoke('projects:export-attachment', request),
   importHistory: (request) => ipcRenderer.invoke('import:history', request),
   importSheetPreview: (request) => ipcRenderer.invoke('import:sheet-preview', request),
   importRegions: (request) => ipcRenderer.invoke('import:regions', request),
   importRegionPreview: (request) => ipcRenderer.invoke('import:region-preview', request),
   promoteProjects: (request) => ipcRenderer.invoke('import:promote-projects', request),
+  promoteIndicators: (request) => ipcRenderer.invoke('import:promote-indicators', request),
   applyImport: (request) => ipcRenderer.invoke('import:apply', request),
   // Push channel from the scan (reading -> plan -> done). Returns an unsubscribe
   // function so unmounting a page cannot leak listeners.
@@ -66,6 +77,7 @@ contextBridge.exposeInMainWorld('localApp', {
   // Exports
   exportAnalysisExcel: () => ipcRenderer.invoke('analysis:export-excel'),
   exportAnalysisPdf: () => ipcRenderer.invoke('analysis:export-pdf'),
+  exportFilteredPdf: (request) => ipcRenderer.invoke('analysis:export-filtered-pdf', request),
 
   // Automatic updates (GitHub Releases)
   updateStatus: () => ipcRenderer.invoke('update:status'),

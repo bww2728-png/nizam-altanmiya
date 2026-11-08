@@ -12,6 +12,7 @@
 
 const { DIRECTORATE_COLUMNS } = require('./store-schema.cjs');
 const { INPUT_FIELDS, DECISION_FIELD } = require('./schema.cjs');
+const canonicalData = require('./canonical-data.cjs');
 const { parseFieldValue } = require('./parse.cjs');
 
 const FIELD_BY_KEY = new Map(INPUT_FIELDS.map((field) => [field.key, field]));
@@ -141,6 +142,7 @@ function upsertDirectorate(database, record, meta = {}) {
     if (meta.warnings !== undefined) { assignments.push('import_warnings = ?'); updateParams.push(safeJson(meta.warnings, '[]')); }
     database.prepare(`UPDATE directorates SET ${assignments.join(', ')} WHERE id = ?`).run(...updateParams, existing.id);
     saveProvenance(database, existing.id, record, rawValues, sources, meta);
+    canonicalData.syncLegacyDirectorate(database, existing.id);
     return { id: existing.id, created: false };
   }
 
@@ -152,6 +154,7 @@ function upsertDirectorate(database, record, meta = {}) {
     .run(...insertParams);
   const id = Number(info.lastInsertRowid);
   saveProvenance(database, id, record, rawValues, sources, meta);
+  canonicalData.syncLegacyDirectorate(database,id);
   return { id, created: true };
 }
 
@@ -239,26 +242,68 @@ function upsertDirectorates(database, read) {
   return { created, updated, total: rows.length, duplicates, stale };
 }
 
-/** All stored directorates, joined with their main indicator inputs. */
-function listDirectorates(database, filter = {}) {
+function canonicalDirectorateRows(database, filter = {}, limit = 50000) {
   const governorate = filter.governorate ? String(filter.governorate).trim() : null;
   const search = filter.search ? String(filter.search).trim() : null;
-  const limit = Math.min(5000, Math.max(1, Number(filter.limit) || 2000));
-  const clauses = [];
+  const bounded = Math.min(50000,Math.max(1,Number(limit) || 50000));
+  const clauses = ["er.entity_type='directorate'","er.status='approved'"];
   const params = [];
-  if (governorate) { clauses.push('governorate = ?'); params.push(governorate); }
+  if (governorate) { clauses.push('governorate.name=?'); params.push(governorate); }
   if (search) {
-    const escaped = search.replace(/[\\%_]/g, '\\$&');
-    clauses.push("district LIKE ? ESCAPE '\\'");
-    params.push(`%${escaped}%`);
+    const escaped = search.replace(/[\\%_]/g,'\\$&');
+    clauses.push("unit.name LIKE ? ESCAPE '\\'");
+    params.push('%' + escaped + '%');
   }
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  params.push(limit);
-  return database.prepare(`SELECT * FROM directorates ${where} ORDER BY governorate, district LIMIT ?`).all(...params);
+  params.push(bounded);
+  const records = database.prepare(`SELECT er.id AS entity_id,er.external_key,er.created_at,er.updated_at,unit.name AS district,governorate.name AS governorate FROM entity_records er JOIN geographic_units unit ON unit.id=er.geographic_unit_id LEFT JOIN geographic_units governorate ON governorate.id=unit.parent_id WHERE ${clauses.join(' AND ')} ORDER BY governorate.name,unit.name LIMIT ?`).all(...params);
+  if (!records.length) return [];
+  const parsed = records.map(record => ({
+    ...record,
+    id: Number(String(record.external_key ?? '').match(/^legacy-directorate:(\d+)$/)?.[1]),
+  })).filter(record => Number.isSafeInteger(record.id) && record.id > 0);
+  if (!parsed.length) return [];
+  const ids = parsed.map(record => record.entity_id);
+  const placeholders = ids.map(() => '?').join(',');
+  const values = database.prepare(`SELECT value.record_id,definition.field_key,definition.data_type,value.value_text,value.value_number,value.value_boolean,value.value_state FROM entity_field_values value JOIN data_field_definitions definition ON definition.id=value.field_definition_id WHERE definition.entity_type='directorate' AND value.record_id IN (${placeholders}) AND value.period_key=''`).all(...ids);
+  const valuesByRecord = new Map(parsed.map(record => [record.entity_id,{}]));
+  for (const value of values) {
+    if (value.value_state === 'unknown') continue;
+    const stored = value.data_type === 'number' ? value.value_number
+      : value.data_type === 'boolean' ? value.value_boolean
+        : value.value_text;
+    valuesByRecord.get(value.record_id)[value.field_key] = stored;
+  }
+  const legacyIds = parsed.map(record => record.id);
+  const legacyPlaceholders = legacyIds.map(() => '?').join(',');
+  const metadata = database.prepare(`SELECT id,source_file,source_sheet,source_row,import_warnings FROM directorates WHERE id IN (${legacyPlaceholders})`).all(...legacyIds);
+  const metaById = new Map(metadata.map(record => [record.id,record]));
+  return parsed.map(record => {
+    const legacy = metaById.get(record.id) ?? {};
+    const output = {
+      id: record.id,governorate: record.governorate ?? '',district: record.district,
+      source_file: legacy.source_file ?? null,source_sheet: legacy.source_sheet ?? null,
+      source_row: legacy.source_row ?? null,import_warnings: legacy.import_warnings ?? '[]',
+      created_at: record.created_at,updated_at: record.updated_at,
+    };
+    const valuesForRecord = valuesByRecord.get(record.entity_id) ?? {};
+    for (const [key,column] of COLUMN_ENTRIES) output[column] = valuesForRecord[key] ?? null;
+    output.district = record.district;
+    output.governorate = record.governorate ?? '';
+    return output;
+  });
 }
 
-function countDirectorates(database) {
-  return database.prepare('SELECT COUNT(*) AS count FROM directorates').get().count;
+function listDirectorates(database, filter = {}) {
+  const limit = Math.min(5000,Math.max(1,Number(filter.limit) || 2000));
+  return canonicalDirectorateRows(database,filter,limit);
+}
+
+function countDirectorates(database, filter = {}) {
+  const governorate = filter.governorate ? String(filter.governorate).trim() : null;
+  const clauses = ["er.entity_type='directorate'","er.status='approved'","er.external_key GLOB 'legacy-directorate:[0-9]*'"];
+  const params = [];
+  if (governorate) { clauses.push('governorate.name=?'); params.push(governorate); }
+  return database.prepare(`SELECT COUNT(*) AS count FROM entity_records er JOIN geographic_units unit ON unit.id=er.geographic_unit_id LEFT JOIN geographic_units governorate ON governorate.id=unit.parent_id WHERE ${clauses.join(' AND ')}`).get(...params).count;
 }
 
 /** Convert a stored directorate row back into the engine's input shape. */
@@ -299,18 +344,11 @@ function rowFromDirectorate(record) {
  * of the 2 000-row paging limit used for the UI list.
  */
 function loadAnalysisRows(database, filter = {}) {
-  const governorate = filter.governorate ? String(filter.governorate).trim() : null;
-  const clauses = [];
-  const params = [];
-  if (governorate) { clauses.push('governorate = ?'); params.push(governorate); }
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const rows = database
-    .prepare(`SELECT * FROM directorates ${where} ORDER BY governorate, district LIMIT ${ANALYSIS_ROW_CAP + 1}`)
-    .all(...params);
-  if (rows.length > ANALYSIS_ROW_CAP) {
+  const total = Number(countDirectorates(database));
+  if (total > ANALYSIS_ROW_CAP) {
     throw new Error(`عدد المديريات يتجاوز الحد الآمن للتحليل (${ANALYSIS_ROW_CAP}). جزّئ البيانات أو صفِّ حسب المحافظة قبل التحليل.`);
   }
-  return rows.map(rowFromDirectorate);
+  return canonicalDirectorateRows(database,filter,ANALYSIS_ROW_CAP).map(rowFromDirectorate);
 }
 
 /**
@@ -616,6 +654,7 @@ function restoreDirectorateVersion(database, versionId) {
     for (const source of sources) {
       insert.run(record.id, source.field_key, source.value_text ?? null, source.source_file ?? null, source.source_location ?? null, source.data_value_id ?? null, nowIso());
     }
+    canonicalData.syncLegacyDirectorate(database,record.id,{ force: true });
 
     logAccess(database, {
       action: 'directorate-restore',
@@ -909,6 +948,7 @@ function saveManualDirectorate(database, request = {}) {
         timestamp,
       );
 
+    canonicalData.syncLegacyDirectorate(database,targetId);
     return { id: targetId, created };
   });
 
@@ -937,6 +977,7 @@ function deleteDirectorate(database, id) {
     database.prepare('UPDATE analysis_results SET directorate_id = NULL WHERE directorate_id = ?').run(numeric);
     database.prepare('DELETE FROM directorate_sources WHERE directorate_id = ?').run(numeric);
     database.prepare('DELETE FROM directorates WHERE id = ?').run(numeric);
+    canonicalData.retireLegacyDirectorate(database,numeric);
     database
       .prepare('INSERT INTO access_log (action, entity, entity_id, fields, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run('manual-delete', 'directorates', String(numeric), '', `district=${record.district};governorate=${record.governorate}`, nowIso());

@@ -8,9 +8,9 @@ This document records the additive data model introduced for the offline desktop
 
 ### Existing analysis compatibility
 
-The current ranking, dashboards, correction form and exported reports still use the legacy `directorates` analysis tables. Their calculations are based on the existing directorate field catalogue and indicator definitions. This implementation has **not** migrated the current analysis engine to the new normalized entities, because doing so without an agreed identity catalogue, period semantics, project identity rules and a verified migration could change established results.
+The ranking and dashboard analysis now load approved directorate values from `entity_records` and `entity_field_values`; a compatibility bridge still syncs legacy imports and manual edits into that model and preserves the legacy IDs used by analysis history and exports. The current correction form and operational import plan still use legacy directorate persistence as the write-compatible interface. Historical observations whose reference period was never recorded remain explicitly marked as unspecified; migration does not invent dates or alter accepted analysis rules.
 
-The new model is added alongside those tables. Migrations are additive and idempotent. Existing directorate values, analysis runs and audit history are not dropped or rewritten by this change.
+The new model is additive and idempotent. Canonical schema creation and legacy backfill run in one SQLite transaction, so a uniqueness or data-integrity failure rolls back the migration rather than leaving a partially created canonical model. Existing directorate values, analysis runs and audit history are not dropped or rewritten.
 
 ### Canonical relational schema
 
@@ -39,7 +39,7 @@ The import IPC path now:
 4. Inventories every worksheet within documented bounds, including hidden state, dimensions, non-empty rows/cells, candidate headers, formula counts, hidden rows, merged ranges, Excel tables, media and image anchors where the library exposes them.
 5. Stores each scanned non-empty row and cell with its address, row/column, cell type, raw representation, readable text, formula, cached result and note/comment when available.
 6. Stores extractable embedded image bytes separately, with SHA-256 and anchor metadata if available. Assets without a trustworthy worksheet/row anchor remain unassigned.
-7. Creates the existing directorate review plan separately. The legacy directorate importer still requires explicit user approval. Project-candidate regions have a separate owner-only mapping and row-approval path into the canonical projects tables. Indicator and generic regions remain staged and unapproved.
+7. Creates the existing directorate review plan separately. The legacy directorate importer still requires explicit user approval. Project-candidate regions have an owner-only mapping and row-approval path into canonical projects; indicator-candidate regions have a separate owner-only mapping and explicit row-approval path into dated canonical observations. Other regions remain staged and unapproved.
 8. Updates the intake batch status after the directorate review action and displays a durable intake history.
 
 Staging is transactional: if the file exceeds a scan cap before the write transaction begins, no partial staging batch is committed. The original source file is retained in the encrypted database so the source package can be re-examined without relying on the original path.
@@ -52,7 +52,11 @@ In owner mode, the intake screen exposes each discovered project region, a bound
 
 The promotion service currently handles project identity, description/status, estimated and actual costs, currency, ISO-like dates, optional geographic/sector references, and an optional funding partner/amount/currency. It refuses hidden rows, formula-bearing rows, invalid numeric/date values, duplicate project codes, and rows already promoted. It writes projects, funding, source references, row-to-entity promotion records, and unresolved geographic/sector quality issues in a database transaction. The original workbook, cell provenance, selected mapping and source row location remain traceable.
 
-This is deliberately a bounded first entity-specific path. It is not yet a universal import engine: indicator observations, generic entity records, field-level tri-state values, user-defined dictionaries, and attachment-to-entity approval remain separate work. Unmatched geography/sector text is recorded as a quality issue and is not converted into an invented reference.
+The project register supports owner-only manual create/update through the same main-process validation used for project fields: required identity, numeric and currency checks, date ordering, and reference validation. Each manual operation creates a data-source record; edits preserve a pre-change snapshot in `project_versions`. Funding can be added with its own amount/currency/date and provenance. A user-selected PDF, PNG, JPEG or WebP attachment is signature-checked, deduplicated by SHA-256, stored as a BLOB in the encrypted database, and explicitly linked to the open project. The owner can export an attachment only through a save dialog; content length and SHA-256 are checked before writing, and the export is audited. Project-linked quality issues can be resolved with a required rationale and timestamp; the resolution is audited. Inline preview is not implemented.
+
+Indicator-candidate regions can be explicitly mapped to a seeded indicator definition, canonical geographic unit, period, value and optional unit. Only individually approved rows with a unique indicator/geography/period key and a valid source mapping are promoted. Ambiguous geography, unknown indicators, hidden/formula-bearing rows, invalid values and duplicate observations remain unpromoted with a row-specific reason.
+
+This remains a bounded entity-specific implementation, not a universal import engine. Generic entity regions, field-level tri-state promotion and user-managed dictionaries remain out of scope. Unmatched geography or sector text is recorded as a quality issue and is not converted into an invented reference. Workbook images are retained with available provenance, but semantic linking requires a separate explicit review path.
 
 ## Offline-only runtime enforcement
 
@@ -74,22 +78,19 @@ Reaching a cap sets the result as truncated (or rejects a limit breach before st
 
 ExcelJS does not guarantee that every drawing in every Excel-generated workbook is exposed through the same worksheet image-anchor API. Therefore image bytes and anchor metadata are kept separate, and no image is linked to a project or geographic record solely by proximity or guesswork. Formulas are recorded, not evaluated; cached values are retained as evidence only.
 
-The new indicator and generic-entity tables remain schema foundations rather than live import destinations. Project regions have a bounded review and promotion path, but the app does not yet provide complete indicator-observation or generic-entity mapping and approval, nor manual editing for all entity types. This change does not implement OCR.
+Manual indicator observations are available in a separate owner-only, paged register. Creates and edits validate an active indicator, an existing district, a required period and a unique indicator/district/period key; percentage values cannot exceed 100. Every save records a data source, and updates snapshot the previous observation in `indicator_observation_versions`. The register shows source and version count, but these observations are intentionally not yet included in the existing analysis dashboards or ranking calculations. The owner-only data-quality register lists open/resolved findings with workbook, row, field and promoted-entity context where available; resolution requires a rationale and timestamp and is auditable. Generic entity regions remain staged without promotion. The app does not implement OCR; workbook images are not automatically attached to semantic records, and project attachments can be exported but not previewed inline.
 
 ## Next engineering steps
 
-1. Define the authoritative geographic reference catalogue and stable IDs; avoid matching only on names.
-2. Define data dictionaries for project, funding, sector, indicator, source and attachment fields, including units, currency, period type, value state and validation rules.
-3. Extend the existing import-region review UI to indicator and generic-record classes. Each region must be independently classified, mapped, scored and approved. Unknown headers and uncertain identity matches remain unresolved.
-4. Build entity-specific promotion for indicator observations and generic records, while extending the existing project path only when new fields have agreed semantics. Preserve absent field, explicit blank, zero, unknown, not-applicable and deliberate deletion as distinct states.
-5. Add manual create/update screens that use the same canonical validation and provenance services as Excel imports.
-6. Add managed attachment browsing, preview, export, and explicit reviewed linking to a project/geographic entity. Add Arabic OCR only as an optional proposal requiring human confirmation.
-7. Implement field-, record-, dataset-, source- and time-level validation and duplicate/conflict review. Do not infer factual accuracy from format checks alone.
-8. Add data migration from the legacy directorate tables with reconciled row counts and analysis regression tests before switching dashboards/ranking to canonical values.
-9. Complete managed attachment browsing and explicit review/linking to projects and geographic entities. Binary staging is not proof of semantic attachment.
-10. Add OS-level egress restrictions and verify them on the target Windows image; runtime guards alone do not prevent native or operating-system networking.
-11. Finish IPC authorization, accessibility, performance, and signed Windows packaging.
+1. Define authoritative geographic references and stable official IDs; do not make non-exact name matches authoritative.
+2. Complete data dictionaries and shared validation semantics for all current directorate fields and additional entities, including measurement periods and units.
+3. Add generic-record and source-region review/promotion, with explicit rules for absent, blank, zero, unknown, not-applicable and deliberate deletion states.
+4. Connect approved indicator observations to user-facing analysis and exports only after an explicit methodology and compatibility review; do not silently change legacy calculations.
+5. Add in-app preview and classification for project attachments; workbook media must require explicit review before linking to a project or geographic record.
+6. Reconcile legacy-to-canonical migrations for stable IDs, old field semantics and unspecified temporal periods, and extend analysis regression coverage.
+7. Add OS-level egress restrictions and verify them on the target Windows image; runtime guards alone do not prevent native or operating-system networking.
+8. Finish accessibility, large-workbook performance, Windows backup/restore and signed-package validation.
 
 ## Test coverage added
 
-`canonical-data.test.cjs` verifies additive/idempotent migrations, seeding of existing directorate fields and indicators, durable source-byte and cell provenance storage, hidden worksheet/row handling, formulas, merged ranges, embedded images, review-only staging, project-region mapping and promotion guards, provenance, funding linkage and rejection of empty files. `hardening.test.cjs` covers encrypted backup/restore bundles. The repository CI must pass on both Windows and Linux before this change is considered verified.
+`canonical-data.test.cjs` verifies additive/idempotent and rollback-safe migrations, seeding of directorate fields and indicators, canonical-source analysis reads, durable source-byte/cell provenance, hidden worksheet/row handling, formulas, merged ranges and embedded images, explicit project and indicator promotion, manual observation validation/version retention, paged observation reads, quality-issue listing/resolution, project funding and attachment validation/storage/export integrity, prior-version retention and empty-file rejection. `import-staging-wiring.test.cjs` verifies owner-gated project, attachment-export, observation and quality IPC and renderer wiring. `hardening.test.cjs` covers encrypted backup/restore bundles. The repository CI must pass on both Windows and Linux before this change is considered verified.
