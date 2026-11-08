@@ -10,6 +10,8 @@ const main = fs.readFileSync(path.join(ROOT, 'src/main/main.cjs'), 'utf8');
 const preload = fs.readFileSync(path.join(ROOT, 'src/main/preload.cjs'), 'utf8');
 const ui = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/Import.jsx'), 'utf8');
 const shell = fs.readFileSync(path.join(ROOT, 'src/renderer/components/AppShell.jsx'), 'utf8');
+const app = fs.readFileSync(path.join(ROOT, 'src/renderer/App.jsx'), 'utf8');
+const projects = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/Projects.jsx'), 'utf8');
 
 test('main process durably stages a workbook before constructing the directorate review plan', () => {
   const scanStart = main.indexOf("ipcMain.handle('import:scan'");
@@ -80,5 +82,23 @@ test('full database backups and restore are blocked in shared mode at IPC and UI
   assert.match(shell, /profile !== 'shared'/);
   assert.match(shell, /aria-label="إنشاء نسخة احتياطية الآن"/);
   assert.match(shell, /aria-label="استعادة نسخة احتياطية"/);
+});
+
+
+
+test('canonical project register is routed, paged, owner-gated and displays provenance', () => {
+  assert.match(main, /ipcMain\.handle\('projects:list'/);
+  assert.match(main, /ipcMain\.handle\('projects:get'/);
+  assert.match(main, /canonicalData\.listCanonicalProjects/);
+  assert.match(main, /canonicalData\.getCanonicalProject/);
+  assert.match(preload, /canonicalProjects: \(request\) => ipcRenderer\.invoke\('projects:list', request\)/);
+  assert.match(preload, /canonicalProject: \(projectId\) => ipcRenderer\.invoke\('projects:get', projectId\)/);
+  assert.match(app, /case 'projects'/);
+  assert.match(app, /<Projects notify=\{notify\} refreshKey=\{refreshKey\} \/>/);
+  assert.match(shell, /id: 'projects', label: 'سجل المشاريع'/);
+  assert.match(projects, /window\.localApp\.canonicalProjects/);
+  assert.match(projects, /window\.localApp\.canonicalProject/);
+  assert.match(projects, /مصدر البيانات/);
+  assert.match(projects, /التحرير اليدوي وسير اعتماد التعديلات لم يُفعّلا بعد/);
 });
 
