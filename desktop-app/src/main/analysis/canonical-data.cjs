@@ -42,6 +42,8 @@ const TABLES = [
   "CREATE TABLE IF NOT EXISTS workbook_import_regions (id INTEGER PRIMARY KEY, batch_id INTEGER NOT NULL REFERENCES workbook_import_batches(id) ON DELETE CASCADE, sheet_id INTEGER NOT NULL REFERENCES workbook_import_sheets(id) ON DELETE CASCADE, region_index INTEGER NOT NULL, header_row INTEGER NOT NULL, first_data_row INTEGER NOT NULL, last_data_row INTEGER NOT NULL, candidate_type TEXT NOT NULL DEFAULT 'unclassified', match_count INTEGER NOT NULL DEFAULT 0, confidence REAL NOT NULL DEFAULT 0, mapping_json TEXT NOT NULL, review_status TEXT NOT NULL DEFAULT 'unmapped', UNIQUE(sheet_id, region_index))",
   "CREATE TABLE IF NOT EXISTS workbook_import_rows (id INTEGER PRIMARY KEY, batch_id INTEGER NOT NULL REFERENCES workbook_import_batches(id) ON DELETE CASCADE, sheet_id INTEGER NOT NULL REFERENCES workbook_import_sheets(id) ON DELETE CASCADE, row_number INTEGER NOT NULL, is_hidden INTEGER NOT NULL DEFAULT 0, cell_count INTEGER NOT NULL DEFAULT 0, has_formula INTEGER NOT NULL DEFAULT 0, cells_json TEXT NOT NULL, content_sha256 TEXT NOT NULL, UNIQUE(sheet_id, row_number))",
   "CREATE INDEX IF NOT EXISTS workbook_import_rows_batch_idx ON workbook_import_rows(batch_id, sheet_id, row_number)",
+  "CREATE TABLE IF NOT EXISTS workbook_import_promotions (id INTEGER PRIMARY KEY, batch_id INTEGER NOT NULL REFERENCES workbook_import_batches(id) ON DELETE CASCADE, region_id INTEGER NOT NULL REFERENCES workbook_import_regions(id) ON DELETE CASCADE, row_id INTEGER NOT NULL REFERENCES workbook_import_rows(id) ON DELETE CASCADE, entity_type TEXT NOT NULL, target_id INTEGER NOT NULL, source_location TEXT NOT NULL, mapping_json TEXT NOT NULL, mapped_values_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(row_id))",
+  "CREATE INDEX IF NOT EXISTS workbook_import_promotions_target_idx ON workbook_import_promotions(entity_type, target_id)",
   "CREATE TABLE IF NOT EXISTS workbook_import_media (id INTEGER PRIMARY KEY, batch_id INTEGER NOT NULL REFERENCES workbook_import_batches(id) ON DELETE CASCADE, sheet_id INTEGER REFERENCES workbook_import_sheets(id) ON DELETE SET NULL, media_index INTEGER NOT NULL, original_name TEXT NOT NULL, extension TEXT, mime_type TEXT, size_bytes INTEGER NOT NULL DEFAULT 0, sha256 TEXT, content BLOB, anchors_json TEXT NOT NULL DEFAULT '[]', extraction_status TEXT NOT NULL DEFAULT 'stored', UNIQUE(batch_id, media_index))"
 ];
 
@@ -169,11 +171,39 @@ async function stageWorkbook(database, filePath, workbookOption = null) {
       const labels = [];
       for (let col = 1; col <= colLimit; col++) labels.push(plainText(sheet.getRow(rn).getCell(col).value));
       const mapping = mapHeaderRow(labels);
-      if (mapping.matched.length < 2) continue;
+      const nonemptyHeaders = labels.map(value => String(value ?? '').trim()).filter(Boolean);
+      const normalizedHeaders = nonemptyHeaders.map(normalizeLabel);
+      const distinctHeaders = new Set(normalizedHeaders);
+      const hasDataBelow = [rn + 1, rn + 2, rn + 3].some((sampleRow) => {
+        if (sampleRow > rowLimit) return false;
+        let populated = 0;
+        sheet.getRow(sampleRow).eachCell({ includeEmpty: false }, () => { populated += 1; });
+        return populated >= 2;
+      });
+      // Keep non-ministry datasets discoverable without guessing their schema:
+      // three or more distinct textual headers plus actual tabular data are a
+      // review candidate, never an automatic import decision.
+      const genericHeaderCandidate = mapping.matched.length < 2
+        && nonemptyHeaders.length >= 3
+        && nonemptyHeaders.length <= 40
+        && distinctHeaders.size >= 3
+        && nonemptyHeaders.every(value => value.length <= 100)
+        && hasDataBelow;
+      if (mapping.matched.length < 2 && !genericHeaderCandidate) continue;
       const keys = mapping.matched.map(item => item.key);
+      const normalizedText = normalizedHeaders.join(' ');
+      const isDirectorate = keys.includes('districtName') && keys.includes('governorate');
+      const projectHints = ['اسم المشروع', 'المشروع', 'تكلفه المشروع', 'تكلفه تقديريه', 'حاله المشروع', 'رقم المشروع', 'رمز المشروع'];
+      const indicatorHints = ['اسم المؤشر', 'المؤشر', 'القيمه', 'الفتره', 'السنه', 'نتيجه المؤشر'];
+      const candidateType = isDirectorate ? 'directorate-candidate'
+        : projectHints.some(hint => normalizedText.includes(normalizeLabel(hint))) ? 'project-candidate'
+          : indicatorHints.some(hint => normalizedText.includes(normalizeLabel(hint))) ? 'indicator-candidate'
+            : 'unclassified';
+      const confidence = mapping.matched.length
+        ? mapping.matched.reduce((sum,item) => sum + Number(item.score ?? 0),0) / mapping.matched.length
+        : Math.min(0.8, 0.35 + nonemptyHeaders.length / 100);
       candidates.push({ headerRow: rn, matched: mapping.matched, unmatched: mapping.unmatched,
-        duplicates: mapping.duplicates, candidateType: keys.includes('districtName') && keys.includes('governorate') ? 'directorate-candidate' : 'unclassified',
-        confidence: mapping.matched.reduce((sum,item) => sum + Number(item.score ?? 0),0) / mapping.matched.length });
+        duplicates: mapping.duplicates, candidateType, confidence });
     }
     const regions = candidates.map((candidate, index) => ({ ...candidate, regionIndex: index + 1,
       firstDataRow: candidate.headerRow + 1,
