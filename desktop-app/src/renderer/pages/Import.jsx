@@ -96,6 +96,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
     try {
       const full = await window.localApp.importPlan();
       setFullPlan({ ...full, fileName: plan?.fileName, generatedAt: full?.createdAt });
+      setPage(0);
       notify?.({ tone: 'ok', message: `حُمّلت كل الصفوف (${full.totalRows}).` });
     } catch (cause) {
       setError(errText(cause) || 'تعذر تحميل بقية الصفوف.');
@@ -123,7 +124,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
     } finally {
       setBusy(false);
     }
-  }, [decisions, force, notify, onApplied, rows]);
+  }, [decisions, force, notify, onApplied]);
 
   const visibleRows = useMemo(() => rows.filter((row) => {
     if (hideUnchanged && row.action === 'unchanged') return false;
@@ -140,7 +141,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
     setDecisions((current) => {
       const next = { ...current };
       for (const row of previewRows) {
-        if (row.status !== 'blocked' && row.action !== 'unchanged' && row.action !== 'duplicate') {
+        if (row.status === 'ready' && row.action !== 'unchanged' && row.action !== 'duplicate') {
           next[row.rowNumber] = 'apply';
         }
       }
@@ -272,8 +273,8 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
               <div className="btn-row">
                 <span className="chip">تخطٍّ: {decisionCount.skip}</span>
                 <span className="chip ok">معتمد صراحةً: {decisionCount.apply}</span>
-                <button className="btn small" onClick={approveEligiblePage} disabled={!previewRows.some((row) => row.status !== 'blocked' && row.action !== 'unchanged' && row.action !== 'duplicate')}>
-                  <CheckCircle2 size={14} /> اعتماد المؤهل في هذه الصفحة
+                <button className="btn small" onClick={approveEligiblePage} disabled={!previewRows.some((row) => row.status === 'ready' && row.action !== 'unchanged' && row.action !== 'duplicate')}>
+                  <CheckCircle2 size={14} /> اعتماد الجاهز في هذه الصفحة
                 </button>
                 <button className="btn small ghost" onClick={() => setDecisions({})}>إلغاء كل الاعتمادات</button>
               </div>
