@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document records the additive data model introduced for the offline desktop application and distinguishes what is already executable from the next domain-integration work. Excel is an input format, not the canonical database schema. The encrypted local SQLite database remains the single source of truth for approved application data.
+This document records the additive data model introduced for the local-first desktop application and distinguishes what is already executable from the next domain-integration work. Excel is an input format, not the canonical database schema. The encrypted local SQLite database remains the single source of truth for approved application data.
 
 ## Current implementation
 
@@ -58,11 +58,11 @@ Indicator-candidate regions can be explicitly mapped to a seeded indicator defin
 
 This remains a bounded entity-specific implementation, not a universal import engine. Generic entity regions, field-level tri-state promotion and user-managed dictionaries remain out of scope. Unmatched geography or sector text is recorded as a quality issue and is not converted into an invented reference. Workbook images are retained with available provenance, but semantic linking requires a separate explicit review path.
 
-## Offline-only runtime enforcement
+## Automatic update channel
 
-The main process installs application-layer guards for Node HTTP/HTTPS requests, TCP/TLS connection helpers, DNS resolution, UDP socket creation, global fetch/WebSocket, and Electron net requests. The default Electron session also cancels HTTP, HTTPS and WebSocket requests originating from the renderer. Blocked attempts are recorded in a bounded audit structure that the Electron E2E suite checks.
+The runtime keeps all application data on the device: the SQLite store is encrypted locally and no telemetry, analytics or cloud AI service is called. The single outbound connection the application initiates is the automatic updater, which queries the public GitHub Releases feed (`bww2728-png/nizam-altanmiya`) for a version strictly higher than the installed one and, once downloaded, installs it on quit. `setupAutoUpdate()` in `src/main/main.cjs` performs the first check shortly after launch and repeats every six hours; the state is pushed to the renderer over `update:status`.
 
-This improves the offline guarantee inside the app process; it is not an OS firewall. Native add-ons, separately launched child processes, operating-system services and other applications can bypass JavaScript-level guards. A release deployment that requires a strict no-egress guarantee must also use endpoint firewall policy or an equivalent OS-level network restriction and verify it on the target Windows image. The app does not claim to prove that the whole device is offline.
+There is no application-layer network allow-list: the earlier `offline-policy.cjs` guards were removed by owner decision, so the process can reach the network like any desktop application. The data itself never leaves the device; a machine that requires a strict egress guarantee must enforce it at the OS level (endpoint firewall or equivalent) and verify it on the target Windows image.
 
 ## Encrypted backup and restore
 

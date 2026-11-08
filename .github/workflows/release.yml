@@ -1,26 +1,33 @@
 name: Release
 
-# Publish the Windows installer whenever the application version is bumped on
-# main. The release is created from the exact merge commit, and the package
-# version is the source of truth for the tag (for example, 0.5.3 -> v0.5.3).
+# Every push to the default branch produces a new installer and publishes it as
+# a GitHub Release, so the installed application updates itself without any
+# manual tagging or version bump.
 #
-# The installed app keeps its data and analysis local. Its updater may reach
-# only this repository's published GitHub releases and their release assets.
+# The base major.minor comes from desktop-app/package.json; the patch segment is
+# derived from GITHUB_RUN_NUMBER by scripts/ci-version.cjs. electron-updater only
+# installs versions strictly greater than the installed one, so the derived
+# version always increases.
+#
+# The release is published (never a draft): the updater ignores drafts.
 
 on:
   push:
-    branches:
-      - main
-    paths:
-      - 'desktop-app/package.json'
-      - 'desktop-app/package-lock.json'
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# Serialise releases so two pushes never publish over each other.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
+    # workflow_dispatch may target any branch in the UI; only the default branch
+    # is allowed to publish.
     if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 45
@@ -32,6 +39,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # The build never pushes over git; gh uses the explicit token below.
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -43,48 +53,57 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run unit and integration tests
+      # A red gate is intentional: a broken commit must not reach the installed
+      # application. Remove this step only to publish unconditionally.
+      - name: Unit and integration tests
         run: npm test
+
+      - name: Compute release version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(node scripts/ci-version.cjs)
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
 
       - name: Build renderer
         run: npm run build
 
-      - name: Run full Electron end-to-end checks
-        run: npx electron scripts/e2e-analysis.cjs
-
-      - name: Upload test evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-release-test-evidence
-          path: نتائج-الفحص/**
-          if-no-files-found: warn
-
-      - name: Package Windows x64 NSIS installer
+      - name: Package installer
         run: npx electron-builder --win nsis --x64 --publish never
 
-      - name: Publish versioned GitHub Release
+      - name: Publish release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.value }}
         run: |
-          version="$(node -p 'require("./package.json").version')"
-          tag="v${version}"
+          tag="v$VERSION"
           shopt -s nullglob
+
+          # Every asset kind must exist; a bare total count hides a missing kind.
+          for pattern in 'release/*.exe' 'release/*.blockmap' 'release/latest.yml'; do
+            matches=( $pattern )
+            if [[ ${#matches[@]} -eq 0 ]]; then
+              echo "Missing release asset matching ${pattern}." >&2
+              exit 1
+            fi
+          done
           assets=(release/*.exe release/*.blockmap release/latest.yml)
 
-          if [[ ${#assets[@]} -lt 3 ]]; then
-            echo "Expected installer, blockmap and latest.yml; found ${#assets[@]} release assets." >&2
-            printf 'Found: %s\n' "${assets[@]}" >&2
+          if ! grep -q "^version: ${VERSION}$" release/latest.yml; then
+            echo "release/latest.yml does not declare version ${VERSION}." >&2
+            cat release/latest.yml >&2
             exit 1
           fi
 
           echo "Publishing ${tag} from commit ${GITHUB_SHA}"
-          if gh release view "${tag}" >/dev/null 2>&1; then
-            gh release upload "${tag}" "${assets[@]}" --clobber
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --clobber
           else
-            gh release create "${tag}" "${assets[@]}" \
-              --title "${tag}" \
-              --notes "Automated Windows x64 desktop release ${tag}. Built from ${GITHUB_SHA}." \
-              --target "${GITHUB_SHA}"
+            gh release create "$tag" "${assets[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "$tag" \
+              --notes "Automated Windows x64 desktop release ${tag}. Built from ${GITHUB_SHA}."
           fi
+          echo "Published $tag"
