@@ -27,10 +27,15 @@ test('workbooks without a directorate table are retained as unapproved review ba
   assert.match(main, /pendingPlan\.plan\.rows\?\.length\s*\?/);
 });
 
-test('renderer bridge exposes a bounded workbook intake history query', () => {
+test('renderer bridge exposes import history and owner-only staged sheet previews', () => {
   assert.match(preload, /importHistory: \(request\) => ipcRenderer\.invoke\('import:history', request\)/);
+  assert.match(preload, /importSheetPreview: \(request\) => ipcRenderer\.invoke\('import:sheet-preview', request\)/);
+  assert.match(main, /currentProfile\(\) !== 'owner'/);
+  assert.match(main, /canonicalData\.readWorkbookSheetPreview/);
   assert.match(ui, /function ImportHistory/);
   assert.match(ui, /function DurableStaging/);
+  assert.match(ui, /importSheetPreview/);
+  assert.match(ui, /عرض عينة/);
   assert.match(ui, /plan\.stagingOnly \|\| plan\.totalRows === 0/);
   assert.match(ui, /disabled=\{busy \|\| plan\.stagingOnly \|\| plan\.totalRows === 0\}/);
 });
