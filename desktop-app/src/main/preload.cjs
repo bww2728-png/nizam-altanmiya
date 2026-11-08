@@ -26,6 +26,9 @@ contextBridge.exposeInMainWorld('localApp', {
   importPlan: () => ipcRenderer.invoke('import:plan'),
   importHistory: (request) => ipcRenderer.invoke('import:history', request),
   importSheetPreview: (request) => ipcRenderer.invoke('import:sheet-preview', request),
+  importRegions: (request) => ipcRenderer.invoke('import:regions', request),
+  importRegionPreview: (request) => ipcRenderer.invoke('import:region-preview', request),
+  promoteProjects: (request) => ipcRenderer.invoke('import:promote-projects', request),
   applyImport: (request) => ipcRenderer.invoke('import:apply', request),
   // Push channel from the scan (reading -> plan -> done). Returns an unsubscribe
   // function so unmounting a page cannot leak listeners.
