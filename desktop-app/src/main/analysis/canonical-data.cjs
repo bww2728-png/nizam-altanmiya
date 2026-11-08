@@ -648,15 +648,15 @@ function completeWorkbookImport(database, batchId, result = {}) {
     (Array.isArray(item.refused) && item.refused.length > 0) || Number(item.skipped ?? 0) > 0
   );
   const status = applied > 0 && projectAttempted
-    ? (directorateStatus === 'directorates-partially-applied' || projectPartial
-      ? 'directorates-and-projects-partially-applied' : 'directorates-and-projects-applied')
-    : applied > 0 && projectAttempted
+    ? (!projectHadApplied
       ? 'directorates-applied-project-review-required'
-      : projectAttempted && projectHadApplied
-        ? 'projects-applied-without-directorate-write'
-        : projectAttempted
-          ? 'projects-review-required'
-          : directorateStatus;
+      : (directorateStatus === 'directorates-partially-applied' || projectPartial
+        ? 'directorates-and-projects-partially-applied' : 'directorates-and-projects-applied'))
+    : projectAttempted && projectHadApplied
+      ? 'projects-applied-without-directorate-write'
+      : projectAttempted
+        ? 'projects-review-required'
+        : directorateStatus;
   const combinedResult = { ...previousResult, directorateImport: result };
   database.prepare("UPDATE workbook_import_batches SET status=?,result_json=?,updated_at=? WHERE id=?")
     .run(status, json(combinedResult), new Date().toISOString(), id);
