@@ -101,11 +101,20 @@ function migrateCanonicalData(database) {
   const now = new Date().toISOString();
   const fieldInsert = database.prepare("INSERT INTO data_field_definitions (entity_type,field_key,label_ar,data_type,unit,sensitivity,required_for_identity,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_type,field_key) DO NOTHING");
   const aliasInsert = database.prepare("INSERT INTO data_field_aliases (field_definition_id,alias,normalized_alias,locale,confidence,approved,created_at) VALUES (?,?,?,'ar',1,1,?) ON CONFLICT(field_definition_id,normalized_alias,locale) DO NOTHING");
+  // Reuse the exact Arabic aliases already accepted by the existing matcher.
+  // Load lazily: mapping.cjs imports store-schema.cjs, so loading it only when
+  // the migration executes avoids a module-initialization cycle.
+  const { ALIASES } = require('./mapping.cjs');
   for (const field of [...INPUT_FIELDS, DECISION_FIELD]) {
     fieldInsert.run('directorate', field.key, field.header, field.type === 'ratio' ? 'number' : field.type,
       field.unit ?? null, field.sensitivity ?? 'public', ['districtName','governorate'].includes(field.key) ? 1 : 0, now, now);
     const id = database.prepare("SELECT id FROM data_field_definitions WHERE entity_type='directorate' AND field_key=?").get(field.key)?.id;
-    if (id) aliasInsert.run(id, field.header, normalizeLabel(field.header), now);
+    if (id) {
+      aliasInsert.run(id, field.header, normalizeLabel(field.header), now);
+      for (const alias of ALIASES[field.key] ?? []) {
+        aliasInsert.run(id, alias, normalizeLabel(alias), now);
+      }
+    }
   }
   const indicatorInsert = database.prepare("INSERT INTO indicator_definitions (code,label_ar,unit,direction,formula_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(code) DO NOTHING");
   for (const indicator of INDICATORS) {
