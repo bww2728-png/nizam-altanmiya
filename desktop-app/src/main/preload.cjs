@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('localApp', {
   open: () => ipcRenderer.invoke('db:open'),
   lock: () => ipcRenderer.invoke('db:lock'),
   backupDatabase: () => ipcRenderer.invoke('db:backup'),
+  restoreDatabase: () => ipcRenderer.invoke('db:restore'),
   backups: () => ipcRenderer.invoke('db:backups'),
 
   // Access policy
