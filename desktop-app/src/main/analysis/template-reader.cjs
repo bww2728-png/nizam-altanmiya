@@ -172,7 +172,7 @@ async function readDirectorateWorkbook(filePath) {
     if (hiddenNames.length) {
       throw new Error(`لم يُعثر على جدول مديريات في الأوراق الظاهرة. وُجدت رؤوس محتملة في أوراق مخفية: ${hiddenNames.join('، ')}. أظهر الورقة وراجعها قبل الاستيراد.`);
     }
-    throw new Error('لم يُعثر على ورقة ظاهرة تحتوي رؤوس أعمدة معرّفة للمديريات.');
+    throw new Error('لم يُعثر على رأس جدول ظاهر يحتوي على «اسم المديرية» وحقل معرّف آخر على الأقل.');
   }
 
   const { worksheet, detection } = chosen;
