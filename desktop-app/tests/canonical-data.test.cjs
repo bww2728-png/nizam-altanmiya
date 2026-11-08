@@ -85,6 +85,8 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
     // Use the same read-after-write path as the production importer.
     const parsedWorkbook = new ExcelJS.Workbook();
     await parsedWorkbook.xlsx.readFile(filePath);
+    // A damaged Excel date serial must be captured as an issue, not crash the batch.
+    parsedWorkbook.getWorksheet('المشاريع').getCell('D4').value = new Date(Number.NaN);
     const staged = await canonical.stageWorkbook(db, filePath, parsedWorkbook);
     assert.equal(staged.status, 'staged');
     assert.equal(staged.sheetCount, 3);
@@ -121,6 +123,10 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
     assert.equal(formulaCells.find(cell => cell.address === 'C3').note, 'المصدر: تقدير محلي');
     const hiddenRow = storedRows.find(row => row.sheet_id === directorateSheet.id && row.row_number === 4);
     assert.equal(hiddenRow.is_hidden, 1);
+    const projectSheet = storedSheets[1];
+    const invalidDateRow = storedRows.find(row => row.sheet_id === projectSheet.id && row.row_number === 4);
+    const invalidDateCell = JSON.parse(invalidDateRow.cells_json).find(cell => cell.address === 'D4');
+    assert.equal(invalidDateCell.rawValue.type, 'invalid-date');
 
     const media = db.prepare('SELECT * FROM workbook_import_media WHERE batch_id = ?').all(staged.batchId);
     assert.equal(media.length, 1);
