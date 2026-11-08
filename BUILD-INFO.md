@@ -144,3 +144,51 @@
 - التثبيت تم بصمت (`/S`) فوق 0.3.0، وبيانات المستخدم في `%APPDATA%\local-development-intelligence\development-data.db` لم تُمَس.
 - اختبار إقلاع: التطبيق المثبّت انطلق بنجاح (4 عمليات Electron) ثم أُغلق.
 
+## المستودع العام والتحديث الذاتي (2026-11-08)
+
+المستودع: `https://github.com/bww2728-png/nizam-altanmiya` (عام، الفرع الافتراضي `main`).
+
+### محتوى المستودع
+
+- **مُستبعَد** (يبقى محليًا فقط، مضاف إلى `.gitignore`): قوالب `*.xlsx` المرجعية في الجذر، مجلدا `تدقيق-شامل/` و`نتائج-الفحص/` (صور/مخرجات الفحص)، لقطات الشاشة، وملفات نتائج الفحص (`*-result.json`, `*-stdout.txt`, `*-log.txt`). أُزيل تتبّع 55 ملفًا قائمًا عبر `git rm --cached` دون حذفها من القرص.
+- **مُبقى للاختبار**: `desktop-app/tests/fixtures/template-v3.3.xlsx` (استثناء صريح من قاعدة `*.xlsx`).
+- **أُدرج للبناء**: `desktop-app/build/icon.png` و`icon.ico` (كان مجلد `build/` متجاهَلًا ويحتاجه electron-builder) عبر `!desktop-app/build/`.
+
+### التحديث الذاتي
+
+| العنصر | التفصيل |
+| --- | --- |
+| المحرّك | `electron-updater@6.8.11` (تبعيته في `dependencies`). |
+| المصدر | `build.publish` → مزوّد `github` للمالك `bww2728-png` والمستودع `nizam-altanmiya`، مع `releaseType: "release"` (المحدّث يتجاهل المسودات). |
+| في التطبيق | `desktop-app/src/main/main.cjs`: استيراد محمي لـ `autoUpdater`، و`setupAutoUpdate()` يفحص عند الإقلاع (بعد 8 ثوانٍ) ثم كل 6 ساعات، ويبثّ الحالة عبر `update:status`. |
+| الجسر | `desktop-app/src/main/preload.cjs`: `updateStatus`, `checkForUpdates`, `installUpdate`, `onUpdateStatus`. |
+| الواجهة | `desktop-app/src/renderer/App.jsx`: مكوّن `UpdateBanner` (متاح/تنزيل/اكتمل/خطأ) + أنماط `.update-banner` في `styles/app.css`. |
+| CI | `.github/workflows/release.yml` على وسم `v*` (windows-latest): `npm ci` → `vite build` → `electron-builder --publish never` → إنشاء إصدار واحد عبر `gh release create/upload`. تجاوزنا ناشر electron-builder لأنه قسّم الأصول بين إصدارين. |
+
+### الإصدارات والتحقق
+
+| الوسم | الالتزام | النتيجة |
+| --- | --- | --- |
+| `v0.5.1` | `15766ce` | سير العمل نجح؛ إصدار منشور واحد بثلاثة أصول (`exe` + `blockmap` + `latest.yml`). |
+| `v0.5.2` | `6610d3c` | سير العمل نجح؛ إصدار منشور واحد بثلاثة أصول. |
+
+اختبار الحلقة الكاملة:
+
+1. ثُبّت `0.5.1` محليًا (بُني باستخدام `build.electronDist` المؤقت ثم أُعيد `package.json`)، `ProductVersion=0.5.1.0`، و`resources/app-update.yml` يشير إلى المستودع الصحيح.
+2. عند الإقلاع اكتشف المحدّث `0.5.2`؛ جرّب تنزيلًا تفاضليًا فكشف عدم تطابق `sha512` في الكاش القديم، فتراجع تلقائيًا إلى تنزيل كامل — سلوك مقصود.
+3. سجل التطبيق: `New version 0.5.2 has been downloaded to ...\local-development-intelligence-updater\pending\Local-Development-Intelligence-0.5.2-x64.exe` (133.32MB).
+4. عند إغلاق النافذة (`autoInstallOnAppQuit`) ثُبّت التحديث تلقائيًا → `ProductVersion=0.5.2.0`.
+5. اختبار إقلاع 0.5.2: 4 عمليات Electron بلا أخطاء.
+
+### طريقة إصدار تحديث
+
+1. ارفع `version` في `desktop-app/package.json`.
+2. التزم وادفع إلى `main`.
+3. أنشئ وسمًا مطابقًا (`vX.Y.Z`) وادفعه → يبنيه CI وينشره، ويلتقطه التطبيق المثبّت تلقائيًا.
+
+### ملاحظات
+
+- الحزمة **غير موقّعة**؛ SmartScreen قد يعرض تحذيرًا. التحديث التلقائي يعمل دون توقيع.
+- «أي تغيير» يعني وسم إصدار جديد (لا يُبنى إصدار من كل التزام)، بناءً على قرار البناء على وسم.
+- كاش المحدّث: `%LOCALAPPDATA%\local-development-intelligence-updater`.
+
