@@ -378,7 +378,9 @@ function registerHandlers() {
     });
     if (canceled || !filePaths.length) return { canceled: true };
 
-    const selected = safeRealpath(filePaths[0]) ?? path.resolve(filePaths[0]);
+    // Keep the selected path itself so restoreBackupBundle can reject a symlink
+    // with lstat instead of silently following it to another file.
+    const selected = path.resolve(filePaths[0]);
     const databasePath = getDatabasePath();
     const keyPath = getStoreKeyPath();
     let safetyBackup = null;
@@ -398,13 +400,19 @@ function registerHandlers() {
       auditRead('db:restore', { entity: 'store', entityId: selected, result: 'ok', detail: 'safetyBackup=' + Boolean(safetyBackup) });
       return { canceled: false, restored: true, safetyBackup, filePath: restored.restoredPath };
     } catch (error) {
-      // restoreBackupBundle rolls the original database/key pair back on a failed swap.
+      // Restore the safety snapshot even if the file swap succeeded but opening
+      // the replacement store failed during schema migration or initialization.
       try {
+        if (!database && safetyBackup && fs.existsSync(safetyBackup) && fs.existsSync(safetyBackup + '.key')) {
+          restoreBackupBundle(safetyBackup, databasePath, keyPath);
+        }
         if (!database && fs.existsSync(databasePath) && fs.existsSync(keyPath)) {
           database = openDatabase();
           sessionId = crypto.randomUUID();
         }
-      } catch { /* preserve the original restore error; the files remain available for manual recovery */ }
+      } catch (recoveryError) {
+        throw new Error(error.message + ' تعذّر فتح النسخة المستعادة؛ كما تعذّر إكمال الاسترجاع التلقائي لنسخة الأمان: ' + recoveryError.message);
+      }
       throw error;
     }
   });
