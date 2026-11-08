@@ -469,7 +469,7 @@ function registerHandlers() {
     const result = pendingPlan.plan.rows?.length
       ? applyImportPlan(db, pendingPlan.plan, { decisions: request.decisions, force: request.force })
       : { applied: 0, created: 0, updated: 0, refused: [], skipped: [], total: 0 };
-    canonicalData.completeWorkbookImport(db, pendingPlan.staging.batchId, result);
+    const stagingCompletion = canonicalData.completeWorkbookImport(db, pendingPlan.staging.batchId, result);
     invalidateSheets();
     auditRead('import:apply', {
       entity: 'directorates',
@@ -484,7 +484,12 @@ function registerHandlers() {
       total,
       message: `اكتمل الاستيراد: ${result.created} إضافة، ${result.updated} تحديث، ${result.refused.length} محجوب.`,
     });
-    return { ...result, fileName: pendingPlan.plan.fileName, sheetName: pendingPlan.plan.sheetName };
+    return {
+      ...result,
+      fileName: pendingPlan.plan.fileName,
+      sheetName: pendingPlan.plan.sheetName,
+      stagingStatus: stagingCompletion.status,
+    };
   });
 
   // ---- The five workbook sheets, rendered from stored data ------------------
