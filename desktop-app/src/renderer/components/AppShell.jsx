@@ -112,12 +112,16 @@ export default function AppShell({
               <ShieldCheck size={14} />
               {profileLabel ?? profile}
             </button>
-            <button className="icon-button" onClick={onBackup} title="إنشاء نسخة احتياطية الآن" aria-label="إنشاء نسخة احتياطية الآن">
-              <DatabaseZap size={17} />
-            </button>
-            <button className="icon-button" onClick={onRestore} title="استعادة نسخة احتياطية" aria-label="استعادة نسخة احتياطية">
-              <RotateCcw size={17} />
-            </button>
+            {profile !== 'shared' && (
+              <>
+                <button className="icon-button" onClick={onBackup} title="إنشاء نسخة احتياطية الآن" aria-label="إنشاء نسخة احتياطية الآن">
+                  <DatabaseZap size={17} />
+                </button>
+                <button className="icon-button" onClick={onRestore} title="استعادة نسخة احتياطية" aria-label="استعادة نسخة احتياطية">
+                  <RotateCcw size={17} />
+                </button>
+              </>
+            )}
             <button
               className={cx('icon-button', refreshing && 'spin')}
               onClick={onRefresh}
