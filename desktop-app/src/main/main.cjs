@@ -389,7 +389,7 @@ function registerHandlers() {
     if (!filePath) {
       sendImportProgress(event.sender, { phase: 'dialog', message: 'جارٍ فتح نافذة اختيار الملف...' });
       const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-        title: 'اختر ملف «القالب المحدث» (قاعدة البيانات الشاملة)',
+        title: 'اختر ملف Excel المراد فحصه وحفظه للمراجعة',
         properties: ['openFile'],
         filters: [{ name: 'ملفات Excel', extensions: ['xlsx', 'xlsm'] }],
       });
