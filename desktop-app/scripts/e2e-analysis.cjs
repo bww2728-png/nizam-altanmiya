@@ -365,11 +365,11 @@ app.whenReady().then(async () => {
     await screenshot(window, '4-ترتيب-الأولويات.png');
 
     await clickByText(window, '.side-nav .nav-item', 'قاعدة البيانات الشاملة');
-    await waitFor(window, `document.body.innerText.includes('مديرية مخزّنة')`, 30000);
-    await sleep(400);
+    await waitFor(window, `document.querySelectorAll('table.data tbody tr').length === 20 && document.body.innerText.replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 1632)).includes('20 مديرية مخزّنة')`, 30000);
     const databaseText = await bodyText(window);
     const databaseRows = await window.webContents.executeJavaScript(`document.querySelectorAll('table.data tbody tr').length`);
-    check('pages', 'قاعدة البيانات تعرض العشرين سجلًا', databaseText.includes('20 مديرية مخزّنة') && databaseRows === 20, `rows=${databaseRows}`);
+    const normalizedDatabaseText = databaseText.replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 1632));
+    check('pages', 'قاعدة البيانات تعرض العشرين سجلًا', normalizedDatabaseText.includes('20 مديرية مخزّنة') && databaseRows === 20, `rows=${databaseRows}`);
     await screenshot(window, '5-قاعدة-البيانات.png');
 
     const cardOpened = await clickByText(window, 'table.data tbody tr button', 'البطاقة');
@@ -528,6 +528,7 @@ app.whenReady().then(async () => {
     await waitFor(window, `document.body.innerText.includes('مصدر البيانات') && document.body.innerText.includes('مشاريع اختبار')`, 30000);
     check('pages', 'تفاصيل المشروع تعرض التمويل والمصدر وملاحظات الجودة', detailsOpened && (await bodyText(window)).includes('جهات التمويل'));
     await screenshot(window, '16-سجل-المشاريع.png');
+    await waitFor(window, `(() => { const button = document.querySelector('.modal-card .modal-head button[aria-label="إغلاق"]'); const rect = button?.getBoundingClientRect(); return Boolean(rect && rect.top >= 0 && rect.bottom <= window.innerHeight); })()`, 12000);
     const projectDetailsClosed = await clickBySelector(window, '.modal-card .modal-head button[aria-label="إغلاق"]', 'إغلاق تفاصيل المشروع');
     check('pages', 'تفاصيل المشروع تغلق بزر واضح قبل متابعة التنقل', projectDetailsClosed);
 
