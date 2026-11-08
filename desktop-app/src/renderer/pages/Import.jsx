@@ -52,6 +52,18 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
   const [hideUnchanged, setHideUnchanged] = useState(false);
   const [statusFilter, setStatusFilter] = useState('all');
   const [page, setPage] = useState(0);
+  const [importHistory, setImportHistory] = useState([]);
+
+  const refreshHistory = useCallback(async () => {
+    try {
+      const rows = await window.localApp.importHistory?.({ limit: 20 });
+      if (Array.isArray(rows)) setImportHistory(rows);
+    } catch {
+      // History is supplementary; a temporary read failure must not block scanning.
+    }
+  }, []);
+
+  useEffect(() => { refreshHistory(); }, [refreshHistory]);
 
   const rows = useMemo(() => (fullPlan?.preview ?? plan?.preview ?? []), [fullPlan, plan]);
 
@@ -73,6 +85,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
         return;
       }
       setPlan(scanned);
+      await refreshHistory();
       setFullPlan(null);
       setResult(null);
       setDecisions({});
@@ -89,7 +102,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
       setProgress(null);
       setBusy(false);
     }
-  }, [notify]);
+  }, [notify, refreshHistory]);
 
   const loadAllRows = useCallback(async () => {
     setBusy(true);
@@ -113,6 +126,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
       // decisions that the operator explicitly made in this review session.
       const applied = await window.localApp.applyImport({ decisions, force });
       setResult(applied);
+      await refreshHistory();
       setStep('applied');
       onApplied?.();
       notify?.({
@@ -124,7 +138,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
     } finally {
       setBusy(false);
     }
-  }, [decisions, force, notify, onApplied]);
+  }, [decisions, force, notify, onApplied, refreshHistory]);
 
   const visibleRows = useMemo(() => rows.filter((row) => {
     if (hideUnchanged && row.action === 'unchanged') return false;
@@ -173,13 +187,18 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
         </div>
       )}
 
+      {plan?.staging && <DurableStaging staging={plan.staging} stagingOnly={plan.stagingOnly} message={plan.stagingMessage} />}
+      {!plan?.staging && <ImportHistory rows={importHistory} />}
+
       {step === 'idle' && <Starter busy={busy} onChoose={chooseFile} />}
 
       {step === 'plan' && plan && (
         <>
           <Card
             title="خطة الاستيراد"
-            subtitle={`${plan.fileName} · الورقة «${plan.sheetName}» · صف الرؤوس ${plan.headerRow}`}
+            subtitle={plan.stagingOnly
+              ? `${plan.fileName} · حُفظ الملف في منطقة المراجعة دون تحويله إلى سجلات مديريات`
+              : `${plan.fileName} · الورقة «${plan.sheetName}» · صف الرؤوس ${plan.headerRow}`}
             actions={(
               <div className="btn-row">
                 <button className="btn small ghost" onClick={chooseFile} disabled={busy}>
@@ -495,6 +514,85 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
         </Card>
       )}
     </>
+  );
+}
+
+function DurableStaging({ staging, stagingOnly, message }) {
+  return (
+    <Card
+      title="نسخة الاستقبال المحفوظة داخل قاعدة البيانات"
+      subtitle={`دفعة #${staging.batchId} · SHA-256 ${String(staging.sha256 ?? '').slice(0, 16)}… · لم تُعتمد بيانات الأوراق الإضافية`}
+    >
+      <div className="stat-strip">
+        <MiniStat label="أوراق العمل" value={fmtNumber(staging.sheetCount, 0)} />
+        <MiniStat label="صفوف مفحوصة" value={fmtNumber(staging.rowCount, 0)} />
+        <MiniStat label="خلايا محفوظة" value={fmtNumber(staging.cellCount, 0)} />
+        <MiniStat label="صيغ" value={fmtNumber(staging.formulaCount, 0)} />
+        <MiniStat label="صفوف مخفية" value={fmtNumber(staging.hiddenRowCount, 0)} />
+        <MiniStat label="صور مستخرجة" value={`${fmtNumber(staging.mediaStoredCount, 0)}/${fmtNumber(staging.mediaCount, 0)}`} />
+      </div>
+      {stagingOnly && <Notice tone="warn" title="لم يُكتشف جدول مديريات مطابق للمسار الحالي">{message ?? 'حُفظ الملف الأصلي وبنيته للمراجعة؛ لم تُنشأ مديريات تلقائيًا.'}</Notice>}
+      {staging.truncated && <Notice tone="warn" title="وصل الملف إلى حد فحص معلن">حُفظت النسخة الأصلية، لكن فهرسة الصفوف والخلايا توقفت عند حدود الحماية. لا تعتبر هذه الدفعة مفحوصة بالكامل.</Notice>}
+      {staging.mediaUnanchoredCount > 0 && <Notice tone="warn" title="صور بلا موضع موثوق">{fmtNumber(staging.mediaUnanchoredCount, 0)} صورة/عنصر لم يمكن ربط موضعه بورقة وخلية بشكل موثوق؛ حُفظت غير منسوبة إلى كيان.</Notice>}
+      <div className="table-wrap" style={{ marginTop: 14 }}>
+        <table className="data">
+          <thead><tr><th>الورقة</th><th>الحالة</th><th>الأبعاد</th><th>صفوف محفوظة</th><th>خلايا</th><th>مناطق مرشحة</th><th>محتوى إضافي</th></tr></thead>
+          <tbody>
+            {(staging.sheets ?? []).map(sheet => (
+              <tr key={sheet.name}>
+                <td className="strong">{sheet.name}</td>
+                <td>{sheet.state === 'visible' ? <Badge tone="ok">ظاهرة</Badge> : <Badge tone="warn">{sheet.state}</Badge>}</td>
+                <td className="num">{fmtNumber(sheet.rowCount,0)} × {fmtNumber(sheet.columnCount,0)}</td>
+                <td className="num">{fmtNumber(sheet.nonemptyRows,0)}</td>
+                <td className="num">{fmtNumber(sheet.cellCount,0)}</td>
+                <td>{sheet.regions?.length ? sheet.regions.map(region => `صف ${region.headerRow} · ${region.matchedCount} حقول · ${region.candidateType}`).join('، ') : '—'}</td>
+                <td><div className="chip-row">
+                  {sheet.formulaCount > 0 && <span className="chip">صيغ: {sheet.formulaCount}</span>}
+                  {sheet.hiddenRowCount > 0 && <span className="chip">مخفية: {sheet.hiddenRowCount}</span>}
+                  {sheet.imageCount > 0 && <span className="chip">صور: {sheet.imageCount}</span>}
+                  {sheet.tableCount > 0 && <span className="chip">جداول: {sheet.tableCount}</span>}
+                  {sheet.mergedRangeCount > 0 && <span className="chip">دمج: {sheet.mergedRangeCount}</span>}
+                  {sheet.truncated && <Badge tone="warn">حد فحص</Badge>}
+                  {!sheet.formulaCount && !sheet.hiddenRowCount && !sheet.imageCount && !sheet.tableCount && !sheet.mergedRangeCount && !sheet.truncated && '—'}
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Notice tone="info" title="ما الذي تم حفظه؟">
+        <span className="chip">الملف الأصلي وبصمته</span>
+        <span className="chip">خلايا كل ورقة مع موقعها ومحتواها وصيغها وملاحظاتها</span>
+        <span className="chip">الصفوف المخفية ومناطق العناوين المرشحة</span>
+        <span className="chip">الصورة ومعلومات المرساة عند توفرها</span>
+        <span className="chip warn">لا يوجد ربط آلي بين صفوف المشاريع أو الصور والمديريات</span>
+      </Notice>
+    </Card>
+  );
+}
+
+function ImportHistory({ rows }) {
+  return (
+    <Card title="سجل ملفات الاستيراد المستلمة" subtitle="هذه الدفعات محفوظة محليًا حتى عند إغلاق الشاشة؛ حالة الاستقبال لا تعني اعتماد بياناتها.">
+      {rows.length === 0 ? <p className="muted">لا توجد دفعات محفوظة بعد.</p> : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead><tr><th>الملف</th><th>تاريخ الاستلام</th><th>الأوراق</th><th>الصفوف</th><th>الخلايا</th><th>الصور</th><th>الحالة</th></tr></thead>
+            <tbody>{rows.map(row => (
+              <tr key={row.id}>
+                <td className="strong">{row.file_name}</td>
+                <td>{row.created_at}</td>
+                <td className="num">{fmtNumber(row.sheet_count,0)}</td>
+                <td className="num">{fmtNumber(row.row_count,0)}</td>
+                <td className="num">{fmtNumber(row.cell_count,0)}</td>
+                <td className="num">{fmtNumber(row.media_stored_count,0)}/{fmtNumber(row.media_count,0)}</td>
+                <td><Badge tone={row.status === 'staged' ? 'warn' : 'info'}>{row.status}</Badge></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }
 
