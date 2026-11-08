@@ -202,12 +202,28 @@ async function stageWorkbook(database, filePath, workbookOption = null) {
       const keys = mapping.matched.map(item => item.key);
       const normalizedText = normalizedHeaders.join(' ');
       const isDirectorate = keys.includes('districtName') && keys.includes('governorate');
-      const projectHints = ['اسم المشروع', 'المشروع', 'تكلفه المشروع', 'تكلفه تقديريه', 'حاله المشروع', 'رقم المشروع', 'رمز المشروع'];
-      const indicatorHints = ['اسم المؤشر', 'المؤشر', 'القيمه', 'الفتره', 'السنه', 'نتيجه المؤشر'];
-      const isProject = projectHints.some(hint => normalizedText.includes(normalizeLabel(hint)));
-      const isIndicator = indicatorHints.some(hint => normalizedText.includes(normalizeLabel(hint)));
-      // A project table may also contain governorate/directorate columns. Its
-      // explicit project identity wins over a partial legacy-field match.
+      const hasAny = (hints) => hints.some(hint => normalizedText.includes(normalizeLabel(hint)));
+      // A lone "project cost" field is common in a directorate profile and must
+      // never turn the whole directorate table into a projects dataset. Require
+      // project identity (name/code/number) plus supporting project columns, or
+      // at least two distinct identity fields.
+      const projectIdentityHints = ['اسم المشروع', 'رمز المشروع', 'كود المشروع', 'رقم المشروع'];
+      const projectContextHints = ['حاله المشروع', 'وصف المشروع', 'تكلفه المشروع', 'تكلفه تقديريه',
+        'جهة التمويل', 'مبلغ التمويل', 'تاريخ البدايه', 'تاريخ النهايه'];
+      const projectIdentityCount = projectIdentityHints.filter(hint => hasAny([hint])).length;
+      const projectContextCount = projectContextHints.filter(hint => hasAny([hint])).length;
+      const isProject = projectIdentityCount >= 2 || (projectIdentityCount >= 1 && projectContextCount >= 1);
+
+      // Generic "value/period" labels are not enough to identify an indicator
+      // table. Require an explicit indicator identity and at least one measure
+      // context column, otherwise preserve the region as unclassified.
+      const indicatorIdentityHints = ['اسم المؤشر', 'رمز المؤشر', 'كود المؤشر'];
+      const indicatorContextHints = ['القيمه', 'الفتره', 'السنه', 'نتيجه المؤشر', 'وحده القياس', 'تاريخ القياس'];
+      const indicatorIdentityCount = indicatorIdentityHints.filter(hint => hasAny([hint])).length;
+      const indicatorContextCount = indicatorContextHints.filter(hint => hasAny([hint])).length;
+      const isIndicator = indicatorIdentityCount >= 2 || (indicatorIdentityCount >= 1 && indicatorContextCount >= 1);
+
+      // Explicit project/indicator identity wins over overlapping location fields.
       const candidateType = isProject ? 'project-candidate'
         : isIndicator ? 'indicator-candidate'
           : isDirectorate ? 'directorate-candidate'
