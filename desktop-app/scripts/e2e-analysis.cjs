@@ -309,7 +309,7 @@ app.whenReady().then(async () => {
     // Exercise backup + restore through the actual operator-facing control.
     const restoreSource = await window.webContents.executeJavaScript('window.localApp.backupDatabase()');
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [restoreSource.filePath] });
-    await window.webContents.executeJavaScript('window.confirm = () => true');
+    await window.webContents.executeJavaScript('(() => { window.confirm = () => true; return true; })()');
     const restoreClicked = await clickBySelector(window, '.topbar button[aria-label="استعادة نسخة احتياطية"]', 'استعادة النسخة الاحتياطية');
     await waitFor(window, `document.body.innerText.includes('تمت استعادة النسخة الاحتياطية والتحقق من قاعدة البيانات')`, 30000);
     check('security', 'استعادة النسخة الاحتياطية تعمل من واجهة المستخدم', restoreClicked && await window.webContents.executeJavaScript(`window.localApp.status().then((state) => state.unlocked && state.hasKey)`));
