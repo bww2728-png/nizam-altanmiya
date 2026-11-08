@@ -620,7 +620,7 @@ function Starter({ busy, onChoose }) {
           </ul>
           <div className="btn-row">
             <button className="btn primary sheen" onClick={onChoose} disabled={busy}>
-              <FileSpreadsheet size={17} /> {busy ? 'جارٍ القراءة...' : 'اختيار ملف القالب'}
+              <FileSpreadsheet size={17} /> {busy ? 'جارٍ القراءة...' : 'اختيار ملف Excel'}
             </button>
             <span className="chip"><ShieldCheck size={13} /> يتحقق من الصيغة والحجم قبل الفتح</span>
           </div>
