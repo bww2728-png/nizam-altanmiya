@@ -376,11 +376,12 @@ function summarizePlan(plan, limit = 300) {
 /**
  * Apply the plan.
  *
- * `decisions` maps a row number to `'apply'` or `'skip'`; an unlisted row
- * follows the plan. A blocked row needs both `force` and an explicit per-row
- * `apply` — the default decision can never write it. `unchanged` rows and
- * intra-file duplicates are never written. Data and the audit entry share one
- * transaction: a failure leaves the database untouched.
+ * `decisions` maps a row number to `'apply'` or `'skip'`. For create/update
+ * rows, absence of an explicit `'apply'` is always a skip: the backend never
+ * assumes that a row was reviewed just because it appeared in a preview.
+ * A blocked row needs both `force` and an explicit per-row `'apply'`.
+ * `unchanged` rows and intra-file duplicates are never written. Data and the
+ * audit entry share one transaction: a failure leaves the database untouched.
  */
 function applyImportPlan(database, plan, request = {}) {
   const decisions = request.decisions ?? {};
@@ -423,9 +424,8 @@ function applyImportPlan(database, plan, request = {}) {
       }
 
       if (row.status === 'blocked') {
-        // `force` is necessary but no longer sufficient: a blocked row still
-        // needs an explicit `apply` decision, and a row without an identity can
-        // never be written at all.
+        // A blocked row needs two independent acts: explicit per-row approval
+        // and the separate force switch. Identity-blocked rows are never writable.
         const writable = force && requested === 'apply' && row.action !== 'blocked';
         if (!writable) {
           if (force) {
@@ -446,6 +446,13 @@ function applyImportPlan(database, plan, request = {}) {
           }
           continue;
         }
+      } else if (requested !== 'apply') {
+        skipped.push({
+          rowNumber: row.rowNumber,
+          districtName: row.districtName,
+          reason: requested === 'skip' ? 'تخطٍّ بطلب المستخدم' : 'لم يصدر اعتماد صريح لهذا الصف',
+        });
+        continue;
       }
 
       const result = persist.upsertDirectorate(database, {

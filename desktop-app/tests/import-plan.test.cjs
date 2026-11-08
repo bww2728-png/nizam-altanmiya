@@ -90,6 +90,16 @@ function readOf(rows, extra = {}) {
   };
 }
 
+function applyWithAllEligibleReviewed(database, plan, request = {}) {
+  const decisions = {};
+  for (const row of plan.rows ?? []) {
+    if (row.status !== 'blocked' && row.action !== 'unchanged' && row.action !== 'duplicate') {
+      decisions[row.rowNumber] = 'apply';
+    }
+  }
+  return applyImportPlan(database, plan, { ...request, decisions: { ...decisions, ...(request.decisions ?? {}) } });
+}
+
 function insertStored(database, districtName, governorate, overrides = {}, fileName = FILE_NAME) {
   return persist.upsertDirectorate(database, {
     districtName,
@@ -275,7 +285,7 @@ test('applyImportPlan collapses in-file duplicates and skips unchanged rows', ()
       rowOf(4, completeValues({ districtName: 'مديرية محفوظة', governorate: 'إب' })),
     ]), { fileName: FILE_NAME });
 
-    const result = applyImportPlan(database, plan);
+    const result = applyWithAllEligibleReviewed(database, plan);
 
     assert.equal(result.applied, 1, 'only the first non-duplicate, non-unchanged row is written');
     assert.equal(result.created, 1);
@@ -357,7 +367,7 @@ test('applyImportPlan writes the created/updated counts and returns every applie
       rowOf(3, completeValues({ districtName: 'مديرية محفوظة', governorate: 'إب', schools: 45 })),
     ]), { fileName: FILE_NAME });
 
-    const result = applyImportPlan(database, plan);
+    const result = applyWithAllEligibleReviewed(database, plan);
 
     assert.equal(result.fileName, FILE_NAME);
     assert.equal(result.total, 2);
@@ -391,7 +401,7 @@ test('applyImportPlan stores the parser warnings on each written row', () => {
       }),
     ]), { fileName: FILE_NAME });
 
-    const result = applyImportPlan(database, plan);
+    const result = applyWithAllEligibleReviewed(database, plan);
     assert.equal(result.applied, 1);
 
     const stored = database
@@ -426,12 +436,35 @@ test('an explicit zero in the file is a change over a stored empty cell, not an 
     assert.equal(row.action, 'update', 'NULL -> 0 is an update, not unchanged');
     assert.ok(row.changes.some((change) => change.key === 'schools'));
 
-    const result = applyImportPlan(database, plan);
+    const result = applyWithAllEligibleReviewed(database, plan);
     assert.equal(result.updated, 1);
     assert.equal(result.unchanged, 0);
 
     const stored = database.prepare('SELECT schools FROM directorates WHERE district = ?').get('مديرية صفرية');
     assert.equal(stored.schools, 0, 'the explicit zero must reach the database');
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('unreviewed create/update rows are skipped and only explicit approvals are written', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    const plan = buildImportPlan(database, readOf([
+      rowOf(2, completeValues({ districtName: 'مديرية معتمدة', governorate: 'صنعاء' })),
+      rowOf(3, completeValues({ districtName: 'مديرية غير مراجعة', governorate: 'تعز' })),
+    ]), { fileName: FILE_NAME });
+
+    const result = applyImportPlan(database, plan, { decisions: { 2: 'apply' } });
+
+    assert.equal(result.applied, 1);
+    assert.equal(result.created, 1);
+    assert.equal(result.skipped.length, 1);
+    assert.equal(result.skipped[0].rowNumber, 3);
+    assert.match(result.skipped[0].reason, /اعتماد صريح/);
+    assert.equal(database.prepare('SELECT COUNT(*) AS c FROM directorates WHERE district = ?').get('مديرية معتمدة').c, 1);
+    assert.equal(database.prepare('SELECT COUNT(*) AS c FROM directorates WHERE district = ?').get('مديرية غير مراجعة').c, 0);
   } finally {
     database.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -446,7 +479,7 @@ test('a skip decision leaves the row out of the write and is reported', () => {
       rowOf(3, completeValues({ districtName: 'مديرية مكتوبة', governorate: 'تعز' })),
     ]), { fileName: FILE_NAME });
 
-    const result = applyImportPlan(database, plan, { decisions: { 2: 'skip' } });
+    const result = applyImportPlan(database, plan, { decisions: { 2: 'skip', 3: 'apply' } });
 
     assert.equal(result.skipped.length, 1);
     assert.equal(result.skipped[0].rowNumber, 2);
@@ -578,7 +611,7 @@ test('CR-2 unchanged rows are not written, not counted as updates, and counted a
     assert.equal(plan.scope.unchanged, 1);
     assert.equal(plan.scope.update, 1);
 
-    const result = applyImportPlan(database, plan);
+    const result = applyWithAllEligibleReviewed(database, plan);
     assert.equal(result.unchanged, 1, 'the identical row is reported as unchanged');
     assert.equal(result.updated, 1, 'only the real update is counted as updated');
     assert.equal(result.created, 0);
@@ -604,7 +637,7 @@ test('CR-4 applyImportPlan writes exactly one excel-import audit row per transac
     const plan = buildImportPlan(database, readOf([
       rowOf(2, completeValues({ districtName: 'مديرية مدققة', governorate: 'صنعاء' })),
     ]), { fileName: FILE_NAME });
-    const result = applyImportPlan(database, plan);
+    const result = applyWithAllEligibleReviewed(database, plan);
 
     assert.equal(result.created, 1);
     assert.equal(countLogs(), before + 1, 'exactly one excel-import audit row per apply');
@@ -639,7 +672,7 @@ test('CR-4 a mid-apply failure rolls back both the data and its audit entry', ()
       return originalUpsert(...args);
     };
 
-    assert.throws(() => applyImportPlan(database, plan), /injected failure/);
+    assert.throws(() => applyWithAllEligibleReviewed(database, plan), /injected failure/);
     assert.equal(persist.countDirectorates(database), 0, 'the first insert rolls back with the failure');
     assert.equal(countLogs(), before, 'no audit entry may survive a rolled-back import');
   } finally {
@@ -664,7 +697,7 @@ test('CR-5 only the first of several intra-file duplicates is applied and create
     assert.equal(plan.scope.duplicate, 2);
     assert.equal(plan.scope.create, 1);
 
-    const result = applyImportPlan(database, plan);
+    const result = applyWithAllEligibleReviewed(database, plan);
     assert.equal(result.created, 1, 'the duplicate identity is created exactly once');
     assert.equal(result.applied, 1);
     assert.equal(result.duplicates.length, 2);

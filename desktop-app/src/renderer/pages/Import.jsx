@@ -32,11 +32,10 @@ const ACTION_META = {
 };
 
 /**
- * A blocked row is never written by default: the operator must explicitly pick
- * «تطبيق» for it (and enable the force switch), so a force run cannot silently
- * commit a row the reviewer never looked at.
+ * Every row starts unapproved. Only a direct row decision or the explicit
+ * "approve eligible rows on this page" action may send an apply decision.
  */
-const defaultDecision = (row) => (row?.status === 'blocked' ? 'skip' : 'apply');
+const defaultDecision = () => 'skip';
 
 const PREVIEW_LIMIT = 250;
 
@@ -52,6 +51,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
   const [busy, setBusy] = useState(false);
   const [hideUnchanged, setHideUnchanged] = useState(false);
   const [statusFilter, setStatusFilter] = useState('all');
+  const [page, setPage] = useState(0);
 
   const rows = useMemo(() => (fullPlan?.preview ?? plan?.preview ?? []), [fullPlan, plan]);
 
@@ -76,6 +76,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
       setFullPlan(null);
       setResult(null);
       setDecisions({});
+      setPage(0);
       setStep('plan');
       notify?.({
         tone: scanned.scope?.blocked ? 'warn' : 'ok',
@@ -107,16 +108,9 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
     setBusy(true);
     setError('');
     try {
-      // Blocked rows are only written when the operator explicitly chose «تطبيق»
-      // for them; send an explicit «skip» for the ones left untouched so the main
-      // process cannot fall back to its default «apply» during a force run.
-      const effectiveDecisions = { ...decisions };
-      for (const row of rows) {
-        if (row.status === 'blocked' && effectiveDecisions[row.rowNumber] === undefined) {
-          effectiveDecisions[row.rowNumber] = 'skip';
-        }
-      }
-      const applied = await window.localApp.applyImport({ decisions: effectiveDecisions, force });
+      // The main process defaults every unlisted row to skip. Send only
+      // decisions that the operator explicitly made in this review session.
+      const applied = await window.localApp.applyImport({ decisions, force });
       setResult(applied);
       setStep('applied');
       onApplied?.();
@@ -137,8 +131,22 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
     return true;
   }), [rows, hideUnchanged, statusFilter]);
 
-  const previewRows = visibleRows.slice(0, PREVIEW_LIMIT);
+  const pageCount = Math.max(1, Math.ceil(visibleRows.length / PREVIEW_LIMIT));
+  const safePage = Math.min(page, pageCount - 1);
+  const previewRows = visibleRows.slice(safePage * PREVIEW_LIMIT, (safePage + 1) * PREVIEW_LIMIT);
   const scope = plan?.scope ?? {};
+
+  const approveEligiblePage = useCallback(() => {
+    setDecisions((current) => {
+      const next = { ...current };
+      for (const row of previewRows) {
+        if (row.status !== 'blocked' && row.action !== 'unchanged' && row.action !== 'duplicate') {
+          next[row.rowNumber] = 'apply';
+        }
+      }
+      return next;
+    });
+  }, [previewRows]);
   const decisionCount = useMemo(() => {
     let skip = 0;
     for (const row of previewRows) {
@@ -176,7 +184,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
                 <button className="btn small ghost" onClick={chooseFile} disabled={busy}>
                   <RefreshCw size={15} /> اختيار ملف آخر
                 </button>
-                {plan.totalRows > rows.length && (
+                {!fullPlan && (plan.totalRows > rows.length || rows.length > PREVIEW_LIMIT) && (
                   <button className="btn small" onClick={loadAllRows} disabled={busy}>
                     <Layers size={15} /> تحميل كل الصفوف ({plan.totalRows})
                   </button>
@@ -239,12 +247,12 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
 
           <Card
             title="مراجعة الصفوف"
-            subtitle="لكل صف قرار: تطبيق أو تخطٍّ. الصف المحجوب يبدأ متخطّىً ولا يُكتب إلا إذا اخترت له «تطبيق» صراحةً مع تفعيل تطبيق المحجوب."
+            subtitle="كل الصفوف تبدأ غير معتمدة. اعتمد الصفوف المؤهلة في الصفحة الحالية أو اختر القرار لكل صف؛ لا يُكتب أي صف غير معتمد صراحةً. الصف المحجوب يحتاج قرار تطبيق مستقلًا مع تفعيل القوة."
             actions={(
               <div className="row">
                 <Segmented
                   value={statusFilter}
-                  onChange={setStatusFilter}
+                  onChange={(value) => { setStatusFilter(value); setPage(0); }}
                   options={[
                     { value: 'all', label: 'الكل' },
                     { value: 'ready', label: 'جاهز' },
@@ -252,20 +260,22 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
                     { value: 'blocked', label: 'محجوب' },
                   ]}
                 />
-                <Switch checked={hideUnchanged} onChange={setHideUnchanged} label="إخفاء بلا تغيير" />
+                <Switch checked={hideUnchanged} onChange={(value) => { setHideUnchanged(value); setPage(0); }} label="إخفاء بلا تغيير" />
               </div>
             )}
           >
             <div className="row between" style={{ marginBottom: 12 }}>
               <span className="muted" style={{ fontSize: '0.8rem' }}>
-                يُعرض {previewRows.length} من {visibleRows.length} صفًا
-                {visibleRows.length > PREVIEW_LIMIT ? ` (الحد ${PREVIEW_LIMIT} في العرض)` : ''}
-                {!fullPlan && plan.totalRows > rows.length ? ' · حمّل كل الصفوف للمراجعة الكاملة' : ''}
+                الصفحة {safePage + 1} من {pageCount} · يُعرض {previewRows.length} من {visibleRows.length} صفًا
+                {!fullPlan && (plan.totalRows > rows.length || rows.length > PREVIEW_LIMIT) ? ' · حمّل كل الصفوف أولًا للمراجعة الكاملة' : ''}
               </span>
               <div className="btn-row">
                 <span className="chip">تخطٍّ: {decisionCount.skip}</span>
-                <span className="chip ok">تطبيق: {decisionCount.apply}</span>
-                <button className="btn small ghost" onClick={() => setDecisions({})}>إعادة ضبط القرارات</button>
+                <span className="chip ok">معتمد صراحةً: {decisionCount.apply}</span>
+                <button className="btn small" onClick={approveEligiblePage} disabled={!previewRows.some((row) => row.status !== 'blocked' && row.action !== 'unchanged' && row.action !== 'duplicate')}>
+                  <CheckCircle2 size={14} /> اعتماد المؤهل في هذه الصفحة
+                </button>
+                <button className="btn small ghost" onClick={() => setDecisions({})}>إلغاء كل الاعتمادات</button>
               </div>
             </div>
 
@@ -344,6 +354,17 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
                 </table>
               </div>
             )}
+            {pageCount > 1 && (
+              <div className="row between" style={{ marginTop: 14 }}>
+                <button className="btn small ghost" onClick={() => setPage((value) => Math.max(0, value - 1))} disabled={safePage === 0}>
+                  <ChevronLeft size={14} /> الصفحة السابقة
+                </button>
+                <span className="muted">الصفحة {safePage + 1} / {pageCount}</span>
+                <button className="btn small ghost" onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))} disabled={safePage >= pageCount - 1}>
+                  الصفحة التالية <ChevronLeft size={14} style={{ transform: 'rotate(180deg)' }} />
+                </button>
+              </div>
+            )}
           </Card>
 
           <Card className="gold">
@@ -353,7 +374,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
                   <Switch checked={force} onChange={setForce} label="السماح بكتابة الصفوف المحجوبة التي اخترت لها «تطبيق» صراحةً" />
                 </div>
                 <span className="muted" style={{ fontSize: '0.8rem' }}>
-                  التطبيق يكتب كل الصفوف المقبولة في معاملة واحدة: أي فشل يترك قاعدة البيانات كما كانت.
+                  التطبيق يكتب الصفوف المعتمدة صراحةً فقط وفي معاملة واحدة؛ الصفوف غير المعتمدة تُتخطى، وأي فشل يترك قاعدة البيانات كما كانت.
                 </span>
               </div>
               <div className="btn-row">

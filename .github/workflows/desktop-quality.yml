@@ -1,0 +1,93 @@
+name: Desktop Quality Gates
+
+on:
+  pull_request:
+    paths:
+      - "desktop-app/**"
+      - ".github/workflows/desktop-quality.yml"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux — unit, build and Electron E2E
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop-app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop-app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit and integration tests
+        run: npm test
+
+      - name: Build renderer
+        run: npm run build
+
+      - name: Electron end-to-end checks
+        run: xvfb-run -a npx electron scripts/e2e-analysis.cjs
+
+      - name: Upload synthetic test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-electron-evidence
+          path: نتائج-الفحص/**
+          if-no-files-found: warn
+
+  windows:
+    name: Windows — unit, build and Electron E2E
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop-app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop-app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit and integration tests
+        run: npm test
+
+      - name: Build renderer
+        run: npm run build
+
+      - name: Electron end-to-end checks
+        run: npx electron scripts/e2e-analysis.cjs
+
+      - name: Upload synthetic test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-electron-evidence
+          path: نتائج-الفحص/**
+          if-no-files-found: warn
