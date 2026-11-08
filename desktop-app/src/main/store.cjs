@@ -52,30 +52,86 @@ function loadOrCreateStoreKey(keyPath, options = {}) {
  * Backups are pruned to the newest `keep` files so the folder cannot grow without
  * bound; pruning only ever removes files this function created.
  */
+/**
+ * Copy a validated encryption key beside a backup using private file permissions.
+ * A database backup without this key is not a recoverable backup.
+ */
+function copyStoreKey(keyPath, targetPath) {
+  const stat = fs.lstatSync(keyPath);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error('ملف مفتاح التخزين ليس ملفًا عاديًا آمنًا.');
+  }
+  const key = fs.readFileSync(keyPath, 'utf8').trim();
+  if (!/^[0-9a-f]{64}$/i.test(key)) {
+    throw new Error('مفتاح التخزين غير صالح؛ أُوقفت عملية النسخ الاحتياطي لحماية قابلية الاستعادة.');
+  }
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(targetPath, key + '\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  if (process.platform !== 'win32') fs.chmodSync(targetPath, 0o600);
+  return targetPath;
+}
+
+/**
+ * Copy a complete encrypted store (database, sidecars and encryption key) into
+ * the backups folder. When keyPath is supplied, failure to copy the key or any
+ * existing sidecar aborts the backup and removes the partial files.
+ *
+ * Backups are pruned as complete bundles: database, key and SQLite sidecars.
+ */
 function backupStore(filePath, options = {}) {
   if (!fs.existsSync(filePath)) return null;
+  const keyPath = options.keyPath ? path.resolve(options.keyPath) : null;
+  if (keyPath && !fs.existsSync(keyPath)) {
+    throw new Error('تعذّر إنشاء نسخة قابلة للاستعادة: مفتاح التخزين store.key غير موجود.');
+  }
+
   const keep = Math.max(1, Number(options.keep) || 10);
   const directory = path.join(path.dirname(filePath), 'backups');
-  fs.mkdirSync(directory, { recursive: true });
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') fs.chmodSync(directory, 0o700);
+
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const base = path.join(directory, `${path.basename(filePath)}.${stamp}.bak`);
-  fs.copyFileSync(filePath, base);
-  for (const suffix of SIDECAR_SUFFIXES) {
-    if (fs.existsSync(`${filePath}${suffix}`)) {
-      try { fs.copyFileSync(`${filePath}${suffix}`, `${base}${suffix}`); } catch { /* optional */ }
+  const base = path.join(directory, path.basename(filePath) + '.' + stamp + '.bak');
+  const created = [];
+
+  try {
+    fs.copyFileSync(filePath, base);
+    created.push(base);
+    if (process.platform !== 'win32') fs.chmodSync(base, 0o600);
+
+    for (const suffix of SIDECAR_SUFFIXES) {
+      const source = filePath + suffix;
+      if (!fs.existsSync(source)) continue;
+      const target = base + suffix;
+      fs.copyFileSync(source, target);
+      created.push(target);
+      if (process.platform !== 'win32') fs.chmodSync(target, 0o600);
+    }
+
+    if (keyPath) {
+      const target = base + '.key';
+      copyStoreKey(keyPath, target);
+      created.push(target);
+    }
+  } catch (error) {
+    for (const target of created) {
+      try { fs.rmSync(target, { force: true }); } catch { /* best effort cleanup */ }
+    }
+    throw new Error('فشل إنشاء نسخة احتياطية مكتملة؛ أزيلت الملفات الجزئية: ' + error.message);
+  }
+
+  const prefix = path.basename(filePath) + '.';
+  const stale = fs.readdirSync(directory)
+    .filter((name) => name.startsWith(prefix) && name.endsWith('.bak'))
+    .sort()
+    .reverse()
+    .slice(keep);
+  for (const name of stale) {
+    const oldBase = path.join(directory, name);
+    for (const suffix of ['', '.key', ...SIDECAR_SUFFIXES]) {
+      try { fs.rmSync(oldBase + suffix, { force: true }); } catch { /* best effort */ }
     }
   }
-  try {
-    const prefix = `${path.basename(filePath)}.`;
-    const stale = fs.readdirSync(directory)
-      .filter((name) => name.startsWith(prefix) && name.endsWith('.bak'))
-      .sort()
-      .reverse()
-      .slice(keep);
-    for (const name of stale) {
-      try { fs.rmSync(path.join(directory, name), { force: true }); } catch { /* best effort */ }
-    }
-  } catch { /* pruning is best effort */ }
   return base;
 }
 
@@ -265,6 +321,7 @@ module.exports = {
   canOpenWithKey,
   classifyStore,
   backupStore,
+  copyStoreKey,
   listBackups,
   findLegacyBackups,
   quarantineLegacyDatabase,

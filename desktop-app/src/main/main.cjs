@@ -9,6 +9,7 @@ const {
   findLegacyBackups,
   quarantineLegacyDatabase,
   backupStore,
+  copyStoreKey,
   listBackups,
 } = require('./store.cjs');
 const security = require('./security.cjs');
@@ -304,7 +305,7 @@ function registerHandlers() {
       if (verdict.reason === 'foreign') {
         // Keep a byte-for-byte copy before touching anything: the "foreign"
         // verdict usually means a different key, not a worthless file.
-        try { backup = backupStore(filePath); } catch { /* the move below still protects the user */ }
+        try { backup = backupStore(filePath, { keyPath }); } catch { /* the move below still protects the user */ }
         let stagedPath = `${filePath}.staged-${Date.now()}`;
         try {
           const staged = openEncryptedStore(stagedPath, key);
@@ -347,6 +348,14 @@ function registerHandlers() {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const target = path.join(directory, `development-data.db.${stamp}.bak`);
     await db.backup(target);
+    const keyTarget = target + '.key';
+    try {
+      copyStoreKey(getStoreKeyPath(), keyTarget);
+    } catch (error) {
+      try { fs.rmSync(target, { force: true }); } catch { /* best effort cleanup */ }
+      try { fs.rmSync(keyTarget, { force: true }); } catch { /* best effort cleanup */ }
+      throw new Error('فشل حفظ مفتاح النسخة الاحتياطية؛ حُذفت النسخة غير القابلة للاستعادة: ' + error.message);
+    }
     persist.logAccess(db, { action: 'store-backup', entity: 'store', entityId: target });
     auditRead('db:backup', { entity: 'store', entityId: target });
     return { filePath: target, backups: listBackups(getDatabasePath()).length };

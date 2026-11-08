@@ -18,7 +18,7 @@ const test = require('node:test');
 const Database = require('better-sqlite3-multiple-ciphers');
 
 const { migrate, DIRECTORATE_COLUMN_MIGRATIONS } = require('../src/main/analysis/store-schema.cjs');
-const { openEncryptedStore } = require('../src/main/store.cjs');
+const { openEncryptedStore, backupStore, copyStoreKey, listBackups } = require('../src/main/store.cjs');
 const persist = require('../src/main/analysis/persist.cjs');
 const security = require('../src/main/security.cjs');
 const { serializeAnalysis } = require('../src/main/analysis/serialize.cjs');
@@ -173,4 +173,63 @@ test('compact serialization drops per-row values but keeps the analysis usable',
 
   const full = serializeAnalysis(analysis);
   assert.equal(full.rows[0].values.population, 43739);
+});
+
+test('an encrypted-store backup includes its matching key and sidecars as one recoverable bundle', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-backup-bundle-'));
+  try {
+    const databasePath = path.join(directory, 'development-data.db');
+    const keyPath = path.join(directory, 'store.key');
+    const key = 'a'.repeat(64);
+    fs.writeFileSync(databasePath, 'encrypted-database-bytes');
+    fs.writeFileSync(keyPath, key, { mode: 0o600 });
+    fs.writeFileSync(databasePath + '-wal', 'wal-bytes');
+    fs.writeFileSync(databasePath + '-shm', 'shm-bytes');
+
+    const backup = backupStore(databasePath, { keyPath });
+    assert.ok(backup);
+    assert.equal(fs.readFileSync(backup, 'utf8'), 'encrypted-database-bytes');
+    assert.equal(fs.readFileSync(backup + '.key', 'utf8').trim(), key);
+    assert.equal(fs.readFileSync(backup + '-wal', 'utf8'), 'wal-bytes');
+    assert.equal(fs.readFileSync(backup + '-shm', 'utf8'), 'shm-bytes');
+    assert.deepEqual(listBackups(databasePath), [backup]);
+
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(backup).mode & 0o077, 0);
+      assert.equal(fs.statSync(backup + '.key').mode & 0o077, 0);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a missing or malformed encryption key prevents creation of a misleading database-only backup', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-backup-invalid-key-'));
+  try {
+    const databasePath = path.join(directory, 'development-data.db');
+    const keyPath = path.join(directory, 'store.key');
+    fs.writeFileSync(databasePath, 'encrypted-database-bytes');
+    assert.throws(() => backupStore(databasePath, { keyPath }), /store.key غير موجود/);
+    assert.equal(fs.existsSync(path.join(directory, 'backups')), false);
+
+    fs.writeFileSync(keyPath, 'not-a-valid-key');
+    assert.throws(() => backupStore(databasePath, { keyPath }), /مفتاح التخزين غير صالح/);
+    assert.equal(listBackups(databasePath).length, 0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('copyStoreKey writes only validated key material with private permissions', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-copy-key-'));
+  try {
+    const keyPath = path.join(directory, 'store.key');
+    const targetPath = path.join(directory, 'backup.key');
+    fs.writeFileSync(keyPath, 'b'.repeat(64));
+    copyStoreKey(keyPath, targetPath);
+    assert.equal(fs.readFileSync(targetPath, 'utf8').trim(), 'b'.repeat(64));
+    if (process.platform !== 'win32') assert.equal(fs.statSync(targetPath).mode & 0o077, 0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
