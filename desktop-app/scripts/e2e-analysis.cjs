@@ -481,10 +481,29 @@ app.whenReady().then(async () => {
     );
     await screenshot(window, '15-اعتماد-المشاريع.png');
 
-    await clickByText(window, '.side-nav .nav-item', 'سجل المشاريع');
-    await waitFor(window, `document.body.innerText.includes('سجل المشاريع المعتمدة') && document.body.innerText.includes('مشروع اختبار E2E')`, 30000);
+    const projectListIpc = await window.webContents.executeJavaScript(
+      `window.localApp.canonicalProjects({ search: 'مشروع اختبار E2E', offset: 0, limit: 10 })`
+    );
+    console.log('[E2E] Project register IPC: ' + JSON.stringify(projectListIpc));
+    check(
+      'pages',
+      'استعلام سجل المشاريع يعيد المشروع المعتمد',
+      !projectListIpc.restricted && projectListIpc.rows?.some(row => row.code === 'E2E-001'),
+      JSON.stringify(projectListIpc).slice(0, 1200)
+    );
+    const projectNavClicked = await clickByText(window, '.side-nav .nav-item', 'سجل المشاريع');
+    const projectPageDiagnostics = await window.webContents.executeJavaScript(`(() => ({
+      activeNavigation: document.querySelector('.side-nav .nav-item.active')?.innerText ?? null,
+      projectTitlePresent: document.body.innerText.includes('سجل المشاريع المعتمدة'),
+      projectCodePresent: document.body.innerText.includes('E2E-001'),
+      pageText: document.body.innerText.slice(-1800),
+      cards: [...document.querySelectorAll('.card')].map(card => card.innerText.slice(0, 100)),
+    }))()`);
+    console.log('[E2E] Project page navigation: ' + JSON.stringify({ projectNavClicked, ...projectPageDiagnostics }));
+    await waitFor(window, `document.body.innerText.includes('سجل المشاريع المعتمدة') && document.body.innerText.includes('مشروع اختبار E2E')`, 12000)
+      .catch(error => { throw new Error(error.message + '; projectPage=' + JSON.stringify(projectPageDiagnostics)); });
     const projectList = await bodyText(window);
-    check('pages', 'سجل المشاريع يعرض المشروع المعتمد من ملف Excel', projectList.includes('مشروع اختبار E2E') && projectList.includes('E2E-001'));
+    check('pages', 'سجل المشاريع يعرض المشروع المعتمد من ملف Excel', projectList.includes('مشروع اختبار E2E') && projectList.includes('E2E-001') && projectNavClicked);
     const detailsOpened = await clickByText(window, 'table.data tbody tr button', 'التفاصيل');
     await waitFor(window, `document.body.innerText.includes('مصدر البيانات') && document.body.innerText.includes('مشاريع اختبار')`, 30000);
     check('pages', 'تفاصيل المشروع تعرض التمويل والمصدر وملاحظات الجودة', detailsOpened && (await bodyText(window)).includes('جهات التمويل'));
