@@ -307,7 +307,7 @@ app.whenReady().then(async () => {
     check('import', 'لا صفوف مرفوضة أثناء التطبيق', imported.refused === 0, `refused=${imported.refused}`);
 
     // Exercise backup + restore through the actual operator-facing control.
-    const restoreSource = await window.localApp.backupDatabase();
+    const restoreSource = await window.webContents.executeJavaScript('window.localApp.backupDatabase()');
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [restoreSource.filePath] });
     await window.webContents.executeJavaScript('window.confirm = () => true');
     const restoreClicked = await clickBySelector(window, '.topbar button[aria-label="استعادة نسخة احتياطية"]', 'استعادة النسخة الاحتياطية');
