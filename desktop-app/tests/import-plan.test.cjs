@@ -448,6 +448,38 @@ test('an explicit zero in the file is a change over a stored empty cell, not an 
   }
 });
 
+test('a plan is rejected when the database changes after review', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    const stored = insertStored(database, 'مديرية متزامنة', 'إب', { schools: 40 });
+    const plan = buildImportPlan(database, readOf([
+      rowOf(2, completeValues({ districtName: 'مديرية متزامنة', governorate: 'إب', schools: 41 })),
+    ]), { fileName: FILE_NAME });
+    assert.equal(plan.rows[0].action, 'update');
+
+    // Simulate a manual correction or another trusted writer after the reviewer
+    // inspected the plan but before they pressed Apply.
+    persist.upsertDirectorate(database, {
+      districtName: 'مديرية متزامنة',
+      governorate: 'إب',
+      values: completeValues({ districtName: 'مديرية متزامنة', governorate: 'إب', schools: 55 }),
+      rawValues: {},
+      sources: {},
+    }, { fileName: 'manual-entry', sheetName: null });
+
+    assert.throws(
+      () => applyWithAllEligibleReviewed(database, plan),
+      /تغيرت البيانات المعتمدة بعد فحص الملف/
+    );
+    const current = database.prepare('SELECT schools FROM directorates WHERE id = ?').get(stored.id);
+    assert.equal(current.schools, 55, 'the new manual value must never be overwritten by the stale plan');
+    assert.equal(persist.countDirectorates(database), 1);
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('unreviewed create/update rows are skipped and only explicit approvals are written', () => {
   const { database, directory } = openTestDatabase();
   try {

@@ -22,6 +22,7 @@
  * "what was proposed" and "what was written" separable.
  */
 
+const crypto = require('node:crypto');
 const { INPUT_FIELDS, FIELD_BY_KEY, MANDATORY_FIELDS } = require('./schema.cjs');
 const { DIRECTORATE_COLUMNS } = require('./store-schema.cjs');
 
@@ -53,6 +54,30 @@ const WARNING_CODES = new Set(['missing-mandatory', 'percent-converted', 'placeh
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+/**
+ * Fingerprint the exact persisted data that an import plan may overwrite.
+ * Include field provenance as well as directorate values: a manual correction,
+ * source reassignment, insert or delete invalidates every pending plan.
+ */
+function databaseFingerprint(database) {
+  const directorates = database.prepare('SELECT * FROM directorates ORDER BY id').all();
+  const sources = database.prepare(
+    'SELECT * FROM directorate_sources ORDER BY directorate_id, field_key'
+  ).all();
+  return crypto.createHash('sha256')
+    .update(JSON.stringify({ directorates, sources }), 'utf8')
+    .digest('hex');
+}
+
+function captureDatabaseState(database) {
+  return database.transaction(() => ({
+    directorates: database.prepare('SELECT * FROM directorates ORDER BY id').all(),
+    sources: database.prepare(
+      'SELECT * FROM directorate_sources ORDER BY directorate_id, field_key'
+    ).all(),
+  }))();
 }
 
 function identityKey(governorate, district) {
@@ -185,10 +210,16 @@ function completenessOf(values) {
  * @param {{fileName?:string, sheetName?:string}} [meta]
  */
 function buildImportPlan(database, read, meta = {}) {
+  // Capture directorates and their provenance within one SQLite read transaction
+  // so the review plan and its concurrency token describe the same DB snapshot.
+  const databaseState = captureDatabaseState(database);
   const stored = new Map();
-  for (const record of database.prepare('SELECT * FROM directorates').all()) {
+  for (const record of databaseState.directorates) {
     stored.set(identityKey(record.governorate, record.district), record);
   }
+  const planDatabaseFingerprint = crypto.createHash('sha256')
+    .update(JSON.stringify(databaseState), 'utf8')
+    .digest('hex');
 
   const rows = [];
   const seen = new Map();
@@ -326,6 +357,8 @@ function buildImportPlan(database, read, meta = {}) {
     totalRows: rows.length,
     scope,
     rows,
+    // Kept in the main-process plan only; summarizePlan intentionally omits it.
+    databaseFingerprint: planDatabaseFingerprint,
     createdAt: nowIso(),
   };
 }
@@ -395,6 +428,12 @@ function applyImportPlan(database, plan, request = {}) {
   let unchanged = 0;
 
   const run = database.transaction((rows) => {
+    // A plan is valid only for the exact DB snapshot the operator reviewed.
+    // Check inside the write transaction before the first insert/update.
+    if (!plan.databaseFingerprint || databaseFingerprint(database) !== plan.databaseFingerprint) {
+      throw new Error('تغيرت البيانات المعتمدة بعد فحص الملف. أعد فحص ملف Excel وراجع الخطة الجديدة قبل التطبيق.');
+    }
+
     for (const row of rows) {
       const requested = decisions[row.rowNumber] ?? decisions[String(row.rowNumber)];
 
