@@ -34,6 +34,13 @@ test('Electron E2E blocks and reports Chromium HTTP, HTTPS and WebSocket request
   assert.match(harness, /networkAttempts\.length === 0/);
 });
 
+test('Electron E2E opens the native file dialog path and verifies the workbook inventory UI', () => {
+  assert.match(harness, /dialog\.showOpenDialog = async/);
+  assert.match(harness, /اختيار ملف القالب/);
+  assert.match(harness, /فحص بنية ملف Excel/);
+  assert.match(harness, /inventoryUi\.sheetNames/);
+});
+
 test('Electron E2E checks keyboard focus visibility', () => {
   assert.match(harness, /keyCode: 'TAB'/);
   assert.match(harness, /:focus-visible/);

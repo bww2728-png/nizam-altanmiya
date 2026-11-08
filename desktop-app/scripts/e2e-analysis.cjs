@@ -19,7 +19,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { app, BrowserWindow, session } = require('electron');
+const { app, BrowserWindow, session, dialog } = require('electron');
 
 const ROOT = path.join(__dirname, '..');
 const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'template-v3.3.xlsx');
@@ -371,6 +371,29 @@ app.whenReady().then(async () => {
     await sleep(400);
     check('pages', 'شاشة الاستيراد تعرض الخطوات الثلاث', await window.webContents.executeJavaScript(`Boolean(document.querySelector('.stepper'))`));
     check('pages', 'شاشة الاستيراد تذكر الصيغ والقواعد', (await bodyText(window)).includes('xlsx'));
+
+    // Exercise the actual UI scan path. Native dialog is stubbed to a synthetic
+    // workbook so the operator-facing inventory is verified before any Apply.
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [SAMPLE] });
+    const scanClicked = await clickByText(window, '.btn.primary.sheen', 'اختيار ملف القالب');
+    await waitFor(window, `document.body.innerText.includes('فحص بنية ملف Excel')`, 60000);
+    const inventoryUi = await window.webContents.executeJavaScript(`(() => {
+      const card = [...document.querySelectorAll('.card')].find((item) =>
+        item.querySelector('.card-head h2')?.textContent.trim() === 'فحص بنية ملف Excel'
+      );
+      return {
+        present: Boolean(card),
+        rows: card?.querySelectorAll('table.data tbody tr').length ?? 0,
+        text: (card?.innerText || '').slice(0, 1400),
+        sheetNames: [...(card?.querySelectorAll('table.data tbody tr td:first-child') ?? [])].map((node) => node.textContent.trim()),
+      };
+    })()`);
+    check(
+      'import',
+      'واجهة المراجعة تعرض فهرس الأوراق قبل اعتماد الاستيراد',
+      scanClicked && inventoryUi.present && inventoryUi.rows > 0 && inventoryUi.sheetNames.includes('قاعدة البيانات الشاملة'),
+      JSON.stringify(inventoryUi)
+    );
     await screenshot(window, '8-الاستيراد.png');
 
     // ---------- 4. Access profile ----------
