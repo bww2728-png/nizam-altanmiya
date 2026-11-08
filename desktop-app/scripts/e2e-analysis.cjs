@@ -309,6 +309,15 @@ app.whenReady().then(async () => {
     check('import', 'الخطة تعرض 20 صفًا وتُطبَّق في القاعدة المشفّرة', imported.planRows === 20 && imported.total === 20 && imported.created === 20, JSON.stringify(imported));
     check('import', 'لا صفوف مرفوضة أثناء التطبيق', imported.refused === 0, `refused=${imported.refused}`);
 
+    // Exercise backup + restore through the actual operator-facing control.
+    const restoreSource = await window.localApp.backupDatabase();
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [restoreSource.filePath] });
+    await window.webContents.executeJavaScript('window.confirm = () => true');
+    const restoreClicked = await clickBySelector(window, '.topbar button[aria-label="استعادة نسخة احتياطية"]', 'استعادة النسخة الاحتياطية');
+    await waitFor(window, `document.body.innerText.includes('تمت استعادة النسخة الاحتياطية والتحقق من قاعدة البيانات')`, 30000);
+    check('security', 'استعادة النسخة الاحتياطية تعمل من واجهة المستخدم', restoreClicked && await window.webContents.executeJavaScript(`window.localApp.status().then((state) => state.unlocked && state.hasKey)`));
+    await screenshot(window, '9-بعد-استعادة-النسخة.png');
+
     // ---------- 3. Pages ----------
     await clickByText(window, '.side-nav .nav-item', 'اللوحة التفاعلية');
     await waitFor(window, `document.body.innerText.includes('نظرة شاملة')`, 30000);
