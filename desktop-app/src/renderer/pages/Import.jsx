@@ -726,22 +726,17 @@ function ProjectRegionReview({ staging }) {
       setRegionData(result);
       if (result?.restricted) return;
       const projectRegions = (result.regions ?? []).filter(region => region.candidateType === 'project-candidate');
-      setSelectedRegionId(current => {
-        const selected = current && projectRegions.some(region => String(region.id) === String(current))
-          ? current : String(projectRegions[0]?.id ?? '');
-        const candidate = projectRegions.find(region => String(region.id) === String(selected));
-        if (candidate) {
-          setColumnMap(previous => {
-            if (Object.keys(previous).length) return previous;
-            const guesses = {};
-            for (const header of candidate.headers ?? []) {
-              const key = suggestedProjectField(header.label);
-              if (key && guesses[key] === undefined) guesses[key] = header.column;
-            }
-            return guesses;
-          });
+      const firstCandidate = projectRegions[0];
+      setSelectedRegionId(current => current && projectRegions.some(region => String(region.id) === String(current))
+        ? current : String(firstCandidate?.id ?? ''));
+      setColumnMap(previous => {
+        if (Object.keys(previous).length || !firstCandidate) return previous;
+        const guesses = {};
+        for (const header of firstCandidate.headers ?? []) {
+          const key = suggestedProjectField(header.label);
+          if (key && guesses[key] === undefined) guesses[key] = header.column;
         }
-        return selected;
+        return guesses;
       });
     } catch (error) {
       setRegionError(errText(error) || 'تعذر تحميل مناطق البيانات المرشحة.');
