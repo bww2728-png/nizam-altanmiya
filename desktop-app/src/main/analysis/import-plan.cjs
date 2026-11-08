@@ -357,6 +357,7 @@ function buildImportPlan(database, read, meta = {}) {
     totalRows: rows.length,
     scope,
     rows,
+    workbookInventory: read.workbookInventory ?? null,
     // Kept in the main-process plan only; summarizePlan intentionally omits it.
     databaseFingerprint: planDatabaseFingerprint,
     createdAt: nowIso(),
@@ -378,6 +379,7 @@ function summarizePlan(plan, limit = 300) {
     totalRows: plan.totalRows,
     scope: plan.scope,
     createdAt: plan.createdAt,
+    workbookInventory: plan.workbookInventory ?? null,
     changedFields: [...new Set(plan.rows.flatMap((row) => row.changes.map((change) => change.key)))],
     preview: plan.rows.slice(0, limit).map((row) => ({
       rowNumber: row.rowNumber,
