@@ -209,6 +209,7 @@ test('a missing or malformed encryption key prevents creation of a misleading da
     const databasePath = path.join(directory, 'development-data.db');
     const keyPath = path.join(directory, 'store.key');
     fs.writeFileSync(databasePath, 'encrypted-database-bytes');
+    assert.throws(() => backupStore(databasePath), /يجب توفير مفتاح التخزين/);
     assert.throws(() => backupStore(databasePath, { keyPath }), /store.key غير موجود/);
     assert.equal(fs.existsSync(path.join(directory, 'backups')), false);
 
