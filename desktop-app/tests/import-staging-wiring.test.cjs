@@ -9,6 +9,7 @@ const ROOT = path.join(__dirname, '..');
 const main = fs.readFileSync(path.join(ROOT, 'src/main/main.cjs'), 'utf8');
 const preload = fs.readFileSync(path.join(ROOT, 'src/main/preload.cjs'), 'utf8');
 const ui = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/Import.jsx'), 'utf8');
+const shell = fs.readFileSync(path.join(ROOT, 'src/renderer/components/AppShell.jsx'), 'utf8');
 
 test('main process durably stages a workbook before constructing the directorate review plan', () => {
   const scanStart = main.indexOf("ipcMain.handle('import:scan'");
@@ -64,5 +65,20 @@ test('staged project regions are owner-gated, paged and promoted only through ex
   assert.match(ui, /اعتماد المشاريع المحددة في قاعدة البيانات/);
   assert.match(ui, /approvedRows/);
   assert.match(ui, /checked=\{Boolean\(selectedRows\[row\.rowNumber\]\)\}/);
+});
+
+
+
+test('full database backups and restore are blocked in shared mode at IPC and UI layers', () => {
+  const backupStart = main.indexOf("ipcMain.handle('db:backup'");
+  const restoreStart = main.indexOf("ipcMain.handle('db:restore'");
+  assert.ok(backupStart >= 0 && restoreStart > backupStart);
+  const backupHandler = main.slice(backupStart, main.indexOf("ipcMain.handle('db:restore'", backupStart));
+  const restoreHandler = main.slice(restoreStart, main.indexOf("ipcMain.handle('db:backups'", restoreStart));
+  assert.match(backupHandler, /currentProfile\(\) !== 'owner'/);
+  assert.match(restoreHandler, /currentProfile\(\) !== 'owner'/);
+  assert.match(shell, /profile !== 'shared'/);
+  assert.match(shell, /aria-label="إنشاء نسخة احتياطية الآن"/);
+  assert.match(shell, /aria-label="استعادة نسخة احتياطية"/);
 });
 
