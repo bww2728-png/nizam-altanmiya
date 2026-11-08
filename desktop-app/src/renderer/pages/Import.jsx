@@ -246,6 +246,78 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
             )}
           </Card>
 
+          {plan.workbookInventory && (
+            <Card
+              title="فحص بنية ملف Excel"
+              subtitle={`فُحصت ${plan.workbookInventory.sheetCount} ورقة؛ اختر النظام جدولًا واحدًا للمسار الحالي، وتظهر هنا كل الأوراق ومناطق العناوين المرشحة.`}
+            >
+              <div className="stat-strip">
+                <MiniStat label="أوراق العمل" value={fmtNumber(plan.workbookInventory.sheetCount, 0)} />
+                <MiniStat label="أوراق ظاهرة" value={fmtNumber(plan.workbookInventory.visibleSheetCount, 0)} />
+                <MiniStat label="أوراق مخفية" value={fmtNumber(plan.workbookInventory.hiddenSheetCount, 0)} />
+                <MiniStat label="رؤوس مرشحة" value={fmtNumber(plan.workbookInventory.sheets.reduce((sum, sheet) => sum + sheet.headerCandidates.length, 0), 0)} />
+                <MiniStat label="أصول صور" value={fmtNumber(plan.workbookInventory.workbookImageAssetCount ?? 0, 0)} />
+              </div>
+              <div className="table-wrap" style={{ marginTop: 14 }}>
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th>ورقة العمل</th>
+                      <th>الحالة</th>
+                      <th>الأبعاد (صف × عمود)</th>
+                      <th>عناوين الجداول المحتملة</th>
+                      <th>محتوى إضافي</th>
+                      <th>الإجراء</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {plan.workbookInventory.sheets.map((sheet) => (
+                      <tr key={sheet.name}>
+                        <td className="strong">{sheet.name}</td>
+                        <td>{sheet.hidden ? <Badge tone="warn">مخفية</Badge> : <Badge tone="ok">ظاهرة</Badge>}</td>
+                        <td className="num">{fmtNumber(sheet.rowCount, 0)} × {fmtNumber(sheet.columnCount, 0)}</td>
+                        <td>
+                          {sheet.headerCandidates.length
+                            ? sheet.headerCandidates.map((candidate) => `صف ${candidate.headerRow} · ${candidate.matchedCount} حقول`).join('، ')
+                            : <span className="muted">لم يُكتشف رأس معروف</span>}
+                        </td>
+                        <td>
+                          <div className="chip-row">
+                            {sheet.imageCount > 0 && <span className="chip">صور: {sheet.imageCount}</span>}
+                            {sheet.formulaCount > 0 && <span className="chip">صيغ: {sheet.formulaCount}</span>}
+                            {sheet.mergedRangeCount > 0 && <span className="chip">دمج: {sheet.mergedRangeCount}</span>}
+                            {sheet.tableCount > 0 && <span className="chip">جداول Excel: {sheet.tableCount}</span>}
+                            {sheet.hiddenRowCount > 0 && <span className="chip">صفوف مخفية: {sheet.hiddenRowCount}</span>}
+                            {!sheet.imageCount && !sheet.formulaCount && !sheet.mergedRangeCount && !sheet.tableCount && !sheet.hiddenRowCount && <span className="muted">—</span>}
+                          </div>
+                        </td>
+                        <td>
+                          {sheet.selected
+                            ? <Badge tone="ok">الورقة المستخدمة</Badge>
+                            : sheet.headerCandidates.length
+                              ? <Badge tone="warn">مرشح غير مستورد</Badge>
+                              : <Badge>غير مستهدفة</Badge>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <Notice tone="warn" title="حدود الاستيراد الحالية">
+                <span className="chip warn">يُستورد أول جدول مرشح فقط من ورقة ظاهرة واحدة</span>
+                <span className="chip">الأوراق والجداول الإضافية لا تُدمج أو تُستورد تلقائيًا</span>
+                <span className="chip">الصور والصيغ والخلايا المدمجة تُحصَر للمراجعة ولا تُحوّل إلى بيانات تلقائيًا</span>
+                <span className="chip">مواضع الصور غير المؤكدة: {fmtNumber(plan.workbookInventory.unanchoredImageAssetCount ?? 0, 0)}</span>
+                <span className="chip">يلزم اختيار وربط مستقل قبل إدخال جداول المشاريع أو المؤشرات القطاعية المتعددة</span>
+              </Notice>
+              {(plan.workbookInventory.sheets.some((sheet) => sheet.inventoryTruncated || sheet.headerScanTruncated)) && (
+                <p className="muted" style={{ fontSize: '0.8rem', marginTop: 10 }}>
+                  ملاحظة: حدود الفحص ظاهرة في التقرير؛ قد توجد عناوين أو تفاصيل إضافية بعد الحد الأعلى المعلن.
+                </p>
+              )}
+            </Card>
+          )}
+
           <Card
             title="مراجعة الصفوف"
             subtitle="كل الصفوف تبدأ غير معتمدة. اعتمد الصفوف المؤهلة في الصفحة الحالية أو اختر القرار لكل صف؛ لا يُكتب أي صف غير معتمد صراحةً. الصف المحجوب يحتاج قرار تطبيق مستقلًا مع تفعيل القوة."
