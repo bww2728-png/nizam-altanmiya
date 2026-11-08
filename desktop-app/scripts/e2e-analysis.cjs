@@ -19,13 +19,32 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, session } = require('electron');
 
 const ROOT = path.join(__dirname, '..');
 const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'template-v3.3.xlsx');
 const EVIDENCE = path.join(ROOT, '..', 'نتائج-الفحص');
 const USER_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-e2e-'));
 const SAMPLE = path.join(USER_DATA, 'sample-20.xlsx');
+const networkAttempts = [];
+const interactionTrace = [];
+
+// Block and record browser-session network requests during this end-to-end run.
+// This validates Chromium-originated HTTP(S)/WebSocket traffic, not native OS
+// networking initiated by arbitrary Node/Electron modules.
+app.on('ready', () => {
+  session.defaultSession.webRequest.onBeforeRequest(
+    { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] },
+    (details, callback) => {
+      networkAttempts.push({
+        url: details.url,
+        method: details.method,
+        resourceType: details.resourceType,
+      });
+      callback({ cancel: true });
+    }
+  );
+});
 
 app.setPath('userData', USER_DATA);
 require(path.join(ROOT, 'src', 'main', 'main.cjs'));
@@ -58,14 +77,77 @@ async function waitFor(window, expression, timeout = 25000) {
   throw new Error(`timeout waiting for: ${expression}`);
 }
 
-async function clickByText(window, selector, text) {
-  return window.webContents.executeJavaScript(`(() => {
+async function pointerClick(window, selector, text = null, label = '') {
+  const match = text === null
+    ? 'nodes[0]'
+    : `nodes.find((node) => (node.textContent || '').includes(${JSON.stringify(text)}))`;
+  const target = await window.webContents.executeJavaScript(`(() => {
     const nodes = [...document.querySelectorAll(${JSON.stringify(selector)})];
-    const target = nodes.find((node) => (node.textContent || '').includes(${JSON.stringify(text)}));
-    if (!target) return false;
-    target.click();
-    return true;
+    const target = ${match};
+    if (!target) return null;
+    const rect = target.getBoundingClientRect();
+    const x = Math.round(rect.left + rect.width / 2);
+    const y = Math.round(rect.top + rect.height / 2);
+    const hit = document.elementFromPoint(x, y);
+    return {
+      ok: rect.width > 0 && rect.height > 0 && Boolean(hit && (hit === target || target.contains(hit))),
+      x, y, width: rect.width, height: rect.height,
+      tag: target.tagName,
+      accessibleName: target.getAttribute('aria-label') || target.getAttribute('title') || (target.innerText || target.textContent || '').trim().slice(0, 100),
+      hitTag: hit?.tagName ?? null,
+      hitText: (hit?.innerText || hit?.textContent || '').trim().slice(0, 100)
+    };
   })()`);
+
+  const trace = {
+    action: 'pointer-click',
+    selector,
+    label: label || text || selector,
+    ...(target ?? {}),
+    at: new Date().toISOString(),
+  };
+  if (!target?.ok) {
+    interactionTrace.push({ ...trace, ok: false, reason: 'target-not-visible-or-pointer-intercepted' });
+    return false;
+  }
+
+  const evidenceDir = path.join(EVIDENCE, 'click-traces');
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  const sequence = String(interactionTrace.length + 1).padStart(3, '0');
+  const beforeFile = path.join('click-traces', `${sequence}-before.png`);
+  const afterFile = path.join('click-traces', `${sequence}-after.png`);
+  const beforeText = await bodyText(window);
+  const beforeImage = await window.webContents.capturePage();
+  fs.writeFileSync(path.join(EVIDENCE, beforeFile), beforeImage.toPNG());
+
+  // Send actual mouse movement/down/up through Electron. A synthetic DOM
+  // HTMLElement.click() would bypass hit testing and cannot prove clickability.
+  window.webContents.sendInputEvent({ type: 'mouseMove', x: target.x, y: target.y });
+  window.webContents.sendInputEvent({ type: 'mouseDown', x: target.x, y: target.y, button: 'left', clickCount: 1 });
+  window.webContents.sendInputEvent({ type: 'mouseUp', x: target.x, y: target.y, button: 'left', clickCount: 1 });
+  await sleep(180);
+
+  const afterText = await bodyText(window);
+  const afterImage = await window.webContents.capturePage();
+  fs.writeFileSync(path.join(EVIDENCE, afterFile), afterImage.toPNG());
+  interactionTrace.push({
+    ...trace,
+    ok: true,
+    beforeFile,
+    afterFile,
+    beforeText: beforeText.slice(0, 240),
+    afterText: afterText.slice(0, 240),
+    changedText: beforeText !== afterText,
+  });
+  return true;
+}
+
+async function clickByText(window, selector, text) {
+  return pointerClick(window, selector, text, text);
+}
+
+async function clickBySelector(window, selector, label) {
+  return pointerClick(window, selector, null, label);
 }
 
 async function text(window, selector) {
@@ -149,6 +231,7 @@ const SEVERITY = {
   nav: 'major',
   pages: 'major',
   security: 'major',
+  accessibility: 'major',
 };
 
 app.whenReady().then(async () => {
@@ -169,6 +252,16 @@ app.whenReady().then(async () => {
       return bg[0] + bg[1] + bg[2] < 160;
     })()`));
     await screenshot(window, '1-واجهة-الدخول.png');
+
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'TAB' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'TAB' });
+    await sleep(100);
+    const keyboardFocus = await window.webContents.executeJavaScript(`(() => ({
+      tag: document.activeElement?.tagName ?? null,
+      text: (document.activeElement?.innerText || document.activeElement?.textContent || '').trim().slice(0, 100),
+      focusVisible: Boolean(document.activeElement?.matches(':focus-visible'))
+    }))()`);
+    check('accessibility', 'زر الدخول يصل إليه التركيز عبر لوحة المفاتيح', keyboardFocus.tag === 'BUTTON' && keyboardFocus.focusVisible, JSON.stringify(keyboardFocus));
 
     const entered = await clickByText(window, '.welcome-card button', 'الدخول إلى مساحة العمل')
       || await clickByText(window, '.welcome-card button', 'إنشاء قاعدة البيانات والدخول');
@@ -208,12 +301,7 @@ app.whenReady().then(async () => {
     // ---------- 3. Pages ----------
     await clickByText(window, '.side-nav .nav-item', 'اللوحة التفاعلية');
     await waitFor(window, `document.body.innerText.includes('نظرة شاملة')`, 30000);
-    const refreshed = await window.webContents.executeJavaScript(`(() => {
-      const button = [...document.querySelectorAll('.topbar .icon-button')].find((node) => (node.title || '').includes('تحديث'));
-      if (!button) return false;
-      button.click();
-      return true;
-    })()`);
+    const refreshed = await clickBySelector(window, '.topbar .icon-button[title*="تحديث"]', 'تحديث أرقام اللوحة');
     check('pages', 'زر التحديث يعيد قراءة الأرقام من القاعدة', refreshed);
     await waitFor(window, `document.body.innerText.includes('تغطية المؤشرات')`, 30000);
     await sleep(600);
@@ -252,12 +340,7 @@ app.whenReady().then(async () => {
     check('pages', 'قاعدة البيانات تعرض العشرين سجلًا', databaseText.includes('20 مديرية مخزّنة') && databaseRows === 20, `rows=${databaseRows}`);
     await screenshot(window, '5-قاعدة-البيانات.png');
 
-    const cardOpened = await window.webContents.executeJavaScript(`(() => {
-      const button = [...document.querySelectorAll('table.data tbody tr button')].find((node) => (node.textContent || '').includes('البطاقة'));
-      if (!button) return false;
-      button.click();
-      return true;
-    })()`);
+    const cardOpened = await clickByText(window, 'table.data tbody tr button', 'البطاقة');
     await waitFor(window, `Boolean(document.querySelector('.kv'))`, 30000);
     await sleep(400);
     const cardText = await bodyText(window);
@@ -280,20 +363,12 @@ app.whenReady().then(async () => {
     await screenshot(window, '8-الاستيراد.png');
 
     // ---------- 4. Access profile ----------
-    const toggled = await window.webContents.executeJavaScript(`(() => {
-      const chip = document.querySelector('.topbar button.chip.clickable');
-      if (!chip) return false;
-      chip.click();
-      return true;
-    })()`);
+    const toggled = await clickBySelector(window, '.topbar button.chip.clickable', 'تبديل وضع الوصول');
     await sleep(700);
     const profile = await window.webContents.executeJavaScript(`window.localApp.status().then((s) => s.accessProfile)`);
     check('security', 'تبديل وضع الوصول يعمل ويُحفظ', toggled && profile === 'shared', `profile=${profile}`);
-    await window.webContents.executeJavaScript(`(() => {
-      const chip = document.querySelector('.topbar button.chip.clickable');
-      if (chip) chip.click();
-      return true;
-    })()`);
+    const restoredClick = await clickBySelector(window, '.topbar button.chip.clickable', 'العودة لوضع المالك');
+    check('security', 'زر العودة لوضع المالك استقبل نقرة فعلية', restoredClick);
     await sleep(500);
     const restored = await window.webContents.executeJavaScript(`window.localApp.status().then((s) => s.accessProfile)`);
     check('security', 'العودة إلى وضع المالك تعمل', restored === 'owner', `profile=${restored}`);
@@ -383,6 +458,19 @@ app.whenReady().then(async () => {
       writeGroup('5-فحص-الشاشات.json', 'pages');
       writeGroup('6-فحص-وضع-الوصول.json', 'security');
       writeGroup('7-فحص-التصدير.json', 'export');
+      check(
+        'security',
+        'لا توجد محاولات اتصال HTTP/HTTPS/WebSocket من جلسة Chromium',
+        networkAttempts.length === 0,
+        networkAttempts.slice(0, 10).map((item) => `${item.method} ${item.url}`).join(' | ')
+      );
+      fs.writeFileSync(path.join(EVIDENCE, '12-تتبع-التفاعلات.json'), JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        method: 'Electron webContents.sendInputEvent with elementFromPoint hit-testing',
+        interactionCount: interactionTrace.length,
+        networkAttempts,
+        interactions: interactionTrace,
+      }, null, 2), 'utf8');
 
       const failed = results.filter((item) => !item.ok);
       const defects = failed.map((item) => ({
