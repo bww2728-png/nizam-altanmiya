@@ -52,9 +52,13 @@ function normalizeLabel(value) {
     .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 function json(value) { try { return JSON.stringify(value); } catch { return 'null'; } }
+function safeDateValue(value) {
+  if (!(value instanceof Date)) return value;
+  return Number.isFinite(value.getTime()) ? value.toISOString() : { type: 'invalid-date', text: String(value) };
+}
 function plainText(value) {
   if (value == null) return '';
-  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString() : 'Invalid Date';
   if (['string','number','boolean'].includes(typeof value)) return String(value);
   if (Array.isArray(value.richText)) return value.richText.map(x => x.text ?? '').join('');
   if (value.text !== undefined) return String(value.text);
@@ -69,7 +73,7 @@ function snapshotCell(cell) {
   let note = null;
   try { note = typeof cell.note === 'string' ? cell.note : cell.note ? json(cell.note) : null; } catch {}
   return { address: cell.address, row: cell.row, column: cell.col, type: cell.type,
-    text: plainText(value), formula, cachedResult: cached, rawValue: value instanceof Date ? value.toISOString() : value, note };
+    text: plainText(value), formula, cachedResult: safeDateValue(cached), rawValue: safeDateValue(value), note };
 }
 function mediaBuffer(item) {
   if (Buffer.isBuffer(item?.buffer)) return item.buffer;
