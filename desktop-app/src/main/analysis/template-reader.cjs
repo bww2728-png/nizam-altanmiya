@@ -333,7 +333,7 @@ async function readDirectorateWorkbook(filePath) {
 
   if (mapping.duplicates.length) warnings.push({ row: null, code: 'duplicate-headers', message: `أعمدة مكرّرة الدلالة: ${mapping.duplicates.length}.` });
 
-  return {
+  const result = {
     fileName: path.basename(filePath),
     sheetName: worksheet.name,
     headerRow: detection.headerRow,
@@ -348,6 +348,10 @@ async function readDirectorateWorkbook(filePath) {
     totalRows: rows.length,
     workbookInventory,
   };
+  // Keep the parsed workbook available to the main process for durable staging
+  // without serialising the large ExcelJS object back to the renderer.
+  Object.defineProperty(result, 'workbook', { value: workbook, enumerable: false, configurable: true });
+  return result;
 }
 
 module.exports = {
