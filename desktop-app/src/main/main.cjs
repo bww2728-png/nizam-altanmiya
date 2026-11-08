@@ -372,6 +372,7 @@ function registerHandlers() {
 
   ipcMain.handle('db:backup', async () => {
     const db = requireDatabase();
+    if (currentProfile() !== 'owner') throw new Error('إنشاء نسخة كاملة من قاعدة البيانات يتطلب وضع المالك؛ فقد تتضمن النسخة حقولًا مقيّدة.');
     const target = await createConsistentBackup(db);
     persist.logAccess(db, { action: 'store-backup', entity: 'store', entityId: target });
     auditRead('db:backup', { entity: 'store', entityId: target });
@@ -379,6 +380,8 @@ function registerHandlers() {
   });
 
   ipcMain.handle('db:restore', async () => {
+    requireDatabase();
+    if (currentProfile() !== 'owner') throw new Error('استعادة قاعدة البيانات تتطلب وضع المالك.');
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
       title: 'اختر النسخة الاحتياطية المراد استعادتها',
       properties: ['openFile'],
