@@ -79,6 +79,16 @@ function rowOf(rowNumber, values) {
   return { rowNumber, values, rawValues: {}, sources: {}, warnings: [] };
 }
 
+function applyWithExplicitApprovals(database, plan, request = {}) {
+  const decisions = {};
+  for (const row of plan.rows ?? []) {
+    if (row.status !== 'blocked' && row.action !== 'blocked' && row.action !== 'unchanged' && row.action !== 'duplicate') {
+      decisions[row.rowNumber] = 'apply';
+    }
+  }
+  return applyImportPlan(database, plan, { ...request, decisions: { ...decisions, ...(request.decisions ?? {}) } });
+}
+
 test('the reference workbook survives the full round trip: read, plan, apply, sheets', async () => {
   const read = await readDirectorateWorkbook(FIXTURE);
   assert.equal(read.totalRows, 3);
@@ -89,7 +99,7 @@ test('the reference workbook survives the full round trip: read, plan, apply, sh
     assert.equal(plan.totalRows, 3);
     assert.equal(plan.matched.length, read.matched.length);
 
-    const applied = applyImportPlan(database, plan);
+    const applied = applyWithExplicitApprovals(database, plan);
     assert.equal(applied.created + applied.updated + applied.refused.length + applied.skipped.length, 3);
 
     const stored = database.prepare('SELECT COUNT(*) AS count FROM directorates').get().count;
@@ -119,7 +129,7 @@ test('an import is immediately visible in the sheets with the same totals', () =
         revenue: 165000000,
       })),
     ]));
-    const applied = applyImportPlan(database, plan);
+    const applied = applyWithExplicitApprovals(database, plan);
     assert.equal(applied.created, 2);
 
     const sheets = buildSheets(database, {});
@@ -138,7 +148,7 @@ test('an import is immediately visible in the sheets with the same totals', () =
 
 test('a stored anomaly leaves the ranking until the cell is corrected and re-imported', () => {
   withDatabase((database) => {
-    applyImportPlan(database, buildImportPlan(database, readOf([
+    applyWithExplicitApprovals(database, buildImportPlan(database, readOf([
       rowOf(3, completeValues({ schools: 75643312 })),
       rowOf(4, completeValues({ districtName: 'مديرية أزال', governorate: 'أمانة العاصمة' })),
     ])));
@@ -149,7 +159,7 @@ test('a stored anomaly leaves the ranking until the cell is corrected and re-imp
     assert.deepEqual(before.anomalies[0].keys, ['schools']);
 
     // Correcting the cell and re-importing clears the anomaly without any flag.
-    applyImportPlan(database, buildImportPlan(database, readOf([
+    applyWithExplicitApprovals(database, buildImportPlan(database, readOf([
       rowOf(3, completeValues({ schools: 40 })),
       rowOf(4, completeValues({ districtName: 'مديرية أزال', governorate: 'أمانة العاصمة' })),
     ])));
