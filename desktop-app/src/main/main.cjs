@@ -91,17 +91,23 @@ function maskDbRows(rows, profile) {
   return { rows: output, masked: [...maskedKeys] };
 }
 
-/** Mask engine rows (values/rawValues) for the active access profile. */
-function maskEngineRows(rows, profile) {
-  if (profile !== 'shared') return { rows, masked: [] };
-  const maskedKeys = new Set();
-  const output = rows.map((row) => {
-    const result = security.maskEngineRow(row, profile);
-    result.masked.forEach((key) => maskedKeys.add(key));
-    return result.row;
+/**
+ * Re-derive the analysis from protected-stripped rows so a shared export cannot
+ * leak restricted values through derived fields (indicators, project label,
+ * composites). Stripping the keys first makes every row equally "missing" them,
+ * so nothing distinguishes an empty protected cell from a filled one.
+ */
+function analyzeShared(database, source) {
+  const calibration = persist.getLastCalibration(database) ?? {};
+  const rows = security.maskInputRows(source?.rows ?? [], 'shared');
+  return analyze(rows, {
+    weights: calibration.weights ?? persist.getWeights(database)?.weights ?? undefined,
+    kThreshold: calibration.kThreshold ?? undefined,
+    deprivationLine: calibration.deprivationLine ?? undefined,
   });
-  return { rows: output, masked: [...maskedKeys] };
 }
+
+
 
 const TEMPLATE_MAX_BYTES = 200 * 1024 * 1024;
 
@@ -218,7 +224,13 @@ function createWindow() {
   if (devServerURL) mainWindow.loadURL(devServerURL);
   else mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!devServerURL || !url.startsWith(devServerURL)) event.preventDefault();
+    // Compare origins, not raw prefixes: `http://127.0.0.1:5173@evil.com/`
+    // starts with the dev URL but the browser resolves it to evil.com.
+    let allowedOrigin = null;
+    try { allowedOrigin = devServerURL ? new URL(devServerURL).origin : null; } catch { allowedOrigin = null; }
+    let targetOrigin = null;
+    try { targetOrigin = new URL(url).origin; } catch { targetOrigin = null; }
+    if (!allowedOrigin || targetOrigin !== allowedOrigin) event.preventDefault();
   });
 
   if (app.isPackaged) {
@@ -391,13 +403,13 @@ function registerHandlers() {
     });
     auditRead('import:scan', { entity: 'workbook', entityId: filePath, rowCount: plan.totalRows });
     sendImportProgress(event.sender, { phase: 'done', message: `الخطة جاهزة: ${plan.totalRows} صفًا.` });
-    return { canceled: false, filePath, ...summarizePlan(plan) };
+    return { canceled: false, filePath, ...security.redactPlanSummary(summarizePlan(plan), currentProfile()) };
   });
 
   ipcMain.handle('import:plan', () => {
     if (!pendingPlan) throw new Error('لم يُقرأ أي ملف بعد. اختر ملف القالب أولًا.');
     auditRead('import:plan', { entity: 'workbook', entityId: pendingPlan.filePath, rowCount: pendingPlan.plan.totalRows });
-    return summarizePlan(pendingPlan.plan, 5000);
+    return security.redactPlanSummary(summarizePlan(pendingPlan.plan, 5000), currentProfile());
   });
 
   ipcMain.handle('import:apply', (event, request = {}) => {
@@ -506,6 +518,11 @@ function registerHandlers() {
     invalidateSheets();
     lastAnalysis = analysis;
     const profile = security.getAccessProfile(db);
+    // Under `shared`, the IPC reply must not carry indicators, the project label,
+    // completeness or the composites: every one is derived from a protected
+    // value. Re-deriving from protected-stripped rows makes the two profiles see
+    // the same report instead of masking a finished result.
+    const visible = profile === 'shared' ? analyzeShared(db, analysis) : analysis;
     auditRead('analysis:run', {
       entity: 'analysis_runs',
       entityId: saved?.runId ?? null,
@@ -515,7 +532,7 @@ function registerHandlers() {
     // Compact payload: per-row `values`/`rawValues` stay in the main process and
     // are fetched on demand by `analysis:row-detail`. At 20k rows that is the
     // difference between ~190 MB and a few MB per run.
-    return { analysis: serializeAnalysis(analysis, { compact: true }), runId: saved?.runId ?? null };
+    return { analysis: serializeAnalysis(visible, { compact: true }), runId: saved?.runId ?? null };
   });
 
   ipcMain.handle('analysis:row-detail', (_event, request = {}) => {
@@ -531,13 +548,17 @@ function registerHandlers() {
       fields: masked.masked.join(','),
       result: masked.masked.length ? 'masked' : 'ok',
     });
+    // Indicators and sensitivity are derived from the protected values, so under
+    // `shared` they are withheld alongside the values themselves; warnings that
+    // name a protected field are dropped too.
+    const shared = profile === 'shared';
     return {
       index,
       values: masked.row.values ?? {},
       rawValues: masked.row.rawValues ?? {},
-      warnings: row.warnings ?? [],
-      indicators: row.indicators ?? {},
-      sensitivity: row.sensitivity ?? null,
+      warnings: security.redactWarnings(row.warnings ?? [], profile),
+      indicators: shared ? {} : (row.indicators ?? {}),
+      sensitivity: shared ? null : (row.sensitivity ?? null),
       masked: masked.masked,
     };
   });
@@ -545,7 +566,7 @@ function registerHandlers() {
   ipcMain.handle('analysis:latest', () => {
     const db = requireDatabase();
     auditRead('analysis:latest', { entity: 'analysis_runs' });
-    return persist.getLatestRun(db);
+    return security.maskStoredRun(persist.getLatestRun(db), currentProfile());
   });
 
   ipcMain.handle('analysis:runs', () => persist.listRuns(requireDatabase(), 50));
@@ -598,6 +619,10 @@ function registerHandlers() {
       result: masked.masked.length ? 'masked' : 'ok',
     });
     const row = persist.rowFromDirectorate(masked.record);
+    // Belt and braces: `maskRecord` already filters the stored `import_warnings`
+    // column, but a warning carries the rejected raw text, so the array is
+    // re-filtered here in case the row is built from any other source.
+    row.warnings = security.redactWarnings(row.warnings ?? [], profile);
     auditRead('analysis:directorate:get-provenance', { entity: 'directorate_sources', entityId: id, rowCount: Object.keys(row.sources ?? {}).length });
     const sourceRows = db.prepare('SELECT field_key, value_text, source_file, source_location, data_value_id, captured_at FROM directorate_sources WHERE directorate_id = ?').all(Number(id));
     // `value_text` is the raw cell text behind a field. The record above is already
@@ -669,7 +694,7 @@ function registerHandlers() {
     const db = requireDatabase();
     const profile = security.getAccessProfile(db);
     const source = lastAnalysis ?? rebuildAnalysis(db);
-    const analysis = profile === 'shared' ? { ...source, rows: maskEngineRows(source.rows ?? [], profile).rows } : source;
+    const analysis = profile === 'shared' ? analyzeShared(db, source) : source;
     const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
       title: 'تصدير نتائج التحليل',
       defaultPath: `تحليل-التنمية-${new Date().toISOString().slice(0, 10)}.xlsx`,
@@ -690,7 +715,7 @@ function registerHandlers() {
     const db = requireDatabase();
     const profile = security.getAccessProfile(db);
     const source = lastAnalysis ?? rebuildAnalysis(db);
-    const analysis = profile === 'shared' ? { ...source, rows: maskEngineRows(source.rows ?? [], profile).rows } : source;
+    const analysis = profile === 'shared' ? analyzeShared(db, source) : source;
     const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
       title: 'تصدير التقرير',
       defaultPath: `تقرير-التنمية-${new Date().toISOString().slice(0, 10)}.pdf`,

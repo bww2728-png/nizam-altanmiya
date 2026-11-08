@@ -41,6 +41,22 @@ function labelOf(key) {
   return FIELD_BY_KEY[key]?.header ?? key;
 }
 
+/**
+ * Canonical calibrated order: severe deprivation first, then the composite, then
+ * the degraded-dimension count, then the district name — identical to the engine
+ * (ranking.cjs). The interface, the Excel ranking sheet and the PDF must all use
+ * this so «الحرمان الحاد يتصدّر مهما كان المتوسط» holds everywhere.
+ */
+function compareCalibratedRows(a, b) {
+  const severeDelta = Number(Boolean(b.calibrated?.severe)) - Number(Boolean(a.calibrated?.severe));
+  if (severeDelta !== 0) return severeDelta;
+  const compositeDelta = (b.calibrated?.composite ?? 0) - (a.calibrated?.composite ?? 0);
+  if (Math.abs(compositeDelta) > 1e-12) return compositeDelta;
+  const degradedDelta = (b.calibrated?.degradedCount ?? 0) - (a.calibrated?.degradedCount ?? 0);
+  if (degradedDelta !== 0) return degradedDelta;
+  return String(a.districtName ?? '').localeCompare(String(b.districtName ?? ''), 'ar');
+}
+
 function buildDashboard(analysis) {
   const rows = analysis.rows ?? [];
   const governorates = new Map();
@@ -111,7 +127,7 @@ function buildDashboard(analysis) {
   const needs = rows
     .map((row) => ({ row, verdict: rankableVerdict(row) }))
     .filter((entry) => entry.verdict.complete && !entry.verdict.anomalous && Number.isFinite(entry.row.calibrated?.composite))
-    .sort((a, b) => (b.row.calibrated.composite ?? 0) - (a.row.calibrated.composite ?? 0))
+    .sort((a, b) => compareCalibratedRows(a.row, b.row))
     .slice(0, 10)
     .map(({ row }, index) => ({
       rank: index + 1,
@@ -178,6 +194,7 @@ function buildIndicators(analysis) {
       excel: indicator.excel,
       unit: indicator.unit,
       direction: indicator.direction,
+      weight: indicator.weight,
       formula: indicator.formula ?? null,
     })),
     stats,
@@ -198,19 +215,20 @@ function buildIndicators(analysis) {
 function buildRanking(analysis, options = {}) {
   const rows = analysis.rows ?? [];
   const mode = options.mode === 'replica' ? 'replica' : 'calibrated';
+  const valueOf = (row) => (mode === 'replica' ? row.replica?.composite : row.calibrated?.composite);
   const entries = rows.map((row) => ({ row, verdict: rankableVerdict(row) }));
   const ranked = entries
-    .filter((entry) => entry.verdict.complete && !entry.verdict.anomalous)
-    .filter((entry) => Number.isFinite(entry.row.calibrated?.composite))
+    .filter((entry) => entry.verdict.complete && !entry.verdict.anomalous && Number.isFinite(valueOf(entry.row)))
     .sort((a, b) => (mode === 'replica'
-      ? (b.row.replica?.composite ?? 0) - (a.row.replica?.composite ?? 0)
-      : (b.row.calibrated?.composite ?? 0) - (a.row.calibrated?.composite ?? 0)))
+      ? ((b.row.replica?.composite ?? 0) - (a.row.replica?.composite ?? 0))
+        || String(a.row.districtName ?? '').localeCompare(String(b.row.districtName ?? ''), 'ar')
+      : compareCalibratedRows(a.row, b.row)))
     .map((entry, index) => ({
       rank: index + 1,
       directorateId: entry.row.dbId ?? null,
       districtName: entry.row.districtName,
       governorate: entry.row.governorate,
-      composite: round((mode === 'replica' ? entry.row.replica?.composite : entry.row.calibrated?.composite) ?? 0, 4),
+      composite: round(valueOf(entry.row) ?? 0, 4),
       replicaComposite: Number.isFinite(entry.row.replica?.composite) ? round(entry.row.replica.composite, 4) : null,
       projectType: entry.row.project?.label ?? '',
       decision: entry.row.values?.reviewerDecision ?? '',
@@ -220,7 +238,7 @@ function buildRanking(analysis, options = {}) {
     }));
 
   const waiting = entries
-    .filter((entry) => !entry.verdict.complete)
+    .filter((entry) => !entry.verdict.complete && !entry.verdict.anomalous)
     .map((entry) => ({
       directorateId: entry.row.dbId ?? null,
       districtName: entry.row.districtName,
@@ -229,6 +247,17 @@ function buildRanking(analysis, options = {}) {
       missingLabels: entry.verdict.missingLabels,
     }))
     .sort((a, b) => (b.completeness?.ratio ?? 0) - (a.completeness?.ratio ?? 0));
+
+  const blocked = entries
+    .filter((entry) => entry.verdict.complete && !entry.verdict.anomalous
+      && !Number.isFinite(valueOf(entry.row)) && entry.row.calibrated?.blocked === true)
+    .map((entry) => ({
+      directorateId: entry.row.dbId ?? null,
+      districtName: entry.row.districtName,
+      governorate: entry.row.governorate,
+      completeness: entry.row.completeness ?? null,
+      reason: entry.row.calibrated?.blockReason ?? null,
+    }));
 
   const anomalies = entries
     .filter((entry) => entry.verdict.anomalous)
@@ -241,12 +270,27 @@ function buildRanking(analysis, options = {}) {
       values: Object.fromEntries(entry.verdict.anomalyKeys.map((key) => [key, entry.row.values?.[key] ?? null])),
     }));
 
+  // The four lists must be a true partition: every stored directorate is either
+  // anomalous, waiting on a mandatory field, blocked (complete but with no
+  // computable composite), or ranked. Since every indicator is derived from
+  // mandatory fields only, a complete non-anomalous row always has a composite;
+  // if that ever stops holding, surface it loudly instead of dropping the row
+  // from every list (the same invariant strategy buildDashboard uses).
+  const bucketTotal = ranked.length + waiting.length + blocked.length + anomalies.length;
+  if (bucketTotal !== rows.length) {
+    throw new Error(
+      `ranking buckets must partition directorates: sum=${bucketTotal} total=${rows.length} `
+      + `(ranked=${ranked.length} waiting=${waiting.length} blocked=${blocked.length} anomalies=${anomalies.length})`,
+    );
+  }
+
   return {
     mode,
     rule: 'يُرتب المكتمل فقط؛ وتُستبعد الصفوف ذات القيم الشاذة حتى تُصحّح',
-    excluded: { waiting: waiting.length, anomalies: anomalies.length },
+    excluded: { waiting: waiting.length, blocked: blocked.length, anomalies: anomalies.length },
     ranked,
     waiting,
+    blocked,
     anomalies,
     meta: analysis.summary ?? null,
     calibration: options.calibration ?? null,
@@ -270,6 +314,9 @@ function buildSheets(database, options = {}) {
     weights: options.weights ?? calibration.weights ?? persist.getWeights(database)?.weights ?? undefined,
     kThreshold: options.kThreshold ?? calibration.kThreshold ?? undefined,
     deprivationLine: options.deprivationLine ?? calibration.deprivationLine ?? undefined,
+    // Forwarded so a caller can skip the expensive sensitivity pass; absent or
+    // true keeps the engine's default behaviour unchanged.
+    sensitivity: options.sensitivity === false ? false : undefined,
   });
   return {
     analysis,
@@ -287,4 +334,4 @@ function buildSheets(database, options = {}) {
   };
 }
 
-module.exports = { buildSheets, buildDashboard, buildIndicators, buildRanking, rankableVerdict };
+module.exports = { buildSheets, buildDashboard, buildIndicators, buildRanking, rankableVerdict, compareCalibratedRows };

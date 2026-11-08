@@ -27,6 +27,8 @@ const ACTION_META = {
   create: { label: 'إضافة جديدة', tone: 'info' },
   update: { label: 'تحديث', tone: 'gold' },
   unchanged: { label: 'بلا تغيير', tone: '' },
+  blocked: { label: 'محجوب', tone: 'bad' },
+  duplicate: { label: 'مكرر', tone: 'warn' },
 };
 
 /**
@@ -138,9 +140,12 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
   const previewRows = visibleRows.slice(0, PREVIEW_LIMIT);
   const scope = plan?.scope ?? {};
   const decisionCount = useMemo(() => {
-    const values = Object.values(decisions);
-    return { skip: values.filter((value) => value === 'skip').length, apply: values.filter((value) => value === 'apply').length };
-  }, [decisions]);
+    let skip = 0;
+    for (const row of previewRows) {
+      if ((decisions[row.rowNumber] ?? defaultDecision(row)) === 'skip') skip += 1;
+    }
+    return { skip, apply: previewRows.length - skip };
+  }, [previewRows, decisions]);
 
   return (
     <>
@@ -185,6 +190,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
               <MiniStat label="إضافات" value={fmtNumber(scope.create, 0)} />
               <MiniStat label="تحديثات" value={fmtNumber(scope.update, 0)} />
               <MiniStat label="بلا تغيير" value={fmtNumber(scope.unchanged, 0)} />
+              <MiniStat label="مكرر" value={fmtNumber(scope.duplicate, 0)} />
             </div>
 
             <div className="chip-row" style={{ marginTop: 16 }}>
@@ -233,7 +239,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
 
           <Card
             title="مراجعة الصفوف"
-            subtitle="لكل صف قرار: تطبيق أو تخطٍّ. الصف المحجوب لا يُكتب إلا إذا فعّلت «تطبيق الصفوف المحجوبة»."
+            subtitle="لكل صف قرار: تطبيق أو تخطٍّ. الصف المحجوب يبدأ متخطّىً ولا يُكتب إلا إذا اخترت له «تطبيق» صراحةً مع تفعيل تطبيق المحجوب."
             actions={(
               <div className="row">
                 <Segmented
@@ -258,7 +264,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
               </span>
               <div className="btn-row">
                 <span className="chip">تخطٍّ: {decisionCount.skip}</span>
-                <span className="chip ok">تطبيق: {previewRows.length - decisionCount.skip}</span>
+                <span className="chip ok">تطبيق: {decisionCount.apply}</span>
                 <button className="btn small ghost" onClick={() => setDecisions({})}>إعادة ضبط القرارات</button>
               </div>
             </div>
@@ -282,7 +288,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
                   </thead>
                   <tbody>
                     {previewRows.map((row, index) => {
-                      const decision = decisions[row.rowNumber] ?? 'apply';
+                      const decision = decisions[row.rowNumber] ?? defaultDecision(row);
                       const status = STATUS_META[row.status] ?? STATUS_META.review;
                       const action = ACTION_META[row.action] ?? ACTION_META.unchanged;
                       return (
@@ -344,7 +350,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
             <div className="row between">
               <div className="stack tight">
                 <div className="row">
-                  <Switch checked={force} onChange={setForce} label="تطبيق الصفوف المحجوبة أيضًا (تجاوز الحجر يدويًا)" />
+                  <Switch checked={force} onChange={setForce} label="السماح بكتابة الصفوف المحجوبة التي اخترت لها «تطبيق» صراحةً" />
                 </div>
                 <span className="muted" style={{ fontSize: '0.8rem' }}>
                   التطبيق يكتب كل الصفوف المقبولة في معاملة واحدة: أي فشل يترك قاعدة البيانات كما كانت.

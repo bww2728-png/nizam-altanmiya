@@ -138,9 +138,16 @@ function diffAgainst(record, values, sources) {
     const column = DIRECTORATE_COLUMNS[field.key];
     if (!column) continue;
     const before = record[column];
-    const same = typeof next === 'number' || typeof before === 'number'
-      ? Number(before) === Number(next)
-      : String(before ?? '') === String(next ?? '');
+    // A stored null/undefined is "no value", not zero: a workbook cell holding an
+    // explicit 0 (or false) against an empty stored cell IS a change, otherwise
+    // the first real zero would be swallowed and the column would stay NULL.
+    const beforeAbsent = before === null || before === undefined;
+    const nextAbsent = next === null || next === undefined;
+    const same = beforeAbsent || nextAbsent
+      ? beforeAbsent && nextAbsent
+      : typeof next === 'number' || typeof before === 'number'
+        ? Number(before) === Number(next)
+        : String(before) === String(next);
     if (same) continue;
     changes.push({
       key: field.key,
@@ -291,6 +298,10 @@ function buildImportPlan(database, read, meta = {}) {
       rawValues,
       sources,
       duplicateOf,
+      // The raw parser warnings travel with the row unmetamorphosed so they can
+      // be stored per record on apply; the quality report (gaps) reads that
+      // column verbatim, so it must keep the parser's own field names.
+      warnings: row.warnings ?? [],
     });
   }
 
@@ -329,6 +340,7 @@ function summarizePlan(plan, limit = 300) {
     headerRow: plan.headerRow,
     matchedCount: plan.matched.length,
     missingInputs: plan.missingInputs,
+    unmatched: plan.unmatched,
     duplicates: plan.duplicates,
     stale: plan.stale ?? [],
     warnings: plan.warnings,
@@ -366,9 +378,11 @@ function summarizePlan(plan, limit = 300) {
 /**
  * Apply the plan.
  *
- * `decisions` maps a row number to `'apply'` or `'skip'`; anything not listed
- * follows the plan, and blocked rows are never written unless explicitly forced.
- * The whole write is one transaction: a failure leaves the database untouched.
+ * `decisions` maps a row number to `'apply'` or `'skip'`; an unlisted row
+ * follows the plan. A blocked row needs both `force` and an explicit per-row
+ * `apply` — the default decision can never write it. `unchanged` rows and
+ * intra-file duplicates are never written. Data and the audit entry share one
+ * transaction: a failure leaves the database untouched.
  */
 function applyImportPlan(database, plan, request = {}) {
   const decisions = request.decisions ?? {};
@@ -378,23 +392,64 @@ function applyImportPlan(database, plan, request = {}) {
   const applied = [];
   const skipped = [];
   const refused = [];
+  const duplicates = [];
+  let unchanged = 0;
 
   const run = database.transaction((rows) => {
     for (const row of rows) {
-      const decision = decisions[row.rowNumber] ?? decisions[String(row.rowNumber)] ?? 'apply';
-      if (decision === 'skip') {
+      const requested = decisions[row.rowNumber] ?? decisions[String(row.rowNumber)];
+
+      if (requested === 'skip') {
         skipped.push({ rowNumber: row.rowNumber, districtName: row.districtName, reason: 'تخطٍّ بطلب المستخدم' });
         continue;
       }
-      if (row.status === 'blocked' && !(force && decision === 'apply')) {
-        refused.push({
+
+      // A repeated identity inside the file is collapsed to one application:
+      // only the first occurrence is written, the rest are reported.
+      if (row.action === 'duplicate') {
+        duplicates.push({
           rowNumber: row.rowNumber,
           districtName: row.districtName,
           governorate: row.governorate,
-          blockers: row.issues.filter((issue) => issue.severity === 'blocker').map((issue) => `${issue.header ?? issue.key}: ${issue.reason}`),
+          duplicateOf: row.duplicateOf ?? null,
+          reason: 'مفتاح مكرر داخل الملف — يُطبَّق الصف الأول فقط',
         });
         continue;
       }
+
+      // A row identical to what is already stored is not written, and is never
+      // counted as an update.
+      if (row.action === 'unchanged') {
+        unchanged += 1;
+        continue;
+      }
+
+      if (row.status === 'blocked') {
+        // `force` is necessary but no longer sufficient: a blocked row still
+        // needs an explicit `apply` decision, and a row without an identity can
+        // never be written at all.
+        const writable = force && requested === 'apply' && row.action !== 'blocked';
+        if (!writable) {
+          if (force) {
+            skipped.push({
+              rowNumber: row.rowNumber,
+              districtName: row.districtName,
+              reason: row.action === 'blocked'
+                ? 'صف بلا هوية (محافظة/مديرية) — لا يمكن كتابته'
+                : 'صف محجوب بلا قرار «apply» صريح',
+            });
+          } else {
+            refused.push({
+              rowNumber: row.rowNumber,
+              districtName: row.districtName,
+              governorate: row.governorate,
+              blockers: row.issues.filter((issue) => issue.severity === 'blocker').map((issue) => `${issue.header ?? issue.key}: ${issue.reason}`),
+            });
+          }
+          continue;
+        }
+      }
+
       const result = persist.upsertDirectorate(database, {
         districtName: row.districtName,
         governorate: row.governorate,
@@ -402,7 +457,7 @@ function applyImportPlan(database, plan, request = {}) {
         rawValues: row.rawValues,
         sources: row.sources,
         rowNumber: row.rowNumber,
-      }, meta);
+      }, { ...meta, warnings: row.warnings ?? [] });
       applied.push({
         rowNumber: row.rowNumber,
         directorateId: result.id,
@@ -411,21 +466,24 @@ function applyImportPlan(database, plan, request = {}) {
         governorate: row.governorate,
       });
     }
-  });
-  run(plan.rows ?? []);
 
-  const created = applied.filter((entry) => entry.created).length;
-  const updated = applied.length - created;
-  database.prepare(
-    'INSERT INTO access_log (action, entity, entity_id, fields, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(
-    'excel-import',
-    'directorates',
-    plan.fileName ?? '',
-    String(applied.length),
-    `created=${created};updated=${updated};refused=${refused.length};skipped=${skipped.length}`,
-    nowIso(),
-  );
+    const created = applied.filter((entry) => entry.created).length;
+    const updated = applied.length - created;
+    // The audit entry joins the same transaction as the data it describes, so
+    // audit and data always commit or roll back together.
+    database.prepare(
+      'INSERT INTO access_log (action, entity, entity_id, fields, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(
+      'excel-import',
+      'directorates',
+      plan.fileName ?? '',
+      String(applied.length),
+      `created=${created};updated=${updated};unchanged=${unchanged};refused=${refused.length};skipped=${skipped.length};duplicates=${duplicates.length}`,
+      nowIso(),
+    );
+    return { created, updated };
+  });
+  const { created, updated } = run(plan.rows ?? []);
 
   return {
     fileName: plan.fileName,
@@ -433,8 +491,10 @@ function applyImportPlan(database, plan, request = {}) {
     created,
     updated,
     applied: applied.length,
+    unchanged,
     refused,
     skipped,
+    duplicates,
     appliedRows: applied,
   };
 }

@@ -197,3 +197,39 @@ test('Arabic numbers, separators and percentages parse without losing zeros', ()
   assert.equal(formatPercent(0.385), '39%');
   assert.equal(formatFixed(null, 3), '—');
 });
+
+test('a ratio-out-of-range warning is counted once as a single invalid-value blocker', () => {
+  const { analyzeGaps } = require('../src/main/analysis/gaps.cjs');
+  const record = {
+    id: 1,
+    districtName: 'مديرية',
+    governorate: 'إب',
+    values: { districtName: 'مديرية', governorate: 'إب' },
+    warnings: [{ key: 'pavedRoads', code: 'ratio-out-of-range', raw: '150', value: null }],
+  };
+
+  const { recordIssues, summary } = analyzeGaps([record]);
+  const issues = recordIssues.get(record) ?? [];
+  const invalid = issues.filter((issue) => issue.code === 'invalid-value');
+  assert.equal(invalid.length, 1, 'one ratio-out-of-range warning yields exactly one invalid-value blocker');
+  assert.ok(!issues.some((issue) => issue.code === 'missing-mandatory' && issue.field === 'pavedRoads'),
+    'an unparsable cell is not reported a second time as missing');
+  assert.ok(summary.blocker >= 1);
+});
+
+test('an invalid-number warning on a mandatory field replaces its missing-mandatory finding', () => {
+  const { analyzeGaps } = require('../src/main/analysis/gaps.cjs');
+  const record = {
+    id: 1,
+    districtName: 'مديرية',
+    governorate: 'إب',
+    values: { districtName: 'مديرية', governorate: 'إب', /* population deliberately absent */ },
+    warnings: [{ key: 'population', code: 'invalid-number', raw: 'كثير', value: null }],
+  };
+
+  const { recordIssues } = analyzeGaps([record]);
+  const issues = recordIssues.get(record) ?? [];
+  assert.equal(issues.filter((issue) => issue.code === 'invalid-value' && issue.field === 'population').length, 1);
+  assert.ok(!issues.some((issue) => issue.code === 'missing-mandatory' && issue.field === 'population'),
+    'one bad cell yields one finding, not two');
+});

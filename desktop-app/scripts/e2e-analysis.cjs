@@ -338,7 +338,7 @@ app.whenReady().then(async () => {
     const reopened = new ExcelJS.Workbook();
     await reopened.xlsx.readFile(xlsxPath);
     const sheetNames = reopened.worksheets.map((sheet) => sheet.name);
-    check('export', 'ملف Excel يحتوي الأوراق السبع', reopened.worksheets.length === 7, sheetNames.join(' · '));
+    check('export', 'ملف Excel يحتوي الأوراق الثماني', reopened.worksheets.length === 8, sheetNames.join(' · '));
     check('export', 'ملف Excel يحتوي المنهجية والأوزان', sheetNames.includes('المنهجية والأوزان'));
 
     const dataSheet = reopened.getWorksheet('قاعدة البيانات الشاملة');
@@ -450,7 +450,7 @@ app.whenReady().then(async () => {
         '  8-الاستيراد.png             شاشة الاستيراد',
         '  3..7 ملفات JSON             نتائج كل مجموعة',
         '  6-تقرير-التحليل.pdf         التقرير الفعلي المولّد من المحرك',
-        '  7-نتائج-التحليل.xlsx        ملف Excel بسبع أوراق',
+        '  7-نتائج-التحليل.xlsx        ملف Excel بثماني أوراق',
         '  9-معاينة-التقرير.png        معاينة بصرية لصفحات التقرير',
         '  10-تقرير-العيوب.json        العيوب مصنّفة بالخطورة',
         '  11-اختبار-تجربة-الاستخدام.md سيناريوهات الاستخدام ونتائجها',

@@ -159,7 +159,7 @@ test('a missing mandatory field yields a review row carrying a missing-mandatory
   }
 });
 
-test('an unparsable cell blocks the row and is refused unless forced', () => {
+test('an unparsable cell blocks the row and needs force plus an explicit decision', () => {
   const { database, directory } = openTestDatabase();
   try {
     const values = completeValues({ schools: undefined });
@@ -187,7 +187,15 @@ test('an unparsable cell blocks the row and is refused unless forced', () => {
     assert.ok(refusedRun.refused[0].blockers.length >= 1, 'the refusal must name the blockers');
     assert.equal(persist.countDirectorates(database), 0, 'a blocked row must not be written');
 
-    const forcedRun = applyImportPlan(database, plan, { force: true });
+    // `force` alone is no longer enough: a blocked row also needs an explicit
+    // per-row `apply` decision, so the operator's intent is unambiguous.
+    const forcedOnly = applyImportPlan(database, plan, { force: true });
+    assert.equal(forcedOnly.appliedRows.length, 0);
+    assert.equal(forcedOnly.created, 0);
+    assert.equal(forcedOnly.skipped.length, 1);
+    assert.equal(persist.countDirectorates(database), 0, 'force without a decision must not write');
+
+    const forcedRun = applyImportPlan(database, plan, { force: true, decisions: { 2: 'apply' } });
     assert.equal(forcedRun.appliedRows.length, 1);
     assert.equal(forcedRun.created, 1);
     assert.equal(forcedRun.refused.length, 0);
@@ -257,6 +265,59 @@ test('a duplicate governorate|district in one file is flagged on the later row o
   }
 });
 
+test('applyImportPlan collapses in-file duplicates and skips unchanged rows', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    insertStored(database, 'مديرية محفوظة', 'إب');
+    const plan = buildImportPlan(database, readOf([
+      rowOf(2, completeValues({ districtName: 'مديرية مكررة', governorate: 'إب' })),
+      rowOf(3, completeValues({ districtName: 'مديرية مكررة', governorate: 'إب', schools: 41 })),
+      rowOf(4, completeValues({ districtName: 'مديرية محفوظة', governorate: 'إب' })),
+    ]), { fileName: FILE_NAME });
+
+    const result = applyImportPlan(database, plan);
+
+    assert.equal(result.applied, 1, 'only the first non-duplicate, non-unchanged row is written');
+    assert.equal(result.created, 1);
+    assert.equal(result.duplicates.length, 1, 'the later duplicate is reported, never written');
+    assert.equal(result.duplicates[0].rowNumber, 3);
+    assert.equal(result.unchanged, 1);
+    assert.equal(persist.countDirectorates(database), 2, 'stored row plus the new one, no duplicate');
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a row without an identity can never be written, even with force and a decision', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    const plan = buildImportPlan(database, readOf([
+      rowOf(2, completeValues({ districtName: '', governorate: '' })),
+    ]), { fileName: FILE_NAME });
+    const row = plan.rows[0];
+
+    assert.equal(row.status, 'blocked');
+    assert.equal(row.action, 'blocked');
+    assert.ok(row.issues.some((issue) => issue.code === 'missing-identity' && issue.severity === 'blocker'));
+
+    const result = applyImportPlan(database, plan, { force: true, decisions: { 2: 'apply' } });
+    assert.equal(result.applied, 0);
+    assert.equal(result.created, 0);
+    assert.equal(result.skipped.length, 1);
+    assert.equal(persist.countDirectorates(database), 0);
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('the anomaly threshold is exclusive at 1e7 and currency fields are exempt', () => {
+  assert.deepEqual(anomalyKeys({ schools: 1e7 }), []);
+  assert.deepEqual(anomalyKeys({ schools: 1e7 + 1 }), ['schools']);
+  assert.deepEqual(anomalyKeys({ revenue: 9e9, projectCost: 4e9 }), []);
+});
+
 test('a re-import against a stored directorate plans an update with a field-by-field diff', () => {
   const { database, directory } = openTestDatabase();
   try {
@@ -315,6 +376,62 @@ test('applyImportPlan writes the created/updated counts and returns every applie
 
     const updated = database.prepare('SELECT schools FROM directorates WHERE id = ?').get(stored.id);
     assert.equal(updated.schools, 45, 'the newer value must win on update');
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('applyImportPlan stores the parser warnings on each written row', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    const plan = buildImportPlan(database, readOf([
+      rowOf(2, completeValues({ districtName: 'مديرية بتحذير', governorate: 'إب' }), {
+        warnings: [{ key: 'schools', code: 'placeholder', raw: 'لا يوجد', value: null }],
+      }),
+    ]), { fileName: FILE_NAME });
+
+    const result = applyImportPlan(database, plan);
+    assert.equal(result.applied, 1);
+
+    const stored = database
+      .prepare('SELECT import_warnings FROM directorates WHERE district = ?')
+      .get('مديرية بتحذير');
+    // The raw parser warnings are stored verbatim: the quality report (gaps)
+    // reads this column with the parser's own field names.
+    assert.deepEqual(JSON.parse(stored.import_warnings), [
+      { key: 'schools', code: 'placeholder', raw: 'لا يوجد', value: null },
+    ]);
+
+    const listed = persist.loadAnalysisRows(database).find((row) => row.districtName === 'مديرية بتحذير');
+    assert.deepEqual(listed.warnings, [
+      { key: 'schools', code: 'placeholder', raw: 'لا يوجد', value: null },
+    ], 'loadAnalysisRows surfaces the stored warnings');
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('an explicit zero in the file is a change over a stored empty cell, not an unchanged skip', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    // The stored row has no schools value (NULL), the file carries an explicit 0.
+    insertStored(database, 'مديرية صفرية', 'إب', { schools: null });
+    const plan = buildImportPlan(database, readOf([
+      rowOf(2, completeValues({ districtName: 'مديرية صفرية', governorate: 'إب', schools: 0 })),
+    ]), { fileName: FILE_NAME });
+
+    const row = plan.rows[0];
+    assert.equal(row.action, 'update', 'NULL -> 0 is an update, not unchanged');
+    assert.ok(row.changes.some((change) => change.key === 'schools'));
+
+    const result = applyImportPlan(database, plan);
+    assert.equal(result.updated, 1);
+    assert.equal(result.unchanged, 0);
+
+    const stored = database.prepare('SELECT schools FROM directorates WHERE district = ?').get('مديرية صفرية');
+    assert.equal(stored.schools, 0, 'the explicit zero must reach the database');
   } finally {
     database.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -408,6 +525,155 @@ test('summarizePlan exposes the banner and preview shape', () => {
     assert.equal(summary.preview[1].status, 'review');
     assert.equal(summary.preview[1].completeness.present, MANDATORY_FIELDS.length - 1);
     assert.ok(summary.preview[1].issues.some((issue) => issue.code === 'missing-mandatory'));
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CR-1 a missing governorate or district is blocked as missing-identity and never a create', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    const plan = buildImportPlan(database, readOf([
+      rowOf(2, completeValues({ governorate: '' })),
+      rowOf(3, completeValues({ districtName: '' })),
+    ]), { fileName: FILE_NAME });
+
+    for (const row of plan.rows) {
+      assert.equal(row.status, 'blocked');
+      assert.equal(row.action, 'blocked');
+      assert.notEqual(row.action, 'create');
+
+      const issue = row.issues.find((entry) => entry.code === 'missing-identity');
+      assert.ok(issue, 'the missing half of the identity must be reported');
+      assert.equal(issue.severity, 'blocker');
+      assert.equal(issue.reason, `حقل الهوية مفقود: ${issue.header}`);
+    }
+
+    assert.equal(plan.scope.blocked, 2);
+    assert.equal(plan.scope.create, 0, 'a row without an identity is never counted as a create');
+
+    const summary = summarizePlan(plan);
+    assert.equal(summary.scope.create, 0, 'the summary scope must not count a create either');
+    assert.equal(summary.scope.blocked, 2);
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CR-2 unchanged rows are not written, not counted as updates, and counted as unchanged', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    const unchangedRecord = insertStored(database, 'مديرية ثابتة', 'إب');
+    const updatedRecord = insertStored(database, 'مديرية متغيرة', 'تعز');
+
+    const plan = buildImportPlan(database, readOf([
+      rowOf(2, completeValues({ districtName: 'مديرية ثابتة', governorate: 'إب' })),
+      rowOf(3, completeValues({ districtName: 'مديرية متغيرة', governorate: 'تعز', schools: 99 })),
+    ]), { fileName: FILE_NAME });
+
+    assert.equal(plan.rows[0].action, 'unchanged');
+    assert.equal(plan.rows[1].action, 'update');
+    assert.equal(plan.scope.unchanged, 1);
+    assert.equal(plan.scope.update, 1);
+
+    const result = applyImportPlan(database, plan);
+    assert.equal(result.unchanged, 1, 'the identical row is reported as unchanged');
+    assert.equal(result.updated, 1, 'only the real update is counted as updated');
+    assert.equal(result.created, 0);
+    assert.equal(result.applied, 1);
+    assert.equal(result.appliedRows.length, 1);
+    assert.equal(result.appliedRows[0].directorateId, updatedRecord.id);
+    assert.equal(persist.countDirectorates(database), 2, 'the unchanged row is never re-inserted');
+
+    const kept = database.prepare('SELECT schools FROM directorates WHERE id = ?').get(unchangedRecord.id);
+    assert.equal(kept.schools, 40, 'the stored value of an unchanged row is untouched');
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CR-4 applyImportPlan writes exactly one excel-import audit row per transaction', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    const countLogs = () => database.prepare("SELECT COUNT(*) AS c FROM access_log WHERE action = 'excel-import'").get().c;
+    const before = countLogs();
+
+    const plan = buildImportPlan(database, readOf([
+      rowOf(2, completeValues({ districtName: 'مديرية مدققة', governorate: 'صنعاء' })),
+    ]), { fileName: FILE_NAME });
+    const result = applyImportPlan(database, plan);
+
+    assert.equal(result.created, 1);
+    assert.equal(countLogs(), before + 1, 'exactly one excel-import audit row per apply');
+
+    const entry = database.prepare("SELECT * FROM access_log WHERE action = 'excel-import' ORDER BY id DESC LIMIT 1").get();
+    assert.equal(entry.entity, 'directorates');
+    assert.equal(entry.entity_id, FILE_NAME);
+    assert.match(entry.detail, /created=1;updated=0/);
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CR-4 a mid-apply failure rolls back both the data and its audit entry', () => {
+  const { database, directory } = openTestDatabase();
+  const originalUpsert = persist.upsertDirectorate;
+  const countLogs = () => database.prepare("SELECT COUNT(*) AS c FROM access_log WHERE action = 'excel-import'").get().c;
+  const before = countLogs();
+  try {
+    const plan = buildImportPlan(database, readOf([
+      rowOf(2, completeValues({ districtName: 'مديرية أولى', governorate: 'صنعاء' })),
+      rowOf(3, completeValues({ districtName: 'مديرية ثانية', governorate: 'تعز' })),
+    ]), { fileName: FILE_NAME });
+
+    // `applyImportPlan` requires persist at call time, so patching the cached
+    // module injects a failure on the second write without touching the source.
+    let calls = 0;
+    persist.upsertDirectorate = (...args) => {
+      calls += 1;
+      if (calls === 2) throw new Error('injected failure');
+      return originalUpsert(...args);
+    };
+
+    assert.throws(() => applyImportPlan(database, plan), /injected failure/);
+    assert.equal(persist.countDirectorates(database), 0, 'the first insert rolls back with the failure');
+    assert.equal(countLogs(), before, 'no audit entry may survive a rolled-back import');
+  } finally {
+    persist.upsertDirectorate = originalUpsert;
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CR-5 only the first of several intra-file duplicates is applied and created once', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    const plan = buildImportPlan(database, readOf([
+      rowOf(2, completeValues({ districtName: 'مديرية مكررة', governorate: 'إب' })),
+      rowOf(3, completeValues({ districtName: 'مديرية مكررة', governorate: 'إب', schools: 41 })),
+      rowOf(4, completeValues({ districtName: 'مديرية مكررة', governorate: 'إب', schools: 42 })),
+    ]), { fileName: FILE_NAME });
+
+    assert.equal(plan.rows[0].action, 'create');
+    assert.equal(plan.rows[1].action, 'duplicate');
+    assert.equal(plan.rows[2].action, 'duplicate');
+    assert.equal(plan.scope.duplicate, 2);
+    assert.equal(plan.scope.create, 1);
+
+    const result = applyImportPlan(database, plan);
+    assert.equal(result.created, 1, 'the duplicate identity is created exactly once');
+    assert.equal(result.applied, 1);
+    assert.equal(result.duplicates.length, 2);
+    assert.deepEqual(result.duplicates.map((entry) => entry.rowNumber), [3, 4]);
+    assert.equal(result.duplicates[0].duplicateOf, 2);
+    assert.equal(persist.countDirectorates(database), 1);
+
+    const stored = database.prepare('SELECT schools FROM directorates WHERE district = ?').get('مديرية مكررة');
+    assert.equal(stored.schools, 40, 'the first occurrence wins, not the last');
   } finally {
     database.close();
     fs.rmSync(directory, { recursive: true, force: true });

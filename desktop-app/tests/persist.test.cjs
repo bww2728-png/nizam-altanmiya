@@ -172,6 +172,7 @@ test('the Excel export contains the data sheet, the analysis sheets and the meth
     for (const expected of [
       'قاعدة البيانات الشاملة',
       'الترتيب والأولويات',
+      'قيم شاذة',
       'فجوات البيانات',
       'استقرار الترتيب',
       'المنهجية والأوزان',
@@ -180,6 +181,7 @@ test('the Excel export contains the data sheet, the analysis sheets and the meth
     ]) {
       assert.ok(names.includes(expected), `missing sheet: ${expected}`);
     }
+    assert.equal(names.length, 8, 'the export carries exactly eight sheets');
 
     const data = reopened.getWorksheet('قاعدة البيانات الشاملة');
     assert.equal(data.getRow(1).getCell(1).value, 'اسم المديرية');
@@ -200,6 +202,24 @@ test('the Excel export contains the data sheet, the analysis sheets and the meth
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('the audit sheet blanks file identities but keeps numeric entity ids', async () => {
+  const read = await readDirectorateWorkbook(FIXTURE);
+  const analysis = analyze(read.rows);
+  const workbook = await buildAnalysisWorkbook(analysis, {
+    audit: [
+      { id: 1, action: 'excel-scan', entity: 'workbook', entity_id: 'C:\\data\\القالب المحدث.xlsx', detail: '', created_at: 't' },
+      { id: 2, action: 'excel-import', entity: 'directorates', entity_id: 'القالب المحدث.xlsx', detail: '', created_at: 't' },
+      { id: 3, action: 'edit', entity: 'directorates', entity_id: '7', detail: '', created_at: 't' },
+    ],
+  });
+
+  const sheet = workbook.getWorksheet('سجل التدقيق');
+  // Column 4 is «المعرّف» (entity_id); data starts at row 2.
+  assert.equal(sheet.getRow(2).getCell(4).value, '—', 'a workbook path is blanked');
+  assert.equal(sheet.getRow(3).getCell(4).value, '—', 'an import entity_id that is a file name is blanked');
+  assert.equal(String(sheet.getRow(4).getCell(4).value), '7', 'a numeric entity id is kept');
 });
 
 test('renderer indicator metadata matches the engine schema', async () => {

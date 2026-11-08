@@ -20,7 +20,7 @@ const Database = require('better-sqlite3-multiple-ciphers');
 const { migrate } = require('../src/main/analysis/store-schema.cjs');
 const persist = require('../src/main/analysis/persist.cjs');
 const { INPUT_FIELDS, MANDATORY_FIELDS, INDICATORS } = require('../src/main/analysis/schema.cjs');
-const { buildSheets, rankableVerdict } = require('../src/main/analysis/sheets.cjs');
+const { buildSheets, buildDashboard, buildRanking, rankableVerdict } = require('../src/main/analysis/sheets.cjs');
 
 function openTestDatabase() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-sheets-'));
@@ -107,6 +107,12 @@ test('an incomplete directorate waits for completion and never reaches the ranke
 
     const rankedIds = sheets.ranking.ranked.map((entry) => entry.directorateId);
     assert.ok(!rankedIds.includes(incomplete.id), 'an incomplete directorate must never be ranked');
+
+    // Every stored directorate belongs to exactly one bucket: nothing is dropped
+    // silently between the ranked, waiting and anomalous lists.
+    const bucketTotal = sheets.ranking.ranked.length + sheets.ranking.waiting.length
+      + sheets.ranking.anomalies.length;
+    assert.equal(bucketTotal, 2, 'the three buckets must partition the stored directorates');
   } finally {
     database.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -136,6 +142,24 @@ test('an anomalous directorate is counted and excluded instead of silently ranke
     database.close();
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('buildRanking throws when a complete row could not be placed in any bucket', () => {
+  // A complete, non-anomalous row always has a composite because every indicator
+  // is derived from mandatory fields. If that ever stops holding, the row would
+  // vanish from ranked, waiting and anomalies at once; the invariant surfaces it
+  // loudly instead of dropping it silently.
+  const stranded = {
+    dbId: 1,
+    districtName: 'مديرية بلا مركّب',
+    governorate: 'إب',
+    values: baseValues({ districtName: 'مديرية بلا مركّب' }),
+    calibrated: { composite: null, severe: false, blocked: false },
+    replica: { composite: 0.2 },
+    completeness: { ratio: 1 },
+  };
+
+  assert.throws(() => buildRanking({ rows: [stranded] }, {}), /partition/);
 });
 
 test('the indicators payload covers every stored row and reports present vs missing', () => {
@@ -207,4 +231,93 @@ test('an empty database yields empty sheets instead of throwing', () => {
     database.close();
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('CR-6 the completeness buckets are mutually exclusive and anomaly wins over complete', () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    insertStored(database, 'مديرية طبيعية', 'صنعاء');
+    // All 13 mandatory fields are present, so this row is complete AND anomalous.
+    insertStored(database, 'مديرية شاذة', 'إب', { population: 250000000 });
+
+    const sheets = buildSheets(database, {});
+    const buckets = sheets.dashboard.completenessBuckets;
+    const byKey = Object.fromEntries(buckets.map((bucket) => [bucket.key, bucket]));
+    const total = sheets.dashboard.totals.directorates;
+
+    assert.equal(total, 2);
+    assert.equal(byKey.anomaly.count, 1, 'the complete-but-anomalous row is counted as an anomaly');
+    assert.equal(byKey.complete.count, 1, 'it must NOT also be counted as complete');
+    assert.equal(byKey.partial.count, 0);
+
+    const sum = buckets.reduce((acc, bucket) => acc + bucket.count, 0);
+    assert.equal(sum, total, 'the three buckets partition the directorates exactly');
+    for (const bucket of buckets) {
+      assert.ok(bucket.count >= 0, `${bucket.key} must never be negative`);
+    }
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CR-6 buildDashboard throws a descriptive error when the buckets fail to partition', () => {
+  const rowA = { dbId: 1, districtName: 'أ', governorate: 'صنعاء', values: baseValues(), calibrated: null, project: null };
+  const rowB = { dbId: 2, districtName: 'ب', governorate: 'صنعاء', values: baseValues({ districtName: 'ب' }), calibrated: null, project: null };
+
+  // An iterable that yields two rows while reporting a length of one, so the
+  // bucket sum (2) cannot equal rows.length (1) and the invariant must fire
+  // instead of hiding the inconsistency.
+  const inconsistent = {
+    length: 1,
+    [Symbol.iterator]: function* iterate() { yield rowA; yield rowB; },
+  };
+
+  assert.throws(() => buildDashboard({ rows: inconsistent }), /partition/);
+});
+
+test('severe deprivation leads the ranking regardless of its composite', () => {
+  const severe = {
+    dbId: 1,
+    districtName: 'مديرية منهارة',
+    governorate: 'إب',
+    values: baseValues({ districtName: 'مديرية منهارة' }),
+    calibrated: { composite: 0.1, severe: true, degradedCount: 5, blocked: false },
+    replica: { composite: 0.1 },
+    completeness: { ratio: 1 },
+  };
+  const mild = {
+    dbId: 2,
+    districtName: 'مديرية مستقرة',
+    governorate: 'إب',
+    values: baseValues({ districtName: 'مديرية مستقرة' }),
+    calibrated: { composite: 0.9, severe: false, degradedCount: 0, blocked: false },
+    replica: { composite: 0.9 },
+    completeness: { ratio: 1 },
+  };
+
+  const { ranked } = buildRanking({ rows: [mild, severe] }, {});
+  assert.equal(ranked.length, 2);
+  assert.equal(ranked[0].districtName, 'مديرية منهارة', 'severe deprivation tops even with a lower composite');
+  assert.equal(ranked[0].rank, 1);
+  assert.equal(ranked[1].districtName, 'مديرية مستقرة');
+  assert.equal(ranked[1].rank, 2);
+});
+
+test('buildRanking throws when a complete row could not be placed in any bucket', () => {
+  // A complete, non-anomalous row always has a composite because every indicator
+  // is derived from mandatory fields. If that ever stops holding, the row would
+  // vanish from ranked, waiting and anomalies at once; the invariant surfaces it
+  // loudly instead of dropping it silently.
+  const stranded = {
+    dbId: 1,
+    districtName: 'مديرية بلا مركّب',
+    governorate: 'إب',
+    values: baseValues({ districtName: 'مديرية بلا مركّب' }),
+    calibrated: { composite: null, severe: false, blocked: false },
+    replica: { composite: 0.2 },
+    completeness: { ratio: 1 },
+  };
+
+  assert.throws(() => buildRanking({ rows: [stranded] }, {}), /partition/);
 });

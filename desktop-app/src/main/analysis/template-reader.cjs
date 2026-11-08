@@ -123,9 +123,10 @@ async function readDirectorateWorkbook(filePath) {
       for (const warning of parsed.warnings) {
         rowWarnings.push({ key, code: warning.code, raw: text, value: parsed.value });
       }
-      if (parsed.state === 'invalid' && text !== '') {
-        rowWarnings.push({ key, code: `invalid-${field.type}`, raw: text, value: null });
-      }
+      // The parser records the exact rejection reason itself (`invalid-*`, or
+      // `ratio-out-of-range` for a percentage above 100), so no synthetic code is
+      // added here — otherwise one bad value would carry two blockers and every
+      // quality check would count it twice.
     }
 
     if (!hasAnyValue) {

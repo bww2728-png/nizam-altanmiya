@@ -86,20 +86,20 @@ function cards(summary) {
 }
 
 function priorityTable(rows) {
-  const ranked = rows
-    .filter((row) => typeof row.calibrated?.rank === 'number')
-    .sort((a, b) => a.calibrated.rank - b.calibrated.rank);
-  if (!ranked.length) return '<p class="muted">لا توجد مديريات مؤهلة للترتيب في هذه الدفعة.</p>';
+  // `rows` is the rankable set already ordered by the canonical rule
+  // (severe deprivation first, then the composite); number by position so the
+  // report matches the interface, which renumbers the same population from 1.
+  if (!rows.length) return '<p class="muted">لا توجد مديريات مؤهلة للترتيب في هذه الدفعة.</p>';
   return `<table>
     <thead><tr>
       <th style="width:6%">#</th><th style="width:26%">المديرية</th><th style="width:14%">المحافظة</th>
       <th style="width:12%">مؤشر الأولوية</th><th style="width:24%">نوع المشروع المقترح</th><th style="width:18%">الحالة</th>
     </tr></thead>
-    <tbody>${ranked.map((row) => `<tr>
-      <td>${row.calibrated.rank}</td>
-      <td>${escapeHtml(row.districtName)}${row.calibrated.severe ? ' <span class="badge severe">حرمان حاد</span>' : ''}</td>
+    <tbody>${rows.map((row, index) => `<tr>
+      <td>${index + 1}</td>
+      <td>${escapeHtml(row.districtName)}${row.calibrated?.severe ? ' <span class="badge severe">حرمان حاد</span>' : ''}</td>
       <td>${escapeHtml(row.governorate)}</td>
-      <td class="ltr">${fixed(row.calibrated.composite)}</td>
+      <td class="ltr">${fixed(row.calibrated?.composite)}</td>
       <td>${escapeHtml(row.project?.label ?? '—')}</td>
       <td>${escapeHtml((row.confidence?.text ?? '').split('|')[0].trim() || '—')}</td>
     </tr>`).join('')}</tbody></table>`;
@@ -120,31 +120,51 @@ function blockedTable(rows) {
 }
 
 function comparisonTable(rows) {
-  const list = rows.filter((row) => typeof row.calibrated?.rank === 'number' || typeof row.replica?.rank === 'number');
-  if (!list.length) return '<p class="muted">لا توجد نتائج كافية لمقارنة المسارين.</p>';
+  if (!rows.length) return '<p class="muted">لا توجد نتائج كافية لمقارنة المسارين.</p>';
+  // Both ranks are recomputed over the same ranked set (the priority table), so a
+  // row shows one consistent pair of numbers across the report.
+  const replicaOrder = rows
+    .filter((row) => Number.isFinite(row.replica?.composite))
+    .sort((a, b) => ((b.replica?.composite ?? 0) - (a.replica?.composite ?? 0))
+      || String(a.districtName ?? '').localeCompare(String(b.districtName ?? ''), 'ar'));
+  const replicaRank = new Map(replicaOrder.map((row, index) => [row, index + 1]));
   return `<table>
     <thead><tr>
       <th style="width:26%">المديرية</th><th style="width:12%">المؤشر المرجّح</th><th style="width:10%">رتبته</th>
       <th style="width:12%">مؤشر الاحتياج</th><th style="width:10%">رتبته</th><th style="width:10%">فرق الرتبة</th>
       <th style="width:20%">حالة المسار المعاير</th>
     </tr></thead>
-    <tbody>${list.map((row) => {
-      const replicaRank = row.replica?.rank ?? null;
-      const calibratedRank = row.calibrated?.rank ?? null;
-      const shift = replicaRank && calibratedRank ? replicaRank - calibratedRank : null;
-      const status = row.calibrated?.blocked
-        ? 'محجوب لقلة الأدلة'
-        : row.calibrated?.severe ? 'حرمان حاد' : 'مرتّب';
+    <tbody>${rows.map((row, index) => {
+      const calibratedRank = index + 1;
+      const rankedReplica = replicaRank.get(row) ?? null;
+      const shift = rankedReplica && calibratedRank ? rankedReplica - calibratedRank : null;
+      const status = row.calibrated?.severe ? 'حرمان حاد' : 'مرتّب';
       return `<tr>
         <td>${escapeHtml(row.districtName)}</td>
         <td class="ltr">${fixed(row.replica?.composite)}</td>
-        <td class="ltr">${replicaRank ?? '—'}</td>
+        <td class="ltr">${rankedReplica ?? '—'}</td>
         <td class="ltr">${fixed(row.calibrated?.composite)}</td>
-        <td class="ltr">${calibratedRank ?? '—'}</td>
+        <td class="ltr">${calibratedRank}</td>
         <td class="ltr">${shift === null ? '—' : (shift > 0 ? `+${shift}` : String(shift))}</td>
         <td>${status}</td>
       </tr>`;
     }).join('')}</tbody></table>`;
+}
+
+function anomaliesTable(rows) {
+  const { anomalyKeys } = require('./import-plan.cjs');
+  const entries = [];
+  for (const row of rows) {
+    const keys = anomalyKeys(row.values ?? {});
+    for (const key of keys) entries.push({ district: row.districtName, governorate: row.governorate, key, value: row.values?.[key] });
+  }
+  if (!entries.length) return '<p class="muted">لا توجد قيم شاذة في هذه الدفعة.</p>';
+  return `<table>
+    <thead><tr><th style="width:34%">المديرية</th><th style="width:20%">المحافظة</th><th style="width:26%">الحقل</th><th style="width:20%">القيمة</th></tr></thead>
+    <tbody>${entries.map((entry) => `<tr>
+      <td>${escapeHtml(entry.district)}</td><td>${escapeHtml(entry.governorate)}</td>
+      <td>${escapeHtml(entry.key)}</td><td class="ltr">${fixed(entry.value)}</td>
+    </tr>`).join('')}</tbody></table>`;
 }
 
 function gapsTable(analysis) {
@@ -203,10 +223,16 @@ function renderReportHtml(analysis, context = {}) {
   const meta = analysis.meta ?? {};
   const summary = analysis.summary ?? {};
   const rows = analysis.rows ?? [];
-  const top = rows
-    .filter((row) => typeof row.calibrated?.rank === 'number')
-    .sort((a, b) => a.calibrated.rank - b.calibrated.rank)
-    .slice(0, 15);
+  // The ranking mirrors the interface: only complete, non-anomalous rows are
+  // ordered (severe deprivation first, matching the engine), and the anomalies and
+  // incomplete rows get their own sections so nothing is dropped silently.
+  const { rankableVerdict, compareCalibratedRows } = require('./sheets.cjs');
+  const rankable = rows.filter((row) => {
+    const verdict = rankableVerdict(row);
+    return verdict.complete && !verdict.anomalous && Number.isFinite(row.calibrated?.composite);
+  });
+  const ordered = [...rankable].sort(compareCalibratedRows);
+  const top = ordered.slice(0, 15);
 
   return `<!doctype html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8">
@@ -222,7 +248,7 @@ function renderReportHtml(analysis, context = {}) {
   </div>
 
   <h2>الملخص التنفيذي</h2>
-  ${cards(summary)}
+  ${cards({ ...summary, calibratedRanked: rankable.length })}
   <div class="note">
     يعرض التقرير مسارين تحليليين متوازيين على البيانات نفسها: <strong>المؤشر المرجّح</strong> الذي يجمع الأبعاد الاثني عشر
     بأوزانها جمعًا خطيًا، و<strong>مؤشر الاحتياج المعاير</strong> الذي يقيس الاحتياج بنقاط مرجعية ثابتة ويحجب الحكم حين لا تكفي الأدلة.
@@ -233,12 +259,15 @@ function renderReportHtml(analysis, context = {}) {
   ${priorityTable(top)}
 
   <h2>مقارنة المسارين</h2>
-  ${comparisonTable(rows)}
+  ${comparisonTable(ordered)}
 
   <div class="page-break"></div>
   <h2>مديريات محجوبة لقلة الأدلة</h2>
   ${blockedTable(rows)}
   <div class="note">الحجب يعني أن نسبة الأوزان المتاحة أقل من الحد الأدنى (${percent(meta.minWeightCoverage ?? 0.6)})، فلا يصح إصدار رقم مركب. المطلوب استكمال البيانات لا تعديل المعادلة.</div>
+
+  <h2>قيم شاذة مستبعدة من الترتيب</h2>
+  ${anomaliesTable(rows)}
 
   <h2>فجوات البيانات</h2>
   ${gapsTable(analysis)}
@@ -249,7 +278,8 @@ function renderReportHtml(analysis, context = {}) {
 
   <h2>المنهجية والأوزان</h2>
   <p>عتبة الانحدار (k) = <span class="ltr">${meta.kThreshold ?? 4}</span> من 12 بُعدًا، وخط الحرمان = <span class="ltr">${meta.deprivationLine ?? 0.6}</span>.
-  المديرية التي تتجاوز أبعادها المتدهورة العتبة تُصنّف «حرمان حاد» وتتصدر القائمة مهما كان متوسطها.</p>
+  المديرية التي تتجاوز أبعادها المتدهورة العتبة تُصنّف «حرمان حاد» وتتصدر القائمة مهما كان متوسطها.
+  المديريات ذات القيم غير المنطقية تُستبعد من الترتيب حتى تُصحَّح، وتُدرَج في القسم المخصص لها أعلاه.</p>
   ${weightsTable(analysis)}
 
   <h2>حدود التقرير</h2>
