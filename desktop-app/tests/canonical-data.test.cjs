@@ -251,6 +251,21 @@ test('project regions require explicit row approval and preserve project/funding
     assert.equal(funding.amount, 250);
     assert.equal(funding.currency_code, 'USD');
 
+    const registry = canonical.listCanonicalProjects(db, { search: 'تأهيل شبكة', limit: 10 });
+    assert.equal(registry.total, 1);
+    assert.equal(registry.rows.length, 1);
+    assert.equal(registry.rows[0].name, 'تأهيل شبكة مياه');
+    assert.equal(registry.rows[0].fundingCount, 1);
+    assert.equal(registry.rows[0].openQualityIssues, 2);
+
+    const projectDetails = canonical.getCanonicalProject(db, project.id);
+    assert.equal(projectDetails.project.name, 'تأهيل شبكة مياه');
+    assert.equal(projectDetails.funding.length, 1);
+    assert.equal(projectDetails.funding[0].currency_code, 'USD');
+    assert.match(projectDetails.provenance.source_location, /المشاريع!row-2/);
+    assert.equal(projectDetails.issues.length, 2);
+    assert.throws(() => canonical.getCanonicalProject(db, 0), /معرّف المشروع غير صالح/);
+
     const promotion = db.prepare('SELECT * FROM workbook_import_promotions').get();
     assert.equal(promotion.entity_type, 'project');
     assert.match(promotion.source_location, /المشاريع!row-2/);
