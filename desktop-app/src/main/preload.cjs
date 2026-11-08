@@ -54,10 +54,12 @@ contextBridge.exposeInMainWorld('localApp', {
   // Workbook sheets
   sheetDashboard: () => ipcRenderer.invoke('sheet:dashboard'),
   sheetIndicators: () => ipcRenderer.invoke('sheet:indicators'),
+  filteredIndicatorReport: (request) => ipcRenderer.invoke('sheet:indicator-report', request),
   sheetRanking: (request) => ipcRenderer.invoke('sheet:ranking', request),
 
   // Directorates (database sheet + card)
   directorates: (request) => ipcRenderer.invoke('analysis:directorates', request),
+  directorateFilterOptions: (keys) => ipcRenderer.invoke('analysis:directorates:filter-options', keys),
   getDirectorate: (id) => ipcRenderer.invoke('analysis:directorate:get', id),
   saveDirectorate: (request) => ipcRenderer.invoke('analysis:directorate:save', request),
   deleteDirectorate: (id) => ipcRenderer.invoke('analysis:directorate:delete', id),
@@ -78,6 +80,7 @@ contextBridge.exposeInMainWorld('localApp', {
   exportAnalysisExcel: () => ipcRenderer.invoke('analysis:export-excel'),
   exportAnalysisPdf: () => ipcRenderer.invoke('analysis:export-pdf'),
   exportFilteredPdf: (request) => ipcRenderer.invoke('analysis:export-filtered-pdf', request),
+  exportFilteredExcel: (request) => ipcRenderer.invoke('analysis:export-filtered-excel', request),
 
   // Automatic updates (GitHub Releases)
   updateStatus: () => ipcRenderer.invoke('update:status'),

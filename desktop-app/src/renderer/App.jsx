@@ -287,11 +287,11 @@ export default function App() {
       case 'correction':
         return <Correction catalogue={catalogue ?? []} notify={notify} refreshKey={refreshKey} focusId={params.focusId ?? null} />;
       case 'indicators':
-        return <Indicators notify={notify} />;
+        return <Indicators accessProfile={status?.accessProfile ?? 'owner'} notify={notify} refreshKey={refreshKey} />;
       case 'ranking':
         return <Ranking catalogue={catalogue ?? []} notify={notify} onOpenCard={(id) => navigate('card', { id })} />;
       case 'database':
-        return <Database catalogue={catalogue ?? []} notify={notify} refreshKey={refreshKey} onOpenCard={(id) => navigate('card', { id })} />;
+        return <Database catalogue={catalogue ?? []} accessProfile={status?.accessProfile ?? 'owner'} notify={notify} refreshKey={refreshKey} onOpenCard={(id) => navigate('card', { id })} />;
       case 'card':
         return <DirectorateCard id={params.id ?? null} catalogue={catalogue ?? []} notify={notify} refreshKey={refreshKey} onNavigate={navigate} />;
       case 'dashboard':
