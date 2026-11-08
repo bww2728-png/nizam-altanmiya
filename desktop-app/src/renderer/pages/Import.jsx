@@ -907,6 +907,7 @@ function ProjectRegionReview({ staging }) {
                       <div className="row between" style={{ flexWrap: 'wrap' }}>
                         <label className="row gap-sm">
                           <input
+                            id={'project-row-' + row.rowNumber}
                             type="checkbox"
                             checked={Boolean(selectedRows[row.rowNumber])}
                             onChange={event => setSelectedRows(current => ({ ...current, [row.rowNumber]: event.target.checked }))}
