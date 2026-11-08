@@ -208,7 +208,7 @@ async function stageWorkbook(database, filePath, workbookOption = null) {
       // project identity (name/code/number) plus supporting project columns, or
       // at least two distinct identity fields.
       const projectIdentityHints = ['اسم المشروع', 'رمز المشروع', 'كود المشروع', 'رقم المشروع'];
-      const projectContextHints = ['حاله المشروع', 'وصف المشروع', 'تكلفه المشروع', 'تكلفه تقديريه',
+      const projectContextHints = ['حاله المشروع', 'وصف المشروع', 'تكلفه المشروع', 'التكلفه التقديريه', 'تكلفه تقديريه',
         'جهة التمويل', 'مبلغ التمويل', 'تاريخ البدايه', 'تاريخ النهايه'];
       const projectIdentityCount = projectIdentityHints.filter(hint => hasAny([hint])).length;
       const projectContextCount = projectContextHints.filter(hint => hasAny([hint])).length;
