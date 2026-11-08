@@ -124,7 +124,7 @@ function renderIndicatorsReportHtml({ rows = [], registry = [], filters = {}, vi
   const rankKey = mode === 'replica' ? 'replicaRank' : 'calibratedRank';
   const body = rows.length ? rows.map((row, index) => `<tr><td>${index + 1}</td><td class="ltr">${row[rankKey] ?? '—'}</td><td>${escapeHtml(row.districtName)}</td><td>${escapeHtml(row.governorate)}</td>${registry.map((indicator) => `<td class="ltr">${escapeHtml(reportValue(indicatorValue(row, indicator.code, view), 'number'))}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${registry.length + 4}">لا توجد مديريات مطابقة للفلاتر الحالية.</td></tr>`;
   const labels = { criteria: 'الشروط', logic: 'منطق الشروط', mode: 'مسار الأولوية', sort: 'الترتيب', view: 'طريقة العرض' };
-  const filterValues = { ...filters, mode: mode === 'replica' ? 'مطابقة القالب' : 'المعاير', view: viewLabels[view] ?? viewLabels.values };
+  const filterValues = { ...filters, mode: mode === 'replica' ? 'المعادلة المرجعية' : 'المعاير', view: viewLabels[view] ?? viewLabels.values };
   const summaryCards = [
     ['النتائج المطابقة', total],
     ...(summary.rankable === null || summary.rankable === undefined ? [] : [['قابلة للترتيب', summary.rankable]]),
