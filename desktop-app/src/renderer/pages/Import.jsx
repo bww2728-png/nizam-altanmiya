@@ -905,7 +905,11 @@ function ProjectRegionReview({ staging }) {
                   {regionPreview.rows.map(row => (
                     <div className="quote" key={row.id}>
                       <div className="row between" style={{ flexWrap: 'wrap' }}>
-                        <label className="row gap-sm">
+                        <label
+                          className="row gap-sm"
+                          data-testid={'project-row-label-' + row.rowNumber}
+                          style={{ cursor: row.hidden || row.hasFormula || row.promoted ? 'not-allowed' : 'pointer' }}
+                        >
                           <input
                             id={'project-row-' + row.rowNumber}
                             type="checkbox"
@@ -964,7 +968,12 @@ function ProjectRegionReview({ staging }) {
 
               <div className="row between" style={{ marginTop: 14, flexWrap: 'wrap' }}>
                 <span className="muted">الصفوف المحددة صراحةً: {selectedCount}</span>
-                <button className="btn primary" onClick={promote} disabled={busy || !columnMap.project_name || selectedCount === 0}>
+                <button
+                  id="promote-projects"
+                  className="btn primary"
+                  onClick={promote}
+                  disabled={busy || !columnMap.project_name || selectedCount === 0}
+                >
                   {busy ? 'جارٍ الاعتماد...' : 'اعتماد المشاريع المحددة في قاعدة البيانات'}
                 </button>
               </div>
