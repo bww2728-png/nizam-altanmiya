@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { BriefcaseBusiness, RefreshCw, Search } from 'lucide-react';
+import { Briefcase, RefreshCw, Search } from 'lucide-react';
 import { Badge, Card, Empty, ErrorBanner, Loading, Modal } from '../components/ui.jsx';
 import { errText, fmtDate, fmtDateTime, fmtNumber } from '../lib/format.js';
 
