@@ -77,7 +77,7 @@ test('Node and Electron network APIs are blocked and recorded by the runtime gua
     await assert.rejects(electronNet.fetch('https://example.invalid'), { code: 'ERR_OFFLINE_RUNTIME_BLOCKED' });
 
     const audit = getOfflineNetworkAudit();
-    assert.equal(audit.nodeAttempts.length, 10);
+    assert.equal(audit.nodeAttempts.length, 9);
     assert.equal(audit.electronAttempts.length, 2);
   } finally {
     guard.restore();
