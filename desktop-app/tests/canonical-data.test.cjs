@@ -42,6 +42,8 @@ test('canonical model migrations are additive and idempotent', () => {
 
     const fieldCount = db.prepare("SELECT COUNT(*) AS n FROM data_field_definitions WHERE entity_type='directorate'").get().n;
     assert.ok(fieldCount >= 39);
+    const populationFieldId = db.prepare("SELECT id FROM data_field_definitions WHERE entity_type='directorate' AND field_key='population'").get().id;
+    assert.ok(db.prepare("SELECT 1 FROM data_field_aliases WHERE field_definition_id=? AND normalized_alias=?").get(populationFieldId, 'اجمالي السكان'));
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM indicator_definitions').get().n, 12);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM directorates').get().n, 0);
   } finally {
