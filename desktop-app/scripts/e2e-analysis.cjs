@@ -441,7 +441,7 @@ app.whenReady().then(async () => {
     console.log('[E2E] Project review diagnostic: ' + JSON.stringify(projectReviewDiagnostics));
     await waitFor(window, `document.body.innerText.includes('مناطق المشاريع المرشحة: 1') && document.body.innerText.includes('مشروع اختبار E2E')`, 30000)
       .catch(error => { throw new Error(error.message + '; diagnostic=' + JSON.stringify(projectReviewDiagnostics)); });
-    const projectRowSelected = await clickBySelector(window, '[data-testid="project-row-label-2"]', 'اختيار صف المشروع');
+    const projectRowSelected = await clickByText(window, '[data-testid="project-row-label-2"] strong', 'صف 2');
     const beforePromotion = await window.webContents.executeJavaScript(`(() => {
       const card = [...document.querySelectorAll('.card')].find(item =>
         item.innerText.includes('مراجعة الجداول الإضافية واعتماد المشاريع')
@@ -472,6 +472,7 @@ app.whenReady().then(async () => {
         && promoteClicked && promotionCompleted,
       JSON.stringify({
         projectRowSelected,
+        rowClickTrace: interactionTrace.filter(item => item.label === 'صف 2').slice(-1)[0] ?? null,
         beforePromotion,
         promoteClicked,
         promotionCompleted,
