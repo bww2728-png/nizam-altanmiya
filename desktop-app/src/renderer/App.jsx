@@ -143,6 +143,27 @@ export default function App() {
     }
   }, [notify]);
 
+  const restore = useCallback(async () => {
+    const confirmed = window.confirm('ستُستبدل قاعدة البيانات الحالية بالنسخة المختارة. سيُنشئ النظام نسخة أمان من البيانات الحالية أولًا. هل تريد المتابعة؟');
+    if (!confirmed) return;
+    try {
+      const result = await window.localApp.restoreDatabase();
+      if (result?.canceled) return;
+      setStatus((current) => ({ ...current, unlocked: true, hasDatabase: true, hasKey: true }));
+      setCatalogue(null);
+      setRefreshKey((key) => key + 1);
+      await loadCatalogue();
+      notify({ tone: 'ok', message: 'تمت استعادة النسخة الاحتياطية والتحقق من قاعدة البيانات. نسخة الأمان: ' + (result.safetyBackup ?? 'غير مطلوبة') });
+    } catch (cause) {
+      notify({ tone: 'bad', message: errText(cause) || 'تعذرت استعادة النسخة الاحتياطية؛ لم يُفترض فقد البيانات الحالية.' });
+      try {
+        const next = await window.localApp.status();
+        setStatus(next);
+        if (next.unlocked) await loadCatalogue();
+      } catch { /* keep the original restore error visible */ }
+    }
+  }, [loadCatalogue, notify]);
+
   const toggleProfile = useCallback(async () => {
     try {
       const currentProfile = status?.accessProfile ?? 'owner';
@@ -239,6 +260,7 @@ export default function App() {
         onToggleProfile={toggleProfile}
         onLock={lock}
         onBackup={backup}
+        onRestore={restore}
         onRefresh={refresh}
         refreshing={refreshing}
         generatedAt={generatedAt}
