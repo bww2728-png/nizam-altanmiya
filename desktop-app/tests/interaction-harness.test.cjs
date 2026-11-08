@@ -62,3 +62,17 @@ test('Release workflow gates every push to main with tests before packaging', ()
   assert.match(releaseWorkflow, /if: github\.ref == 'refs\/heads\/main'/);
   assert.match(releaseWorkflow, /--publish never/);
 });
+
+test('theme toggle persists the preference and exposes accessible light and dark modes', () => {
+  const app = fs.readFileSync(path.join(root, 'src/renderer/App.jsx'), 'utf8');
+  const shell = fs.readFileSync(path.join(root, 'src/renderer/components/AppShell.jsx'), 'utf8');
+  const toggle = fs.readFileSync(path.join(root, 'src/renderer/components/ThemeToggle.jsx'), 'utf8');
+  const theme = fs.readFileSync(path.join(root, 'src/renderer/styles/theme.css'), 'utf8');
+
+  assert.match(app, /localStorage\.getItem\('ldi-theme'\)/);
+  assert.match(app, /localStorage\.setItem\('ldi-theme', theme\)/);
+  assert.match(app, /document\.documentElement\.dataset\.theme = theme/);
+  assert.match(shell, /<ThemeToggle theme=\{theme\} onToggle=\{onToggleTheme\} \/>/);
+  assert.match(toggle, /aria-label=\{`التبديل إلى \$\{label\}`\}/);
+  assert.match(theme, /:root\[data-theme='light'\]/);
+});
