@@ -300,7 +300,7 @@ function readWorkbookSheetPreview(database, batchId, sheetId, limit = 20) {
     throw new Error('معرّف دفعة أو ورقة الاستيراد غير صالح.');
   }
   const metadata = database.prepare(
-    'SELECT id, batch_id, sheet_index, name, state FROM workbook_import_sheets WHERE id = ? AND batch_id = ?'
+    'SELECT id, batch_id, sheet_index, name, state, nonempty_row_count FROM workbook_import_sheets WHERE id = ? AND batch_id = ?'
   ).get(sheet, batch);
   if (!metadata) throw new Error('الورقة المطلوبة لا تنتمي إلى دفعة الاستيراد المحددة.');
   const rows = database.prepare(
