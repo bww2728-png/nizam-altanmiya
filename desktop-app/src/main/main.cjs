@@ -543,6 +543,33 @@ function registerHandlers() {
     return preview;
   });
 
+  ipcMain.handle('projects:list', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') {
+      return { restricted: true, message: 'سجل المشاريع والتكاليف والمصادر متاح في وضع المالك فقط.' };
+    }
+    const db = requireDatabase();
+    const result = canonicalData.listCanonicalProjects(db, request);
+    auditRead('projects:list', {
+      entity: 'projects',
+      rowCount: result.rows.length,
+      detail: 'offset=' + result.offset + ';limit=' + result.limit + ';search=' + String(request.search ?? '').slice(0, 80),
+    });
+    return result;
+  });
+
+  ipcMain.handle('projects:get', (_event, projectId) => {
+    if (currentProfile() !== 'owner') throw new Error('تفاصيل المشروع المالية والمصدرية متاحة في وضع المالك فقط.');
+    const db = requireDatabase();
+    const result = canonicalData.getCanonicalProject(db, projectId);
+    auditRead('projects:get', {
+      entity: 'projects',
+      entityId: result.project.id,
+      rowCount: result.funding.length,
+      detail: 'funding=' + result.funding.length + ';issues=' + result.issues.length,
+    });
+    return result;
+  });
+
   ipcMain.handle('import:regions', (_event, request = {}) => {
     if (currentProfile() !== 'owner') {
       return { restricted: true, message: 'مراجعة وربط الجداول غير المصنفة متاحان في وضع المالك فقط.' };
