@@ -494,6 +494,8 @@ function promoteProjectRegion(database, request = {}) {
   const batch = database.prepare('SELECT source_id FROM workbook_import_batches WHERE id = ?').get(batchId);
   const refused = [];
   const prepared = [];
+  const seenCodes = new Set();
+  const seenSourceNames = new Set();
 
   for (const row of requested) {
     const refuse = (reason) => refused.push({ rowNumber: row.row_number, reason });
@@ -531,8 +533,10 @@ function promoteProjectRegion(database, request = {}) {
     const code = (values.project_code ?? '').trim() || null;
     const sourceLocation = region.sheet_name + '!row-' + row.row_number;
     if (database.prepare('SELECT id FROM workbook_import_promotions WHERE row_id = ?').get(row.id)) { refuse('هذا الصف سبق اعتماده في قاعدة البيانات.'); continue; }
-    if (code && database.prepare('SELECT id FROM projects WHERE code = ?').get(code)) { refuse('رمز المشروع موجود مسبقًا؛ يلزم حسم التعارض يدويًا.'); continue; }
-    if (!code && batch.source_id && database.prepare('SELECT id FROM projects WHERE source_id = ? AND name = ?').get(batch.source_id, name)) { refuse('اسم المشروع نفسه سبق استيراده من هذا الملف.'); continue; }
+    if (code && (seenCodes.has(code) || database.prepare('SELECT id FROM projects WHERE code = ?').get(code))) { refuse('رمز المشروع موجود مسبقًا أو مكرر داخل الملف؛ يلزم حسم التعارض يدويًا.'); continue; }
+    if (!code && batch.source_id && (seenSourceNames.has(name) || database.prepare('SELECT id FROM projects WHERE source_id = ? AND name = ?').get(batch.source_id, name))) { refuse('اسم المشروع نفسه سبق استيراده من هذا الملف أو تكرر داخله.'); continue; }
+    if (code) seenCodes.add(code);
+    else if (batch.source_id) seenSourceNames.add(name);
 
     let geographicUnitId = null;
     const district = (values.district ?? '').trim(), governorate = (values.governorate ?? '').trim();
