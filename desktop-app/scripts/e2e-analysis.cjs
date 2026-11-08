@@ -277,7 +277,7 @@ app.whenReady().then(async () => {
     await waitFor(window, `Boolean(document.querySelector('.app-shell'))`);
 
     const labels = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.side-nav .nav-item span')].map((node) => node.textContent)`);
-    const expectedNav = ['اللوحة التفاعلية', 'المؤشرات الـ 12', 'ترتيب الأولويات', 'الاستيراد الآلي', 'تصحيح البيانات', 'قاعدة البيانات الشاملة', 'بطاقة مديرية'];
+    const expectedNav = ['اللوحة التفاعلية', 'المؤشرات الـ 12', 'ترتيب الأولويات', 'الاستيراد الآلي', 'سجل المشاريع', 'تصحيح البيانات', 'قاعدة البيانات الشاملة', 'بطاقة مديرية'];
     check('nav', 'التنقل يعرض الشاشات السبع', expectedNav.every((label) => labels.includes(label)), labels.join(' · '));
     check('entry', 'قاعدة البيانات تُفتح وتصبح مشفّرة', await window.webContents.executeJavaScript(`window.localApp.status().then((s) => s.unlocked && s.hasKey)`));
 
@@ -426,6 +426,15 @@ app.whenReady().then(async () => {
       (await bodyText(window)).slice(-500).replace(/\\n/g, ' | ')
     );
     await screenshot(window, '15-اعتماد-المشاريع.png');
+
+    await clickByText(window, '.side-nav .nav-item', 'سجل المشاريع');
+    await waitFor(window, `document.body.innerText.includes('سجل المشاريع المعتمدة') && document.body.innerText.includes('مشروع اختبار E2E')`, 30000);
+    const projectList = await bodyText(window);
+    check('pages', 'سجل المشاريع يعرض المشروع المعتمد من ملف Excel', projectList.includes('مشروع اختبار E2E') && projectList.includes('E2E-001'));
+    const detailsOpened = await clickByText(window, 'table.data tbody tr button', 'التفاصيل');
+    await waitFor(window, `document.body.innerText.includes('مصدر البيانات') && document.body.innerText.includes('مشاريع اختبار')`, 30000);
+    check('pages', 'تفاصيل المشروع تعرض التمويل والمصدر وملاحظات الجودة', detailsOpened && (await bodyText(window)).includes('جهات التمويل'));
+    await screenshot(window, '16-سجل-المشاريع.png');
 
     // ---------- 4. Access profile ----------
     const toggled = await clickBySelector(window, '.topbar button.chip.clickable', 'تبديل وضع الوصول');
