@@ -120,7 +120,7 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
 
     const regions = db.prepare('SELECT * FROM workbook_import_regions WHERE batch_id = ?').all(staged.batchId);
     assert.ok(regions.some(region => region.candidate_type === 'directorate-candidate'));
-    assert.ok(regions.some(region => region.candidate_type === 'project-candidate'));
+    assert.ok(regions.some(region => region.sheet_id === storedSheets[1].id && region.candidate_type === 'unclassified'), 'a project-cost/status table without project identity remains review-only and unclassified');
 
     const storedRows = db.prepare('SELECT * FROM workbook_import_rows WHERE batch_id = ? ORDER BY sheet_id, row_number').all(staged.batchId);
     assert.ok(storedRows.length >= 7);
