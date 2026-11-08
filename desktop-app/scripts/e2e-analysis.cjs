@@ -582,6 +582,7 @@ app.whenReady().then(async () => {
       inputs[1].dispatchEvent(new Event('change', { bubbles: true }));
       return selects.length === 2 && inputs.length === 2 && Boolean(inputs[0].value) && inputs[1].value === '75';
     })()`);
+    await waitFor(window, `!document.querySelector('.toast-stack .toast')`, 12000);
     const observationSaveClicked = await clickByText(window, 'button[form="indicator-observation-form"]', 'حفظ القياس');
     await waitFor(window, `window.localApp.indicatorObservations({ search: '2026-e2e', limit: 10 }).then(result => result.rows.some(row => row.period_key === '2026-e2e' && row.value_number === 75))`, 12000);
     const savedObservation = await window.webContents.executeJavaScript(`window.localApp.indicatorObservations({ search: '2026-e2e', limit: 10 }).then(result => result.rows[0] ?? null)`);
