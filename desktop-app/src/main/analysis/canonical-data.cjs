@@ -641,7 +641,6 @@ function completeWorkbookImport(database, batchId, result = {}) {
   const previousBatch = database.prepare('SELECT result_json FROM workbook_import_batches WHERE id = ?').get(id);
   const previousResult = safeJsonParse(previousBatch?.result_json, {}) ?? {};
   const projectPromotions = Array.isArray(previousResult.projectPromotions) ? previousResult.projectPromotions : [];
-  const promotedProjects = database.prepare("SELECT COUNT(*) AS count FROM workbook_import_promotions WHERE batch_id = ? AND entity_type = 'project'").get(id).count;
   const projectAttempted = projectPromotions.length > 0;
   const projectHadApplied = projectPromotions.some(item => Array.isArray(item.applied) && item.applied.length > 0);
   const projectPartial = projectPromotions.some(item =>
