@@ -617,8 +617,16 @@ function promoteProjectRegion(database, request = {}) {
     };
     const projectPromotions = Array.isArray(previousResult.projectPromotions) ? previousResult.projectPromotions : [];
     const combinedResult = { ...previousResult, projectPromotions: [...projectPromotions, projectPromotion] };
+    const priorDirectorate = previousResult.directorateImport;
+    const directoratesApplied = Number(priorDirectorate?.applied ?? 0);
+    const directoratesPartial = Number(priorDirectorate?.refused?.length ?? 0) > 0
+      || Number(priorDirectorate?.skipped?.length ?? 0) > 0;
+    const batchStatus = directoratesApplied > 0
+      ? (directoratesPartial || refused.length > 0 || normalizedRows.length < totalRegionRows
+        ? 'directorates-and-projects-partially-applied' : 'directorates-and-projects-applied')
+      : status;
     database.prepare('UPDATE workbook_import_batches SET status = ?,result_json = ?,updated_at = ? WHERE id = ?')
-      .run(status,json(combinedResult),now,batchId);
+      .run(batchStatus,json(combinedResult),now,batchId);
     return { applied, refused, skipped: Math.max(0,totalRegionRows-normalizedRows.length), total: normalizedRows.length, status };
   })();
 }
@@ -632,12 +640,23 @@ function completeWorkbookImport(database, batchId, result = {}) {
     : 'reviewed-without-directorate-write';
   const previousBatch = database.prepare('SELECT result_json FROM workbook_import_batches WHERE id = ?').get(id);
   const previousResult = safeJsonParse(previousBatch?.result_json, {}) ?? {};
+  const projectPromotions = Array.isArray(previousResult.projectPromotions) ? previousResult.projectPromotions : [];
   const promotedProjects = database.prepare("SELECT COUNT(*) AS count FROM workbook_import_promotions WHERE batch_id = ? AND entity_type = 'project'").get(id).count;
-  const status = promotedProjects > 0 && applied > 0
-    ? 'directorates-and-projects-applied'
-    : promotedProjects > 0
-      ? 'projects-applied-without-directorate-write'
-      : directorateStatus;
+  const projectAttempted = projectPromotions.length > 0;
+  const projectHadApplied = projectPromotions.some(item => Array.isArray(item.applied) && item.applied.length > 0);
+  const projectPartial = projectPromotions.some(item =>
+    (Array.isArray(item.refused) && item.refused.length > 0) || Number(item.skipped ?? 0) > 0
+  );
+  const status = applied > 0 && projectAttempted
+    ? (directorateStatus === 'directorates-partially-applied' || projectPartial
+      ? 'directorates-and-projects-partially-applied' : 'directorates-and-projects-applied')
+    : applied > 0 && projectAttempted
+      ? 'directorates-applied-project-review-required'
+      : projectAttempted && projectHadApplied
+        ? 'projects-applied-without-directorate-write'
+        : projectAttempted
+          ? 'projects-review-required'
+          : directorateStatus;
   const combinedResult = { ...previousResult, directorateImport: result };
   database.prepare("UPDATE workbook_import_batches SET status=?,result_json=?,updated_at=? WHERE id=?")
     .run(status, json(combinedResult), new Date().toISOString(), id);
