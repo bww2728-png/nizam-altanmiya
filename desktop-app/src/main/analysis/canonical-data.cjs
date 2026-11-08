@@ -349,6 +349,248 @@ function readWorkbookSheetPreview(database, batchId, sheetId, limit = 20) {
   return { batchId: batch, sheet: metadata, rows, limit: bounded, truncated: rows.length < metadata.nonempty_row_count };
 }
 
+
+function safeJsonParse(value, fallback = null) {
+  try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function stagedHeaderCells(database, sheetId, headerRow) {
+  const stored = database.prepare('SELECT cells_json FROM workbook_import_rows WHERE sheet_id = ? AND row_number = ?').get(sheetId, headerRow);
+  if (!stored) return [];
+  return safeJsonParse(stored.cells_json, []).map(cell => ({
+    address: cell.address, column: Number(cell.column), label: String(cell.text ?? '').trim(), formula: cell.formula ?? null,
+  })).filter(cell => cell.column > 0 && cell.label);
+}
+
+function listWorkbookImportRegions(database, batchId) {
+  const id = Number(batchId);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('معرّف دفعة الاستيراد غير صالح.');
+  const batch = database.prepare('SELECT id,file_name,status,truncated,created_at FROM workbook_import_batches WHERE id = ?').get(id);
+  if (!batch) throw new Error('دفعة الاستيراد المطلوبة غير موجودة.');
+  const rows = database.prepare('SELECT r.id,r.sheet_id,r.region_index,r.header_row,r.first_data_row,r.last_data_row,r.candidate_type,r.match_count,r.confidence,r.mapping_json,r.review_status,s.name AS sheet_name,s.state AS sheet_state,s.truncated AS sheet_truncated FROM workbook_import_regions r JOIN workbook_import_sheets s ON s.id = r.sheet_id WHERE r.batch_id = ? ORDER BY s.sheet_index,r.region_index').all(id);
+  return {
+    batch,
+    regions: rows.map(region => {
+      const totalRows = database.prepare('SELECT COUNT(*) AS count FROM workbook_import_rows WHERE batch_id = ? AND sheet_id = ? AND row_number BETWEEN ? AND ?')
+        .get(id, region.sheet_id, region.first_data_row, region.last_data_row).count;
+      const promotedRows = database.prepare('SELECT COUNT(*) AS count FROM workbook_import_promotions WHERE region_id = ?').get(region.id).count;
+      return {
+        id: region.id, sheetId: region.sheet_id, sheetName: region.sheet_name, sheetState: region.sheet_state,
+        sheetTruncated: Boolean(region.sheet_truncated), regionIndex: region.region_index,
+        headerRow: region.header_row, firstDataRow: region.first_data_row, lastDataRow: region.last_data_row,
+        candidateType: region.candidate_type, matchCount: region.match_count, confidence: Number(region.confidence ?? 0),
+        reviewStatus: region.review_status, totalRows, promotedRows,
+        headers: stagedHeaderCells(database, region.sheet_id, region.header_row),
+      };
+    }),
+  };
+}
+
+function readWorkbookImportRegion(database, batchId, regionId, offset = 0, limit = 30) {
+  const batch = Number(batchId), region = Number(regionId);
+  const start = Math.max(0, Math.min(1000000, Number(offset) || 0));
+  const bounded = Math.max(1, Math.min(100, Number(limit) || 30));
+  if (!Number.isSafeInteger(batch) || batch <= 0 || !Number.isSafeInteger(region) || region <= 0) throw new Error('معرّف دفعة أو منطقة الاستيراد غير صالح.');
+  const metadata = database.prepare('SELECT r.*,s.name AS sheet_name,s.state AS sheet_state,s.truncated AS sheet_truncated FROM workbook_import_regions r JOIN workbook_import_sheets s ON s.id = r.sheet_id WHERE r.id = ? AND r.batch_id = ?').get(region, batch);
+  if (!metadata) throw new Error('منطقة البيانات لا تنتمي إلى دفعة الاستيراد المحددة.');
+  const totalRows = database.prepare('SELECT COUNT(*) AS count FROM workbook_import_rows WHERE batch_id = ? AND sheet_id = ? AND row_number BETWEEN ? AND ?')
+    .get(batch, metadata.sheet_id, metadata.first_data_row, metadata.last_data_row).count;
+  const rows = database.prepare('SELECT id,row_number,is_hidden,has_formula,cell_count,cells_json FROM workbook_import_rows WHERE batch_id = ? AND sheet_id = ? AND row_number BETWEEN ? AND ? ORDER BY row_number LIMIT ? OFFSET ?')
+    .all(batch, metadata.sheet_id, metadata.first_data_row, metadata.last_data_row, bounded, start);
+  const promoted = new Set(database.prepare('SELECT row_id FROM workbook_import_promotions WHERE region_id = ?').all(region).map(row => row.row_id));
+  return {
+    batchId: batch, regionId: region,
+    sheet: { id: metadata.sheet_id, name: metadata.sheet_name, state: metadata.sheet_state, truncated: Boolean(metadata.sheet_truncated) },
+    headerRow: metadata.header_row, headers: stagedHeaderCells(database, metadata.sheet_id, metadata.header_row),
+    totalRows, offset: start, limit: bounded, hasPrevious: start > 0, hasNext: start + rows.length < totalRows,
+    rows: rows.map(row => ({
+      id: row.id, rowNumber: row.row_number, hidden: Boolean(row.is_hidden), hasFormula: Boolean(row.has_formula),
+      cellCount: row.cell_count, promoted: promoted.has(row.id),
+      cells: safeJsonParse(row.cells_json, []).slice(0, 80).map(cell => ({
+        address: cell.address, column: Number(cell.column), text: String(cell.text ?? ''),
+        formula: cell.formula ?? null, cachedResult: cell.cachedResult ?? null, rawValue: cell.rawValue ?? null,
+      })),
+    })),
+  };
+}
+
+const PROJECT_IMPORT_FIELDS = Object.freeze([
+  { key: 'project_name', label: 'اسم المشروع', required: true },
+  { key: 'project_code', label: 'رمز المشروع' },
+  { key: 'description', label: 'وصف المشروع' },
+  { key: 'status', label: 'حالة المشروع' },
+  { key: 'estimated_cost', label: 'التكلفة التقديرية' },
+  { key: 'actual_cost', label: 'التكلفة الفعلية' },
+  { key: 'currency_code', label: 'رمز العملة (مثل USD)' },
+  { key: 'start_date', label: 'تاريخ البداية' },
+  { key: 'end_date', label: 'تاريخ النهاية' },
+  { key: 'governorate', label: 'المحافظة (مرجعية)' },
+  { key: 'district', label: 'المديرية (مرجعية)' },
+  { key: 'sector', label: 'القطاع (مرجعي)' },
+  { key: 'funding_partner', label: 'جهة التمويل' },
+  { key: 'funding_amount', label: 'مبلغ التمويل' },
+  { key: 'funding_currency', label: 'عملة التمويل' },
+]);
+
+function westernizeDigits(value) {
+  return String(value ?? '')
+    .replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
+    .replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)));
+}
+
+function parseProjectNumber(value, label) {
+  const textValue = westernizeDigits(value).trim().replace(/[\u00a0\s]/g, '').replace(/\u066b/g, '.');
+  if (!textValue) return { value: null, error: null };
+  if (!/^[+-]?(?:\d+|\d{1,3}(?:[,٬]\d{3})+)(?:\.\d+)?$/.test(textValue)) return { value: null, error: 'قيمة ' + label + ' ليست رقمًا واضحًا.' };
+  const number = Number(textValue.replace(/[,٬]/g, ''));
+  if (!Number.isFinite(number) || number < 0) return { value: null, error: 'قيمة ' + label + ' يجب أن تكون رقمًا موجبًا أو صفرًا.' };
+  return { value: number, error: null };
+}
+
+function parseProjectDate(value, label) {
+  const textValue = westernizeDigits(value).trim();
+  if (!textValue) return { value: null, error: null };
+  const match = textValue.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:T.*)?$/);
+  if (!match) return { value: null, error: 'صيغة ' + label + ' غير مدعومة؛ استخدم YYYY-MM-DD.' };
+  const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return { value: null, error: 'تاريخ ' + label + ' غير صالح.' };
+  return { value: year.toString().padStart(4, '0') + '-' + String(month).padStart(2, '0') + '-' + String(day).padStart(2, '0'), error: null };
+}
+
+/** Promote only explicitly approved, visible, non-formula rows into canonical projects. */
+function promoteProjectRegion(database, request = {}) {
+  const batchId = Number(request.batchId), regionId = Number(request.regionId);
+  const approvedRows = Array.isArray(request.approvedRows) ? request.approvedRows : [];
+  if (!Number.isSafeInteger(batchId) || batchId <= 0 || !Number.isSafeInteger(regionId) || regionId <= 0) throw new Error('معرّف دفعة أو منطقة الاستيراد غير صالح.');
+  if (approvedRows.length < 1 || approvedRows.length > 1000) throw new Error('اختر صفًا واحدًا على الأقل، وبحد أقصى 1000 صف في العملية.');
+  const normalizedRows = approvedRows.map(Number);
+  if (normalizedRows.some(row => !Number.isSafeInteger(row) || row <= 0) || new Set(normalizedRows).size !== normalizedRows.length) throw new Error('قائمة الصفوف المعتمدة تحتوي أرقامًا غير صالحة أو مكررة.');
+
+  const inputMap = request.columnMap && typeof request.columnMap === 'object' ? request.columnMap : {};
+  const allowed = new Set(PROJECT_IMPORT_FIELDS.map(field => field.key));
+  const columnMap = {};
+  for (const [field, sourceColumn] of Object.entries(inputMap)) {
+    if (!allowed.has(field)) throw new Error('حقل مشروع غير مدعوم في خريطة الاستيراد: ' + field);
+    const column = Number(sourceColumn);
+    if (!Number.isSafeInteger(column) || column < 1 || column > LIMITS.columnsPerSheet) throw new Error('رقم عمود غير صالح في خريطة الاستيراد.');
+    columnMap[field] = column;
+  }
+  if (!columnMap.project_name) throw new Error('اربط عمود «اسم المشروع» قبل الاعتماد.');
+  if (new Set(Object.values(columnMap)).size !== Object.values(columnMap).length) throw new Error('لا يمكن ربط العمود نفسه بأكثر من حقل.');
+
+  const region = database.prepare('SELECT r.*,s.name AS sheet_name,s.state AS sheet_state,b.source_id,b.file_name FROM workbook_import_regions r JOIN workbook_import_sheets s ON s.id = r.sheet_id JOIN workbook_import_batches b ON b.id = r.batch_id WHERE r.id = ? AND r.batch_id = ?')
+    .get(regionId, batchId);
+  if (!region) throw new Error('منطقة البيانات لا تنتمي إلى دفعة الاستيراد المحددة.');
+  if (region.sheet_state !== 'visible') throw new Error('لا يمكن اعتماد صفوف ورقة مخفية قبل إظهارها وفحصها يدويًا.');
+  const headers = stagedHeaderCells(database, region.sheet_id, region.header_row);
+  const headerColumns = new Set(headers.map(cell => cell.column));
+  for (const column of Object.values(columnMap)) if (!headerColumns.has(column)) throw new Error('الخريطة تشير إلى عمود لا يحتوي عنوانًا في صف الرؤوس المحدد.');
+
+  const placeholders = normalizedRows.map(() => '?').join(',');
+  const requested = database.prepare('SELECT * FROM workbook_import_rows WHERE batch_id = ? AND sheet_id = ? AND row_number BETWEEN ? AND ? AND row_number IN (' + placeholders + ') ORDER BY row_number')
+    .all(batchId, region.sheet_id, region.first_data_row, region.last_data_row, ...normalizedRows);
+  if (requested.length !== normalizedRows.length) throw new Error('بعض الصفوف المختارة لا تنتمي إلى المنطقة أو تتجاوز حدود الفحص المحفوظة.');
+  const batch = database.prepare('SELECT source_id FROM workbook_import_batches WHERE id = ?').get(batchId);
+  const refused = [];
+  const prepared = [];
+
+  for (const row of requested) {
+    const refuse = (reason) => refused.push({ rowNumber: row.row_number, reason });
+    if (row.is_hidden) { refuse('صف مخفي؛ يلزم إظهاره ومراجعته قبل الاعتماد.'); continue; }
+    if (row.has_formula) { refuse('يحتوي الصف على صيغة؛ لا تُعتمد نتائج الصيغ المخزنة تلقائيًا.'); continue; }
+    const cells = safeJsonParse(row.cells_json, []);
+    const byColumn = new Map(cells.map(cell => [Number(cell.column), cell]));
+    const value = (field) => {
+      const cell = byColumn.get(columnMap[field]);
+      if (!cell) return '';
+      if (cell.rawValue && typeof cell.rawValue === 'object' && cell.rawValue.type === 'invalid-date') return '[تاريخ غير صالح]';
+      return String(cell.text ?? '').trim();
+    };
+    const values = {};
+    for (const field of Object.keys(columnMap)) values[field] = value(field);
+    const name = values.project_name ?? '';
+    if (!name) { refuse('اسم المشروع فارغ.'); continue; }
+    if (name.length > 240) { refuse('اسم المشروع يتجاوز 240 حرفًا.'); continue; }
+    if ((values.project_code ?? '').length > 80) { refuse('رمز المشروع يتجاوز 80 حرفًا.'); continue; }
+    if ((values.description ?? '').length > 4000) { refuse('وصف المشروع يتجاوز 4000 حرف.'); continue; }
+    if ((values.status ?? '').length > 80) { refuse('حالة المشروع تتجاوز 80 حرفًا.'); continue; }
+    const estimated = parseProjectNumber(values.estimated_cost, 'التكلفة التقديرية');
+    const actual = parseProjectNumber(values.actual_cost, 'التكلفة الفعلية');
+    const funding = parseProjectNumber(values.funding_amount, 'مبلغ التمويل');
+    const start = parseProjectDate(values.start_date, 'تاريخ البداية');
+    const end = parseProjectDate(values.end_date, 'تاريخ النهاية');
+    const error = estimated.error ?? actual.error ?? funding.error ?? start.error ?? end.error;
+    if (error) { refuse(error); continue; }
+    if (start.value && end.value && start.value > end.value) { refuse('تاريخ البداية يأتي بعد تاريخ النهاية.'); continue; }
+    const currency = (values.currency_code ?? '').trim().toUpperCase();
+    const fundingCurrency = (values.funding_currency ?? currency).trim().toUpperCase();
+    if (currency && !/^[A-Z]{3}$/.test(currency)) { refuse('رمز العملة يجب أن يتكون من ثلاثة أحرف لاتينية مثل USD.'); continue; }
+    if (fundingCurrency && !/^[A-Z]{3}$/.test(fundingCurrency)) { refuse('رمز عملة التمويل يجب أن يتكون من ثلاثة أحرف لاتينية مثل USD.'); continue; }
+    if (funding.value !== null && !(values.funding_partner ?? '').trim()) { refuse('تم إدخال مبلغ تمويل دون تحديد جهة التمويل.'); continue; }
+    const code = (values.project_code ?? '').trim() || null;
+    const sourceLocation = region.sheet_name + '!row-' + row.row_number;
+    if (database.prepare('SELECT id FROM workbook_import_promotions WHERE row_id = ?').get(row.id)) { refuse('هذا الصف سبق اعتماده في قاعدة البيانات.'); continue; }
+    if (code && database.prepare('SELECT id FROM projects WHERE code = ?').get(code)) { refuse('رمز المشروع موجود مسبقًا؛ يلزم حسم التعارض يدويًا.'); continue; }
+    if (!code && batch.source_id && database.prepare('SELECT id FROM projects WHERE source_id = ? AND name = ?').get(batch.source_id, name)) { refuse('اسم المشروع نفسه سبق استيراده من هذا الملف.'); continue; }
+
+    let geographicUnitId = null;
+    const district = (values.district ?? '').trim(), governorate = (values.governorate ?? '').trim();
+    if (district) {
+      const matches = database.prepare("SELECT child.id FROM geographic_units child LEFT JOIN geographic_units parent ON parent.id = child.parent_id WHERE child.unit_type IN ('district','directorate') AND child.normalized_name = ? AND (? = '' OR parent.normalized_name = ?) LIMIT 2")
+        .all(normalizeLabel(district), governorate, normalizeLabel(governorate));
+      if (matches.length === 1) geographicUnitId = matches[0].id;
+    }
+    let sectorId = null;
+    const sector = (values.sector ?? '').trim();
+    if (sector) {
+      const matches = database.prepare('SELECT id FROM sectors WHERE name_ar = ? OR code = ? LIMIT 2').all(sector, sector);
+      if (matches.length === 1) sectorId = matches[0].id;
+    }
+    prepared.push({
+      rowId: row.id, rowNumber: row.row_number, name, code,
+      description: values.description || null, status: values.status || 'draft',
+      estimatedCost: estimated.value, actualCost: actual.value, currencyCode: currency || null,
+      startDate: start.value, endDate: end.value, geographicUnitId, sectorId,
+      fundingPartner: (values.funding_partner ?? '').trim(), fundingAmount: funding.value,
+      fundingCurrency: fundingCurrency || null, values, sourceLocation, mapping: columnMap,
+      district, sector,
+    });
+  }
+
+  const now = new Date().toISOString();
+  return database.transaction(() => {
+    const currentMapping = safeJsonParse(region.mapping_json, {});
+    database.prepare('UPDATE workbook_import_regions SET mapping_json = ?, review_status = ? WHERE id = ?')
+      .run(json({ ...currentMapping, approvedMapping: { entityType: 'project', columns: columnMap, approvedAt: now } }), 'mapped', regionId);
+    const insertProject = database.prepare('INSERT INTO projects (code,name,description,geographic_unit_id,sector_id,status,estimated_cost,actual_cost,currency_code,start_date,end_date,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    const insertFunding = database.prepare('INSERT INTO project_funding (project_id,partner_name,amount,currency_code,funding_date,source_id,created_at) VALUES (?,?,?,?,?,?,?)');
+    const insertPromotion = database.prepare("INSERT INTO workbook_import_promotions (batch_id,region_id,row_id,entity_type,target_id,source_location,mapping_json,mapped_values_json,created_at) VALUES (?,?,?,'project',?,?,?,?,?)");
+    const insertIssue = database.prepare("INSERT INTO data_quality_issues (batch_id,sheet_id,row_id,severity,issue_code,message,status,created_at) VALUES (?,?,?,'warning',?,?,'open',?)");
+    const applied = [];
+    for (const item of prepared) {
+      const created = insertProject.run(item.code,item.name,item.description,item.geographicUnitId,item.sectorId,item.status,
+        item.estimatedCost,item.actualCost,item.currencyCode,item.startDate,item.endDate,batch.source_id,now,now);
+      const projectId = Number(created.lastInsertRowid);
+      if (item.fundingPartner && item.fundingAmount !== null) insertFunding.run(projectId,item.fundingPartner,item.fundingAmount,item.fundingCurrency,null,batch.source_id,now);
+      insertPromotion.run(batchId,regionId,item.rowId,projectId,item.sourceLocation,json(item.mapping),json(item.values),now);
+      if (item.district && !item.geographicUnitId) insertIssue.run(batchId,region.sheet_id,item.rowId,'unmatched-project-geography','تعذّر ربط المديرية «' + item.district + '» بمرجع جغرافي معتمد؛ حُفظ المشروع دون ربط جغرافي.',now);
+      if (item.sector && !item.sectorId) insertIssue.run(batchId,region.sheet_id,item.rowId,'unmatched-project-sector','القطاع «' + item.sector + '» غير موجود في قاموس القطاعات؛ حُفظت قيمته في بيانات المصدر للمراجعة.',now);
+      applied.push({ rowNumber: item.rowNumber, projectId });
+    }
+    const totalRegionRows = database.prepare('SELECT COUNT(*) AS count FROM workbook_import_rows WHERE batch_id = ? AND sheet_id = ? AND row_number BETWEEN ? AND ?')
+      .get(batchId,region.sheet_id,region.first_data_row,region.last_data_row).count;
+    const promotedCount = database.prepare('SELECT COUNT(*) AS count FROM workbook_import_promotions WHERE region_id = ?').get(regionId).count;
+    const status = refused.length ? (applied.length ? 'projects-partially-promoted' : 'projects-review-required')
+      : (promotedCount >= totalRegionRows ? 'projects-promoted' : 'projects-partially-promoted');
+    database.prepare('UPDATE workbook_import_regions SET review_status = ? WHERE id = ?')
+      .run(promotedCount >= totalRegionRows ? 'promoted' : (promotedCount > 0 ? 'partially-promoted' : 'mapped'), regionId);
+    database.prepare('UPDATE workbook_import_batches SET status = ?,result_json = ?,updated_at = ? WHERE id = ?')
+      .run(status,json({entityType:'project',applied,refused,skipped:Math.max(0,totalRegionRows-normalizedRows.length)}),now,batchId);
+    return { applied, refused, skipped: Math.max(0,totalRegionRows-normalizedRows.length), total: normalizedRows.length, status };
+  })();
+}
+
 function completeWorkbookImport(database, batchId, result = {}) {
   const id = Number(batchId);
   if (!Number.isInteger(id) || id <= 0) throw new Error('معرّف دفعة الاستيراد غير صالح.');
@@ -366,4 +608,4 @@ function listWorkbookImports(database, limit = 30) {
   return database.prepare("SELECT b.id,b.file_name,b.file_size,b.sha256,b.sheet_count,b.row_count,b.cell_count,b.media_count,b.media_stored_count,b.truncated,b.status,b.created_at,b.updated_at,(SELECT COUNT(*) FROM workbook_import_regions r WHERE r.batch_id=b.id) AS region_count,(SELECT COUNT(*) FROM workbook_import_rows w WHERE w.batch_id=b.id) AS stored_row_count FROM workbook_import_batches b ORDER BY b.id DESC LIMIT ?").all(bounded);
 }
 
-module.exports = { LIMITS, migrateCanonicalData, stageWorkbook, readWorkbookSheetPreview, completeWorkbookImport, listWorkbookImports };
+module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, migrateCanonicalData, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, completeWorkbookImport, listWorkbookImports };
