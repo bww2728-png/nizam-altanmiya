@@ -23,7 +23,7 @@ import { cx, errText } from './lib/format.js';
 const PAGES_NEEDING_CATALOGUE = new Set(['correction', 'database', 'ranking', 'card']);
 
 /** Auto-update states that deserve a banner; idle/checking/not-available stay silent. */
-const UPDATE_BANNER_STATES = new Set(['available', 'downloading', 'downloaded', 'error']);
+const UPDATE_BANNER_STATES = new Set(['available', 'downloading', 'downloaded', 'error', 'offline-only']);
 
 /** Whole percent, clamped, or null when the main process has not reported one. */
 function updatePercent(value) {
@@ -292,7 +292,9 @@ function UpdateBanner({ status, onDismiss }) {
 
   let tone = 'info';
   let message = 'يتوفر تحديث جديد.';
-  if (state === 'available') {
+  if (state === 'offline-only') {
+    message = 'يعمل النظام محليًا دون اتصال بالإنترنت. تُثبَّت التحديثات من حزمة محلية معتمدة.';
+  } else if (state === 'available') {
     message = version
       ? `يتوفر إصدار جديد (${version}) — جارٍ التنزيل تلقائيًا...`
       : 'يتوفر إصدار جديد — جارٍ التنزيل تلقائيًا...';
