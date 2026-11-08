@@ -414,7 +414,33 @@ app.whenReady().then(async () => {
 
     // Exercise non-directorate review, explicit row selection and canonical
     // project promotion with a real Electron pointer click.
-    await waitFor(window, `document.body.innerText.includes('مناطق المشاريع المرشحة: 1') && document.body.innerText.includes('مشروع اختبار E2E')`, 30000);
+    const projectReviewDiagnostics = await window.webContents.executeJavaScript(`(async () => {
+      const batches = await window.localApp.importHistory({ limit: 5 });
+      const latest = batches[0];
+      if (!latest) return { batches: [], reason: 'no-import-batch' };
+      const inventory = await window.localApp.importRegions({ batchId: latest.id });
+      const projectRegions = (inventory.regions ?? []).filter(region => region.candidateType === 'project-candidate');
+      const previews = [];
+      for (const region of projectRegions) {
+        previews.push(await window.localApp.importRegionPreview({
+          batchId: latest.id, regionId: region.id, offset: 0, limit: 5,
+        }));
+      }
+      return {
+        latestBatchId: latest.id,
+        regions: (inventory.regions ?? []).map(region => ({
+          id: region.id, sheetName: region.sheetName, candidateType: region.candidateType,
+          headerRow: region.headerRow, totalRows: region.totalRows, headers: region.headers,
+        })),
+        projectRegionCount: projectRegions.length,
+        previewRows: previews.flatMap(preview => preview.rows ?? []).map(row => ({
+          rowNumber: row.rowNumber, cells: row.cells.map(cell => cell.text),
+        })),
+      };
+    })()`);
+    console.log('[E2E] Project review diagnostic: ' + JSON.stringify(projectReviewDiagnostics));
+    await waitFor(window, `document.body.innerText.includes('مناطق المشاريع المرشحة: 1') && document.body.innerText.includes('مشروع اختبار E2E')`, 30000)
+      .catch(error => { throw new Error(error.message + '; diagnostic=' + JSON.stringify(projectReviewDiagnostics)); });
     const projectRowSelected = await clickBySelector(window, '#project-row-2', 'اختيار صف المشروع');
     const selectedProject = await window.webContents.executeJavaScript(`document.querySelector('#project-row-2')?.checked === true`);
     const promoteClicked = await clickByText(window, '.btn.primary', 'اعتماد المشاريع المحددة في قاعدة البيانات');
