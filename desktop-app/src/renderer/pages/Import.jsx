@@ -676,7 +676,7 @@ function normalizeProjectHeader(value) {
   return String(value ?? '').normalize('NFKD')
     .replace(/[\u064B-\u065F\u0670\u06D6-\u06ED]/g, '')
     .replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
-    .replace(/[()[\]{}%٪:：،,.;/\\|_–—-]+/g, ' ')
+    .replace(/[()[\]{}%٪:：،,.;\/\\|_–—-]+/g, ' ')
     .replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
