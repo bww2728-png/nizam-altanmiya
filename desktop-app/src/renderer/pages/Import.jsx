@@ -213,6 +213,11 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
               </div>
             )}
           >
+            {(plan.stagingOnly || plan.totalRows === 0) && (
+              <Notice tone="warn" title="هذه الدفعة محفوظة للمراجعة فقط">
+                لم يُكتشف جدول مديريات قابلًا للاستيراد المباشر. لا يمكن تنفيذ زر اعتماد المديريات لهذه الدفعة؛ تبقى أوراقها وبياناتها محفوظة في سجل الاستقبال حتى يُضاف لها مسار مطابقة واعتماد مخصص.
+              </Notice>
+            )}
             <div className="stat-strip">
               <MiniStat label="صفوف في الملف" value={fmtNumber(plan.totalRows, 0)} />
               <MiniStat label="أعمدة مفهومة" value={fmtNumber(plan.matchedCount, 0)} />
@@ -472,7 +477,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
               </div>
               <div className="btn-row">
                 <button className="btn ghost" onClick={() => { setStep('idle'); setPlan(null); }} disabled={busy}>إلغاء</button>
-                <button className="btn primary sheen" onClick={apply} disabled={busy}>
+                <button className="btn primary sheen" onClick={apply} disabled={busy || plan.stagingOnly || plan.totalRows === 0}>
                   <Sparkles size={16} /> تطبيق خطة الاستيراد
                 </button>
               </div>
@@ -600,18 +605,18 @@ function ImportHistory({ rows }) {
 function Starter({ busy, onChoose }) {
   return (
     <div className="grid-2">
-      <Card title="الاستيراد الآلي من Excel" subtitle="المسار الوحيد لإدخال البيانات في النظام.">
+      <Card title="استقبال ملفات Excel" subtitle="يحفظ الملف الأصلي ويفهرس محتواه قبل اعتماد أي بيانات.">
         <div className="stack">
           <p className="muted" style={{ fontSize: '0.88rem' }}>
-            اختر ملف «القالب المحدث». يقرأ النظام أعمدة قاعدة البيانات بترتيبها، يطابق الرؤوس بالمعنى
-            (لا بالنص الحرفي)، يبني خطة، ويعرضها عليك قبل أن يكتب أي قيمة.
+            اختر ملف Excel حتى لو اختلفت أوراقه أو عناوينه أو ترتيب أعمدته. يحفظ النظام النسخة الأصلية ويفحص الأوراق
+            والخلايا والجداول والصور التي يستطيع استخراجها. وإذا وجد جدول مديريات معروفًا، يعرض خطة منفصلة قبل كتابة أي قيمة.
           </p>
           <ul className="stack tight">
             <li className="row gap-sm"><CheckCircle2 size={16} className="muted" /> الصيغ المقبولة: xlsx أو xlsm بحجم أقصى 200 ميجابايت.</li>
-            <li className="row gap-sm"><CheckCircle2 size={16} className="muted" /> الورقة: «قاعدة البيانات الشاملة»، وصف الرؤوس يُكتشف تلقائيًا.</li>
-            <li className="row gap-sm"><CheckCircle2 size={16} className="muted" /> تُقرأ أعمدة الإدخال A..AM فقط، وتُتجاهل الأعمدة المحسوبة في الملف.</li>
-            <li className="row gap-sm"><CheckCircle2 size={16} className="muted" /> النسب تُقبل ككسر (0.197) أو نسبة (19.7) وتُطبّع مع تسجيل الأصل.</li>
-            <li className="row gap-sm"><CheckCircle2 size={16} className="muted" /> الصف غير المفهوم يُحجر ويُستمر بالبقية، ويظهر سببه بالتفصيل.</li>
+            <li className="row gap-sm"><CheckCircle2 size={16} className="muted" /> تُفهرس جميع الأوراق الظاهرة والمخفية ومناطق العناوين المرشحة ضمن حدود الفحص المعلنة.</li>
+            <li className="row gap-sm"><CheckCircle2 size={16} className="muted" /> الاستيراد المباشر الحالي يقتصر على جدول المديريات المعروف؛ بقية الجداول تبقى محفوظة للمراجعة ولا تُحوّل قسرًا إلى مديريات.</li>
+            <li className="row gap-sm"><CheckCircle2 size={16} className="muted" /> تُحفظ مواقع الخلايا والصيغ ونتائجها المخزنة والملاحظات؛ لا تُنفذ صيغ Excel.</li>
+            <li className="row gap-sm"><CheckCircle2 size={16} className="muted" /> لا تُعتمد أي بيانات أو صور ولا تُربط بكيان اعتمادًا على التشابه وحده.</li>
           </ul>
           <div className="btn-row">
             <button className="btn primary sheen" onClick={onChoose} disabled={busy}>
@@ -624,9 +629,9 @@ function Starter({ busy, onChoose }) {
 
       <Card title="ماذا يحدث بعد الاستيراد؟" subtitle="الخطوات الثلاث كما تظهر في الشريط أعلاه.">
         <div className="timeline">
-          <TimelineItem n={1} title="قراءة الملف وبناء الخطة" body="تطابق الرؤوس، تصنيف كل صف (جاهز/مراجعة/محجوب)، وحساب الفرق مقابل المخزّن." />
-          <TimelineItem n={2} title="مراجعة صفًا صفًا" body="ترى الحقول التي ستتغير، وقيمها قبل وبعد، وسبب كل ملاحظة، ثم تقرر تطبيق أو تخطٍّ." />
-          <TimelineItem n={3} title="التطبيق ثم التصحيح" body="يُكتب المقبول في معاملة واحدة، ثم تنتقل إلى شاشة التصحيح لإكمال ما نقص." />
+          <TimelineItem n={1} title="حفظ وفهرسة الملف" body="حفظ النسخة الأصلية، فحص جميع الأوراق والخلايا ومناطق البيانات والصور القابلة للاستخراج." />
+          <TimelineItem n={2} title="مطابقة البيانات المعروفة" body="إذا وُجد جدول مديريات معروف، تُعرض خطة صفوفه وفروقها. أما الجداول الأخرى فتبقى في الاستقبال غير المعتمد." />
+          <TimelineItem n={3} title="الاعتماد المرحلي" body="لا يُكتب جدول المديريات إلا بقرار صريح. يتطلب استيراد المشاريع والمؤشرات وبقية الكيانات ربطًا ومراجعة مخصصين." />
         </div>
         <div className="quote" style={{ marginTop: 14 }}>
           إعادة استيراد نفس الملف لا تنشئ نسخًا مكررة: مفتاح المطابقة هو (اسم المديرية + المحافظة)، والصفوف المختفية
