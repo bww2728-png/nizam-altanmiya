@@ -204,9 +204,13 @@ async function stageWorkbook(database, filePath, workbookOption = null) {
       const isDirectorate = keys.includes('districtName') && keys.includes('governorate');
       const projectHints = ['اسم المشروع', 'المشروع', 'تكلفه المشروع', 'تكلفه تقديريه', 'حاله المشروع', 'رقم المشروع', 'رمز المشروع'];
       const indicatorHints = ['اسم المؤشر', 'المؤشر', 'القيمه', 'الفتره', 'السنه', 'نتيجه المؤشر'];
-      const candidateType = isDirectorate ? 'directorate-candidate'
-        : projectHints.some(hint => normalizedText.includes(normalizeLabel(hint))) ? 'project-candidate'
-          : indicatorHints.some(hint => normalizedText.includes(normalizeLabel(hint))) ? 'indicator-candidate'
+      const isProject = projectHints.some(hint => normalizedText.includes(normalizeLabel(hint)));
+      const isIndicator = indicatorHints.some(hint => normalizedText.includes(normalizeLabel(hint)));
+      // A project table may also contain governorate/directorate columns. Its
+      // explicit project identity wins over a partial legacy-field match.
+      const candidateType = isProject ? 'project-candidate'
+        : isIndicator ? 'indicator-candidate'
+          : isDirectorate ? 'directorate-candidate'
             : 'unclassified';
       const confidence = mapping.matched.length
         ? mapping.matched.reduce((sum,item) => sum + Number(item.score ?? 0),0) / mapping.matched.length
