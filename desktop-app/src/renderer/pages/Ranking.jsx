@@ -59,7 +59,7 @@ export default function Ranking({ catalogue, notify, onOpenCard }) {
             </div>
             <p className="muted" style={{ fontSize: '0.86rem' }}>
               {data?.rule ?? 'يُرتب المكتمل فقط، وتُستبعد الصفوف ذات القيم الشاذة حتى تُصحح.'}
-              {' '}الأوزان الاثنا عشر هي أوزان القالب الأصلية، والترتيب يُحسب داخليًا من أعمدة الإدخال.
+              {' '}يعتمد الترتيب على أوزان المؤشرات المعتمدة، ويُحسب داخليًا من البيانات المحفوظة.
             </p>
             <div className="chip-row">
               <Badge tone="ok">مؤهلة: {ranked.length}</Badge>
@@ -73,10 +73,10 @@ export default function Ranking({ catalogue, notify, onOpenCard }) {
             <Segmented
               value={mode}
               onChange={setMode}
-              options={[{ value: 'calibrated', label: 'المعايرة المطلقة' }, { value: 'replica', label: 'مطابقة القالب' }]}
+              options={[{ value: 'calibrated', label: 'المعايرة المطلقة' }, { value: 'replica', label: 'المعادلة المرجعية' }]}
             />
             <span className="dim" style={{ fontSize: '0.72rem', textAlign: 'center' }}>
-              {mode === 'calibrated' ? 'نقاط مرجعية ثابتة (موصى به)' : 'المعادلة الحرفية للقالب (الفراغ = صفر)'}
+              {mode === 'calibrated' ? 'نقاط مرجعية ثابتة (موصى به)' : 'تطبيق المعادلة المرجعية (القيمة المفقودة = صفر)'}
             </span>
             <button className="btn small" onClick={exportPdf}><Scale size={14} /> تصدير التقرير PDF</button>
           </div>

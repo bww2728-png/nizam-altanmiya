@@ -31,7 +31,7 @@ async function exportFilteredWorkbook(filePath, report) {
     { key: 'تاريخ الاستخراج', value: report.generatedAt },
     { key: 'عدد النتائج المطابقة', value: report.summary?.total ?? report.rows.length },
     { key: 'منطق الشروط', value: report.filters?.logic === 'or' ? 'OR — أي شرط' : 'AND — كل الشروط' },
-    { key: 'نمط الترتيب', value: report.filters?.mode === 'replica' ? 'مطابقة القالب' : 'المعاير' },
+    { key: 'نمط الترتيب', value: report.filters?.mode === 'replica' ? 'المعادلة المرجعية' : 'المعاير' },
     ...(report.filters?.labels ?? []).map((label, index) => ({ key: `الشرط ${index + 1}`, value: label })),
     ...(report.summary?.items ?? []).map((item) => ({ key: item.label, value: item.value })),
   ];

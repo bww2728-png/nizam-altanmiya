@@ -47,8 +47,8 @@ export default function Dashboard({ onNavigate, refreshKey }) {
           <Empty
             icon={FileSpreadsheet}
             title="لا توجد مديريات محفوظة بعد"
-            hint="المسار الوحيد لإدخال البيانات هو ملف «القالب المحدث». اختر الملف، راجع خطة الاستيراد صفًا صفًا، ثم طبّقها."
-            action={<button className="btn primary" onClick={() => onNavigate('import')}><FileSpreadsheet size={17} />بدء الاستيراد الآلي</button>}
+            hint="يمكن إدخال البيانات يدويًا أو استيراد ملف Excel، ثم مراجعتها واعتمادها قبل حفظها في قاعدة البيانات."
+            action={<button className="btn primary" onClick={() => onNavigate('import')}><FileSpreadsheet size={17} />استيراد البيانات</button>}
           />
         </Card>
       </>
@@ -198,7 +198,7 @@ export default function Dashboard({ onNavigate, refreshKey }) {
             </div>
           )}
           <div className="quote" style={{ marginTop: 14 }}>
-            هذه الفحوص تُجرى داخليًا من نفس الصفوف، ولا تعتمد على أي أعمدة محسوبة في ملف Excel.
+            تُجرى هذه الفحوص داخليًا على البيانات المحفوظة في قاعدة البيانات.
           </div>
         </Card>
       </div>
@@ -215,7 +215,7 @@ function Hero({ onNavigate, generatedAt }) {
           <p className="eyebrow">لوحة القيادة</p>
           <h1>نظرة شاملة على المديريات المحلية</h1>
           <p>
-            كل رقم هنا محسوب من قاعدة البيانات المشفّرة على هذا الجهاز بعد استيراد ملف «القالب المحدث».
+            تعكس هذه الأرقام البيانات المحفوظة محليًا في قاعدة البيانات المشفّرة على هذا الجهاز.
             آخر تحديث: {fmtDate(generatedAt)}.
           </p>
         </div>
