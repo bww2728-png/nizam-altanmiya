@@ -442,14 +442,41 @@ app.whenReady().then(async () => {
     await waitFor(window, `document.body.innerText.includes('مناطق المشاريع المرشحة: 1') && document.body.innerText.includes('مشروع اختبار E2E')`, 30000)
       .catch(error => { throw new Error(error.message + '; diagnostic=' + JSON.stringify(projectReviewDiagnostics)); });
     const projectRowSelected = await clickBySelector(window, '#project-row-2', 'اختيار صف المشروع');
-    const selectedProject = await window.webContents.executeJavaScript(`document.querySelector('#project-row-2')?.checked === true`);
+    const beforePromotion = await window.webContents.executeJavaScript(`(() => {
+      const card = [...document.querySelectorAll('.card')].find(item =>
+        item.innerText.includes('مراجعة الجداول الإضافية واعتماد المشاريع')
+      );
+      return {
+        checkboxChecked: document.querySelector('#project-row-2')?.checked ?? null,
+        selects: [...(card?.querySelectorAll('select') ?? [])].map(select => ({
+          value: select.value,
+          label: select.closest('label')?.innerText?.slice(0, 100) ?? '',
+        })),
+        buttons: [...(card?.querySelectorAll('button') ?? [])].map(button => ({
+          text: button.innerText.trim(),
+          disabled: button.disabled,
+        })),
+      };
+    })()`);
     const promoteClicked = await clickByText(window, '.btn.primary', 'اعتماد المشاريع المحددة في قاعدة البيانات');
-    await waitFor(window, `document.body.innerText.includes('نتيجة اعتماد المشاريع') && document.body.innerText.includes('أُضيفت: 1')`, 30000);
+    const promotionCompleted = await waitFor(
+      window,
+      `document.body.innerText.includes('نتيجة اعتماد المشاريع') && document.body.innerText.includes('أُضيفت: 1')`,
+      12000
+    ).then(() => true).catch(() => false);
+    const promotionBody = await bodyText(window);
     check(
       'import',
       'جدول المشاريع يُربط ويُعتمد بعد اختيار الصف صراحةً',
-      projectRowSelected && selectedProject && promoteClicked,
-      (await bodyText(window)).slice(-500).replace(/\\n/g, ' | ')
+      projectRowSelected && beforePromotion.checkboxChecked && beforePromotion.selects.some(item => item.label.includes('اسم المشروع') && item.value === '1')
+        && promoteClicked && promotionCompleted,
+      JSON.stringify({
+        projectRowSelected,
+        beforePromotion,
+        promoteClicked,
+        promotionCompleted,
+        body: promotionBody.slice(-1800),
+      })
     );
     await screenshot(window, '15-اعتماد-المشاريع.png');
 
