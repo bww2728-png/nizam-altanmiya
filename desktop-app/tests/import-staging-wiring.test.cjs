@@ -46,3 +46,23 @@ test('intake user-facing text no longer requires the ministry template', () => {
   assert.match(ui, /الاستيراد المباشر الحالي يقتصر على جدول المديريات المعروف/);
   assert.doesNotMatch(ui, /اختر ملف «القالب المحدث»/);
 });
+
+
+test('staged project regions are owner-gated, paged and promoted only through explicit approval', () => {
+  assert.match(main, /ipcMain\.handle\('import:regions'/);
+  assert.match(main, /ipcMain\.handle\('import:region-preview'/);
+  assert.match(main, /ipcMain\.handle\('import:promote-projects'/);
+  assert.match(main, /currentProfile\(\) !== 'owner'/);
+  assert.match(main, /canonicalData\.listWorkbookImportRegions/);
+  assert.match(main, /canonicalData\.readWorkbookImportRegion/);
+  assert.match(main, /canonicalData\.promoteProjectRegion/);
+  assert.match(preload, /importRegions: \(request\) => ipcRenderer\.invoke\('import:regions', request\)/);
+  assert.match(preload, /importRegionPreview: \(request\) => ipcRenderer\.invoke\('import:region-preview', request\)/);
+  assert.match(preload, /promoteProjects: \(request\) => ipcRenderer\.invoke\('import:promote-projects', request\)/);
+  assert.match(ui, /function ProjectRegionReview/);
+  assert.match(ui, /candidateType === 'project-candidate'/);
+  assert.match(ui, /اعتماد المشاريع المحددة في قاعدة البيانات/);
+  assert.match(ui, /approvedRows/);
+  assert.match(ui, /checked=\{Boolean\(selectedRows\[row\.rowNumber\]\)\}/);
+});
+
