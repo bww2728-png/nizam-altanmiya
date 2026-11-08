@@ -85,13 +85,24 @@ async function pointerClick(window, selector, text = null, label = '') {
     const nodes = [...document.querySelectorAll(${JSON.stringify(selector)})];
     const target = ${match};
     if (!target) return null;
+    const before = target.getBoundingClientRect();
+    const beforeRect = { left: before.left, top: before.top, right: before.right, bottom: before.bottom };
+    // A real operator can only click a control after scrolling its container
+    // into view. scrollIntoView moves the nearest scrollable ancestors (e.g. the
+    // wide RTL table viewport), then the actual pointer event is hit-tested.
+    target.scrollIntoView({ behavior: 'instant', block: 'nearest', inline: 'center' });
     const rect = target.getBoundingClientRect();
     const x = Math.round(rect.left + rect.width / 2);
     const y = Math.round(rect.top + rect.height / 2);
     const hit = document.elementFromPoint(x, y);
+    const viewportVisible = rect.right > 0 && rect.bottom > 0
+      && rect.left < window.innerWidth && rect.top < window.innerHeight;
     return {
-      ok: rect.width > 0 && rect.height > 0 && Boolean(hit && (hit === target || target.contains(hit))),
+      ok: rect.width > 0 && rect.height > 0 && viewportVisible && Boolean(hit && (hit === target || target.contains(hit))),
       x, y, width: rect.width, height: rect.height,
+      beforeRect,
+      afterRect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+      scrolledIntoView: beforeRect.left !== rect.left || beforeRect.top !== rect.top,
       tag: target.tagName,
       accessibleName: target.getAttribute('aria-label') || target.getAttribute('title') || (target.innerText || target.textContent || '').trim().slice(0, 100),
       hitTag: hit?.tagName ?? null,
@@ -467,7 +478,7 @@ app.whenReady().then(async () => {
       );
       fs.writeFileSync(path.join(EVIDENCE, '12-تتبع-التفاعلات.json'), JSON.stringify({
         generatedAt: new Date().toISOString(),
-        method: 'Electron webContents.sendInputEvent with elementFromPoint hit-testing',
+        method: 'scrollIntoView on nearest scroll container, then Electron webContents.sendInputEvent with elementFromPoint hit-testing',
         interactionCount: interactionTrace.length,
         networkAttempts,
         interactions: interactionTrace,
