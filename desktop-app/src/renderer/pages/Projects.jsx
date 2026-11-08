@@ -75,7 +75,7 @@ export default function Projects({ notify, refreshKey }) {
         subtitle={restricted
           ? 'يتطلب عرض المشاريع والتكاليف ومصادرها وضع المالك.'
           : fmtNumber(total, 0) + ' مشروعًا في قاعدة البيانات المعيارية. البحث يشمل اسم المشروع ورمزه ووصفه.'}
-        icon={BriefcaseBusiness}
+        icon={Briefcase}
         actions={(
           <button className="btn small ghost" onClick={load} disabled={loading}>
             <RefreshCw size={14} /> تحديث
@@ -114,7 +114,7 @@ export default function Projects({ notify, refreshKey }) {
             <div style={{ padding: 20 }}><Loading /></div>
           ) : rows.length === 0 ? (
             <Empty
-              icon={BriefcaseBusiness}
+              icon={Briefcase}
               title="لا توجد مشاريع مطابقة"
               hint={search
                 ? 'جرّب اسمًا أو رمزًا آخر، أو امسح البحث.'
