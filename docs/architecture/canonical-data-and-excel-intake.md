@@ -39,7 +39,7 @@ The import IPC path now:
 4. Inventories every worksheet within documented bounds, including hidden state, dimensions, non-empty rows/cells, candidate headers, formula counts, hidden rows, merged ranges, Excel tables, media and image anchors where the library exposes them.
 5. Stores each scanned non-empty row and cell with its address, row/column, cell type, raw representation, readable text, formula, cached result and note/comment when available.
 6. Stores extractable embedded image bytes separately, with SHA-256 and anchor metadata if available. Assets without a trustworthy worksheet/row anchor remain unassigned.
-7. Creates the existing directorate review plan separately. Only the existing directorate importer can currently write directorate rows, and it still requires explicit user approval. Other sheets and regions remain staged and unapproved.
+7. Creates the existing directorate review plan separately. The legacy directorate importer still requires explicit user approval. Project-candidate regions have a separate owner-only mapping and row-approval path into the canonical projects tables. Indicator and generic regions remain staged and unapproved.
 8. Updates the intake batch status after the directorate review action and displays a durable intake history.
 
 Staging is transactional: if the file exceeds a scan cap before the write transaction begins, no partial staging batch is committed. The original source file is retained in the encrypted database so the source package can be re-examined without relying on the original path.
@@ -54,9 +54,15 @@ The promotion service currently handles project identity, description/status, es
 
 This is deliberately a bounded first entity-specific path. It is not yet a universal import engine: indicator observations, generic entity records, field-level tri-state values, user-defined dictionaries, and attachment-to-entity approval remain separate work. Unmatched geography/sector text is recorded as a quality issue and is not converted into an invented reference.
 
+## Offline-only runtime enforcement
+
+The main process installs application-layer guards for Node HTTP/HTTPS requests, TCP/TLS connection helpers, DNS resolution, UDP socket creation, global fetch/WebSocket, and Electron net requests. The default Electron session also cancels HTTP, HTTPS and WebSocket requests originating from the renderer. Blocked attempts are recorded in a bounded audit structure that the Electron E2E suite checks.
+
+This improves the offline guarantee inside the app process; it is not an OS firewall. Native add-ons, separately launched child processes, operating-system services and other applications can bypass JavaScript-level guards. A release deployment that requires a strict no-egress guarantee must also use endpoint firewall policy or an equivalent OS-level network restriction and verify it on the target Windows image. The app does not claim to prove that the whole device is offline.
+
 ## Encrypted backup and restore
 
-A backup is treated as a bundle: encrypted database bytes plus the matching 64-hex-character store.key companion (.bak.key) and any SQLite sidecars present. Creating a database-only backup without its key is rejected. Restore validates the source bundle before touching the active database, creates a safety backup of the current store, stages the replacement files in the target directory, swaps the database and key together, and re-opens the restored store. A failed swap attempts to roll back the previous database/key pair.
+A backup is treated as a bundle: encrypted database bytes plus the matching 64-hex-character store.key companion (.bak.key) and any SQLite sidecars present. Creating a database-only backup without its key is rejected. Restore validates the source database, key and any SQLite sidecars as regular files before touching the active database, creates a safety backup of the current store, stages the replacement files in the target directory, swaps the database and key together, and re-opens the restored store. A failed file swap rolls back the previous database/key pair; if the subsequent store initialization fails, the handler attempts to reinstall the safety backup.
 
 The UI exposes restore via a file picker for .bak files and requires confirmation. Unit and Electron end-to-end tests exercise restore. Recovery must still be run on a real Windows installation before release; CI evidence is not a substitute for testing the user's own backup file and filesystem permissions.
 
@@ -74,15 +80,15 @@ The new indicator and generic-entity tables remain schema foundations rather tha
 
 1. Define the authoritative geographic reference catalogue and stable IDs; avoid matching only on names.
 2. Define data dictionaries for project, funding, sector, indicator, source and attachment fields, including units, currency, period type, value state and validation rules.
-3. Build an import-region review UI. Each region must be independently classified, mapped, scored and approved. Unknown headers and uncertain identity matches remain unresolved.
-4. Build entity-specific promotion services that move reviewed rows from staging into `geographic_units`, `entity_records`, `entity_field_values`, `projects` and `indicator_observations` within one transaction per approved set. Preserve absent field, explicit blank, zero, unknown, not-applicable and deliberate deletion as distinct states.
+3. Extend the existing import-region review UI to indicator and generic-record classes. Each region must be independently classified, mapped, scored and approved. Unknown headers and uncertain identity matches remain unresolved.
+4. Build entity-specific promotion for indicator observations and generic records, while extending the existing project path only when new fields have agreed semantics. Preserve absent field, explicit blank, zero, unknown, not-applicable and deliberate deletion as distinct states.
 5. Add manual create/update screens that use the same canonical validation and provenance services as Excel imports.
 6. Add managed attachment browsing, preview, export, and explicit reviewed linking to a project/geographic entity. Add Arabic OCR only as an optional proposal requiring human confirmation.
 7. Implement field-, record-, dataset-, source- and time-level validation and duplicate/conflict review. Do not infer factual accuracy from format checks alone.
 8. Add data migration from the legacy directorate tables with reconciled row counts and analysis regression tests before switching dashboards/ranking to canonical values.
-9. Extend entity-specific promotion services to indicator observations and generic records; do not infer period or units from header text alone.
-10. Add managed attachment browsing and explicit review/linking to projects and geographic entities. Binary staging is not proof of semantic attachment.
-11. Extend OS-level offline verification, IPC authorization, accessibility, performance, and signed Windows packaging.
+9. Complete managed attachment browsing and explicit review/linking to projects and geographic entities. Binary staging is not proof of semantic attachment.
+10. Add OS-level egress restrictions and verify them on the target Windows image; runtime guards alone do not prevent native or operating-system networking.
+11. Finish IPC authorization, accessibility, performance, and signed Windows packaging.
 
 ## Test coverage added
 
