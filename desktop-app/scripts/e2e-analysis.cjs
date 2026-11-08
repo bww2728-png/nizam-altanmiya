@@ -367,7 +367,7 @@ app.whenReady().then(async () => {
     await screenshot(window, '7-تصحيح-البيانات.png');
 
     await clickByText(window, '.side-nav .nav-item', 'الاستيراد الآلي');
-    await waitFor(window, `document.body.innerText.includes('اختيار ملف القالب')`, 30000);
+    await waitFor(window, `document.body.innerText.includes('اختيار ملف Excel')`, 30000);
     await sleep(400);
     check('pages', 'شاشة الاستيراد تعرض الخطوات الثلاث', await window.webContents.executeJavaScript(`Boolean(document.querySelector('.stepper'))`));
     check('pages', 'شاشة الاستيراد تذكر الصيغ والقواعد', (await bodyText(window)).includes('xlsx'));
@@ -375,7 +375,7 @@ app.whenReady().then(async () => {
     // Exercise the actual UI scan path. Native dialog is stubbed to a synthetic
     // workbook so the operator-facing inventory is verified before any Apply.
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [SAMPLE] });
-    const scanClicked = await clickByText(window, '.btn.primary.sheen', 'اختيار ملف القالب');
+    const scanClicked = await clickByText(window, '.btn.primary.sheen', 'اختيار ملف Excel');
     await waitFor(window, `document.body.innerText.includes('فحص بنية ملف Excel')`, 60000);
     await waitFor(window, `(() => {
       const text = document.body.innerText;
