@@ -175,6 +175,9 @@ function restoreBackupBundle(backupPath, databasePath, keyPath) {
   };
   regularFile(source, 'ملف النسخة الاحتياطية');
   regularFile(sourceKey, 'مفتاح النسخة الاحتياطية (.key)');
+  for (const suffix of SIDECAR_SUFFIXES) {
+    if (fs.existsSync(source + suffix)) regularFile(source + suffix, 'ملف جانبي للنسخة الاحتياطية');
+  }
 
   const key = fs.readFileSync(sourceKey, 'utf8').trim();
   if (!/^[0-9a-f]{64}$/i.test(key)) throw new Error('مفتاح النسخة الاحتياطية تالف أو غير صالح.');
