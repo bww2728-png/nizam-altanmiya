@@ -18,15 +18,11 @@ const test = require('node:test');
 const Database = require('better-sqlite3-multiple-ciphers');
 
 const { migrate, DIRECTORATE_COLUMN_MIGRATIONS } = require('../src/main/analysis/store-schema.cjs');
-const { openEncryptedStore, backupStore, copyStoreKey, restoreBackupBundle, listBackups } = require('../src/main/store.cjs');
+const { openEncryptedStore, backupStore, copyStoreKey, restoreBackupBundle, classifyStore, listBackups } = require('../src/main/store.cjs');
 const persist = require('../src/main/analysis/persist.cjs');
 const security = require('../src/main/security.cjs');
 const { serializeAnalysis } = require('../src/main/analysis/serialize.cjs');
 
-function classifyStoreForRestore(filePath, key) {
-  const { classifyStore } = require('../src/main/store.cjs');
-  return classifyStore(filePath, key).ok;
-}
 
 function openTestDatabase() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-hardening-'));
@@ -264,14 +260,14 @@ test('restore swaps an encrypted database and its matching key as one verified b
     const restored = restoreBackupBundle(backupPath, livePath, liveKeyPath);
     assert.equal(restored.restoredPath, livePath);
     assert.equal(fs.readFileSync(liveKeyPath, 'utf8').trim(), backupKey);
-    assert.equal(classifyStoreForRestore(livePath, backupKey), true);
+    assert.equal(classifyStore(livePath, backupKey).ok, true);
     const opened = openEncryptedStore(livePath, backupKey);
     try {
       assert.equal(opened.prepare('SELECT value FROM restore_marker').get().value, 'from-backup');
     } finally {
       opened.close();
     }
-    assert.equal(fs.existsSync(livePath + '.rollback-' + 'unused'), false);
+    assert.equal(fs.readdirSync(directory).some((name) => name.includes('.rollback-')), false);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
