@@ -1,8 +1,14 @@
 name: Release
 
-# Builds the Windows installer and publishes it as a GitHub Release whenever a
-# version tag (v*) is pushed. electron-builder uploads the installer plus the
-# latest.yml metadata that the installed app's auto-updater reads.
+# Builds the Windows installer and publishes it as a single, published GitHub
+# Release whenever a version tag (v*) is pushed. The release carries the
+# installer, its blockmap and latest.yml, which the installed app's auto-updater
+# reads through the public GitHub Releases API.
+#
+# electron-builder is run with --publish never on purpose: it builds and writes
+# latest.yml locally, and the release is created here with the GitHub CLI so all
+# assets always land in one release (electron-builder's own publisher can split
+# them across releases).
 on:
   push:
     tags:
@@ -37,7 +43,18 @@ jobs:
       - name: Build renderer
         run: npm run build
 
-      - name: Package and publish
+      - name: Package installer
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Publish release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win nsis --x64 --publish always
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          assets=(release/*.exe release/*.blockmap release/latest.yml)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" --title "$tag" --notes "Automated release $tag"
+          fi
