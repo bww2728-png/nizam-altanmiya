@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle, Check, Info, X } from 'lucide-react';
 import { cx, fmtInt } from '../lib/format.js';
 
@@ -183,7 +184,7 @@ export function Modal({ open, title, subtitle, onClose, children, footer, wide =
   }, [open, onClose]);
 
   if (!open) return null;
-  return (
+  return createPortal(
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose?.(); }}>
       <div className={cx('modal-card', wide && 'wide')} role="dialog" aria-modal="true" aria-label={title}>
         <header className="modal-head">
@@ -196,7 +197,8 @@ export function Modal({ open, title, subtitle, onClose, children, footer, wide =
         <div className="modal-body">{children}</div>
         {footer && <footer className="modal-foot">{footer}</footer>}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

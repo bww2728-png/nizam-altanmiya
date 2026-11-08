@@ -76,6 +76,25 @@ test('workbook values survive the database round trip unchanged', async () => {
   }
 });
 
+test('analysis reads approved values from the canonical model instead of legacy columns', async () => {
+  const { database, directory } = openTestDatabase();
+  try {
+    const read = await readDirectorateWorkbook(FIXTURE);
+    persist.upsertDirectorates(database, read);
+    const directorate = database.prepare("SELECT id FROM directorates WHERE district=?").get('مديرية الشعر');
+    const entity = database.prepare("SELECT id FROM entity_records WHERE entity_type='directorate' AND external_key=?").get('legacy-directorate:' + directorate.id);
+    const field = database.prepare("SELECT id FROM data_field_definitions WHERE entity_type='directorate' AND field_key='population'").get();
+    database.prepare("UPDATE entity_field_values SET value_number=?,updated_at=? WHERE record_id=? AND field_definition_id=? AND period_key=''")
+      .run(50000,'9999-01-01T00:00:00.000Z',entity.id,field.id);
+
+    const rows = persist.loadAnalysisRows(database);
+    assert.equal(rows.find(row => row.districtName === 'مديرية الشعر').values.population, 50000);
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('a run saved from the database reproduces the workbook composites', async () => {
   const { database, directory } = openTestDatabase();
   try {

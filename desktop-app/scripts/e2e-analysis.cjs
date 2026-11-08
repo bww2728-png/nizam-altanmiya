@@ -292,8 +292,8 @@ app.whenReady().then(async () => {
     await waitFor(window, `Boolean(document.querySelector('.app-shell'))`);
 
     const labels = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.side-nav .nav-item span')].map((node) => node.textContent)`);
-    const expectedNav = ['اللوحة التفاعلية', 'المؤشرات الـ 12', 'ترتيب الأولويات', 'الاستيراد الآلي', 'سجل المشاريع', 'تصحيح البيانات', 'قاعدة البيانات الشاملة', 'بطاقة مديرية'];
-    check('nav', 'التنقل يعرض الشاشات السبع', expectedNav.every((label) => labels.includes(label)), labels.join(' · '));
+    const expectedNav = ['اللوحة التفاعلية', 'المؤشرات الـ 12', 'ترتيب الأولويات', 'الاستيراد الآلي', 'سجل المشاريع', 'سجل قياسات المؤشرات', 'جودة البيانات', 'تصحيح البيانات', 'قاعدة البيانات الشاملة', 'بطاقة مديرية'];
+    check('nav', 'التنقل يعرض الشاشات العشر', expectedNav.every((label) => labels.includes(label)), labels.join(' · '));
     check('entry', 'قاعدة البيانات تُفتح وتصبح مشفّرة', await window.webContents.executeJavaScript(`window.localApp.status().then((s) => s.unlocked && s.hasKey)`));
 
     // ---------- 2. Import (scan -> plan -> apply) ----------
@@ -365,11 +365,11 @@ app.whenReady().then(async () => {
     await screenshot(window, '4-ترتيب-الأولويات.png');
 
     await clickByText(window, '.side-nav .nav-item', 'قاعدة البيانات الشاملة');
-    await waitFor(window, `document.body.innerText.includes('مديرية مخزّنة')`, 30000);
-    await sleep(400);
+    await waitFor(window, `document.querySelectorAll('table.data tbody tr').length === 20 && document.body.innerText.replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 1632)).includes('20 مديرية مخزّنة')`, 30000);
     const databaseText = await bodyText(window);
     const databaseRows = await window.webContents.executeJavaScript(`document.querySelectorAll('table.data tbody tr').length`);
-    check('pages', 'قاعدة البيانات تعرض العشرين سجلًا', databaseText.includes('20 مديرية مخزّنة') && databaseRows === 20, `rows=${databaseRows}`);
+    const normalizedDatabaseText = databaseText.replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 1632));
+    check('pages', 'قاعدة البيانات تعرض العشرين سجلًا', normalizedDatabaseText.includes('20 مديرية مخزّنة') && databaseRows === 20, `rows=${databaseRows}`);
     await screenshot(window, '5-قاعدة-البيانات.png');
 
     const cardOpened = await clickByText(window, 'table.data tbody tr button', 'البطاقة');
@@ -528,6 +528,67 @@ app.whenReady().then(async () => {
     await waitFor(window, `document.body.innerText.includes('مصدر البيانات') && document.body.innerText.includes('مشاريع اختبار')`, 30000);
     check('pages', 'تفاصيل المشروع تعرض التمويل والمصدر وملاحظات الجودة', detailsOpened && (await bodyText(window)).includes('جهات التمويل'));
     await screenshot(window, '16-سجل-المشاريع.png');
+    await waitFor(window, `(() => { const button = document.querySelector('.modal-card .modal-head button[aria-label="إغلاق"]'); const rect = button?.getBoundingClientRect(); return Boolean(rect && rect.top >= 0 && rect.bottom <= window.innerHeight); })()`, 12000);
+    const projectDetailsClosed = await clickBySelector(window, '.modal-card .modal-head button[aria-label="إغلاق"]', 'إغلاق تفاصيل المشروع');
+    check('pages', 'تفاصيل المشروع تغلق بزر واضح قبل متابعة التنقل', projectDetailsClosed);
+
+    const qualityNavClicked = await clickByText(window, '.side-nav .nav-item', 'جودة البيانات');
+    await waitFor(window, `document.body.innerText.includes('جودة البيانات') && document.body.innerText.includes('سبب التسوية')`, 12000);
+    const qualityPageText = await bodyText(window);
+    check('pages', 'سجل الجودة يعرض القضايا المفتوحة وسياق المصدر', qualityNavClicked && qualityPageText.includes('unmatched-project-') && qualityPageText.includes('مشاريع اختبار'), qualityPageText.slice(-900));
+    await screenshot(window, '17-جودة-البيانات.png');
+
+    const firstOpenIssue = await window.webContents.executeJavaScript(`window.localApp.dataQualityIssues({ status: 'open', limit: 1 }).then(result => result.rows[0] ?? null)`);
+    const resolutionFieldSet = await window.webContents.executeJavaScript(`(() => {
+      const field = document.querySelector('.quote textarea');
+      if (!field) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(field, 'تمت مراجعة المصدر في اختبار E2E.');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      field.dispatchEvent(new Event('change', { bubbles: true }));
+      return field.value === 'تمت مراجعة المصدر في اختبار E2E.';
+    })()`);
+    const qualityResolveClicked = await clickByText(window, 'button.btn.small.primary', 'تسوية مع حفظ السبب');
+    await waitFor(window, `window.localApp.dataQualityIssues({ status: 'resolved', limit: 50 }).then(result => result.rows.some(issue => issue.id === ${Number(firstOpenIssue?.id ?? 0)} && issue.resolution.includes('اختبار E2E')))` , 12000);
+    check('pages', 'تسوية الجودة تحفظ السبب والسجل عبر الواجهة', Boolean(firstOpenIssue) && resolutionFieldSet && qualityResolveClicked);
+
+    const observationsNavClicked = await clickByText(window, '.side-nav .nav-item', 'سجل قياسات المؤشرات');
+    await waitFor(window, `document.body.innerText.includes('سجل قياسات المؤشرات') && document.body.innerText.includes('لا توجد قياسات محفوظة')`, 12000);
+    const observationsText = await bodyText(window);
+    check('pages', 'سجل القياسات يظهر معزولًا عن تحليل الترتيب', observationsNavClicked && observationsText.includes('لا توجد قياسات محفوظة') && observationsText.includes('هذا السجل منفصل'), observationsText.slice(0, 600));
+    await screenshot(window, '18-سجل-قياسات-المؤشرات.png');
+
+    const addObservationClicked = await clickByText(window, '.card-head button', 'قياس جديد');
+    const observationFormReady = await waitFor(window, `Boolean(document.querySelector('#indicator-observation-form'))`, 5000).then(() => true).catch(() => false);
+    const observationReferences = await window.webContents.executeJavaScript(`window.localApp.canonicalProjectReferences()`);
+    const observationIndicator = observationReferences.indicators.find(item => item.unit === '%');
+    const observationDistrict = observationReferences.geographicUnits.find(item => item.unit_type === 'district');
+    const observationFormFilled = await window.webContents.executeJavaScript(`(() => {
+      const form = document.querySelector('#indicator-observation-form');
+      if (!form) return false;
+      const selects = [...form.querySelectorAll('select')];
+      const inputs = [...form.querySelectorAll('input')];
+      const selectSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+      const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      selectSetter.call(selects[0], ${JSON.stringify(String(observationIndicator?.id ?? ''))});
+      selects[0].dispatchEvent(new Event('change', { bubbles: true }));
+      selectSetter.call(selects[1], ${JSON.stringify(String(observationDistrict?.id ?? ''))});
+      selects[1].dispatchEvent(new Event('change', { bubbles: true }));
+      inputSetter.call(inputs[0], '2026-e2e');
+      inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+      inputs[0].dispatchEvent(new Event('change', { bubbles: true }));
+      inputSetter.call(inputs[1], '75');
+      inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+      inputs[1].dispatchEvent(new Event('change', { bubbles: true }));
+      return selects.length === 2 && inputs.length === 2 && Boolean(inputs[0].value) && inputs[1].value === '75';
+    })()`);
+    await waitFor(window, `!document.querySelector('.toast-stack .toast')`, 12000);
+    const observationSaveClicked = await clickByText(window, 'button[form="indicator-observation-form"]', 'حفظ القياس');
+    await waitFor(window, `window.localApp.indicatorObservations({ search: '2026-e2e', limit: 10 }).then(result => result.rows.some(row => row.period_key === '2026-e2e' && row.value_number === 75))`, 12000);
+    const savedObservation = await window.webContents.executeJavaScript(`window.localApp.indicatorObservations({ search: '2026-e2e', limit: 10 }).then(result => result.rows[0] ?? null)`);
+    check('pages', 'إضافة قياس مؤرخ تحفظه الواجهة مع مصدره', addObservationClicked && observationFormReady && observationFormFilled && observationSaveClicked && savedObservation?.period_key === '2026-e2e' && savedObservation.value_number === 75 && savedObservation.source_type === 'manual-indicator-observation', JSON.stringify(savedObservation));
+    await waitFor(window, `document.body.innerText.includes('2026-e2e') && document.body.innerText.includes('75')`, 12000);
+    await screenshot(window, '19-قياس-مؤشر-محفوظ.png');
 
     // ---------- 4. Access profile ----------
     const toggled = await clickBySelector(window, '.topbar button.chip.clickable', 'تبديل وضع الوصول');
@@ -677,8 +738,10 @@ app.whenReady().then(async () => {
         '7. بطاقة المديرية: كل الحقول والمؤشرات والمصدر والسجل الزمني.',
         '8. تصحيح البيانات: محرر السجلات.',
         '9. الاستيراد الآلي: الخطوات الثلاث وقواعد التحقق.',
-        '10. وضع الوصول: التبديل بين المالك والمشاركة.',
-        '11. التصدير: PDF وExcel، مع التأكد من عدم ذكر ملف الإدخال.',
+        '10. سجل المشاريع: اعتماد صف، مراجعة المصدر، وتسوية الجودة.',
+        '11. سجل القياسات: إدخال قياس مؤرخ وحفظ مصدره.',
+        '12. وضع الوصول: التبديل بين المالك والمشاركة.',
+        '13. التصدير: PDF وExcel، مع التأكد من عدم ذكر ملف الإدخال.',
         '',
         '## العيوب',
         '',
@@ -708,6 +771,9 @@ app.whenReady().then(async () => {
         '  6-بطاقة-مديرية.png          بطاقة مديرية كاملة',
         '  7-تصحيح-البيانات.png        شاشة التصحيح',
         '  8-الاستيراد.png             شاشة الاستيراد',
+        '  17-جودة-البيانات.png        سجل الجودة وتسوية قضية',
+        '  18-سجل-قياسات-المؤشرات.png  سجل القياسات المعياري',
+        '  19-قياس-مؤشر-محفوظ.png      قياس يدوي محفوظ ومصدره',
         '  3..7 ملفات JSON             نتائج كل مجموعة',
         '  6-تقرير-التحليل.pdf         التقرير الفعلي المولّد من المحرك',
         '  7-نتائج-التحليل.xlsx        ملف Excel بثماني أوراق',

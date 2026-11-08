@@ -192,6 +192,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
         <>
           <DurableStaging staging={plan.staging} status={plan.stagingStatus ?? plan.staging.status} stagingOnly={plan.stagingOnly} message={plan.stagingMessage} />
           <ProjectRegionReview staging={plan.staging} />
+          <IndicatorRegionReview staging={plan.staging} />
         </>
       )}
       <ImportHistory rows={importHistory} />
@@ -975,6 +976,210 @@ function ProjectRegionReview({ staging }) {
                   disabled={busy || !columnMap.project_name || selectedCount === 0}
                 >
                   {busy ? 'جارٍ الاعتماد...' : 'اعتماد المشاريع المحددة في قاعدة البيانات'}
+                </button>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
+const INDICATOR_REVIEW_FIELDS = [
+  { key: 'indicator', label: 'تعريف المؤشر', required: true },
+  { key: 'governorate', label: 'المحافظة', required: false },
+  { key: 'district', label: 'المديرية', required: true },
+  { key: 'period_key', label: 'الفترة أو السنة', required: true },
+  { key: 'value', label: 'القيمة', required: true },
+  { key: 'unit', label: 'الوحدة', required: false },
+];
+
+function suggestedIndicatorField(header) {
+  const label = String(header ?? '').replace(/[\u064B-\u065F\u0670\u0640\s]/g, '').toLowerCase();
+  if (label.includes('اسمالمؤشر') || label.includes('رمزالمؤشر') || label.includes('كودالمؤشر')) return 'indicator';
+  if (label.includes('المحافظة')) return 'governorate';
+  if (label.includes('المديرية')) return 'district';
+  if (label.includes('الفترة') || label.includes('السنة') || label.includes('تاريخالقياس')) return 'period_key';
+  if (label.includes('القيمة') || label.includes('نتيجةالمؤشر')) return 'value';
+  if (label.includes('الوحدة')) return 'unit';
+  return null;
+}
+
+function IndicatorRegionReview({ staging }) {
+  const [regionData, setRegionData] = useState(null);
+  const [error, setError] = useState('');
+  const [regionId, setRegionId] = useState('');
+  const [columnMap, setColumnMap] = useState({});
+  const [preview, setPreview] = useState(null);
+  const [offset, setOffset] = useState(0);
+  const [selectedRows, setSelectedRows] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const indicatorRegions = regionData?.regions?.filter(region => region.candidateType === 'indicator-candidate') ?? [];
+  const selectedRegion = indicatorRegions.find(region => String(region.id) === String(regionId)) ?? null;
+
+  const loadRegions = useCallback(async () => {
+    try {
+      setError('');
+      const data = await window.localApp.importRegions({ batchId: staging.batchId });
+      setRegionData(data);
+      if (!data?.restricted) {
+        const candidates = (data.regions ?? []).filter(region => region.candidateType === 'indicator-candidate');
+        setRegionId(current => current && candidates.some(region => String(region.id) === String(current)) ? current : String(candidates[0]?.id ?? ''));
+        if (!Object.keys(columnMap).length && candidates[0]) {
+          const guesses = {};
+          for (const header of candidates[0].headers ?? []) {
+            const key = suggestedIndicatorField(header.label);
+            if (key && guesses[key] === undefined) guesses[key] = header.column;
+          }
+          setColumnMap(guesses);
+        }
+      }
+    } catch (cause) {
+      setError(errText(cause) || 'تعذر تحميل جداول المؤشرات المرشحة.');
+    }
+  }, [staging.batchId, columnMap]);
+
+  useEffect(() => { loadRegions(); }, [loadRegions]);
+
+  const loadPage = useCallback(async (nextOffset = 0) => {
+    if (!regionId) return;
+    setBusy(true);
+    setError('');
+    try {
+      setPreview(await window.localApp.importRegionPreview({ batchId: staging.batchId, regionId: Number(regionId), offset: nextOffset, limit: 30 }));
+      setOffset(nextOffset);
+    } catch (cause) {
+      setError(errText(cause) || 'تعذر تحميل صفوف المؤشر للمراجعة.');
+      setPreview(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [staging.batchId, regionId]);
+
+  useEffect(() => { if (regionId) loadPage(0); else setPreview(null); }, [regionId, loadPage]);
+
+  const chooseRegion = value => {
+    setRegionId(value);
+    setColumnMap({});
+    setSelectedRows({});
+    setResult(null);
+    setOffset(0);
+    const candidate = indicatorRegions.find(region => String(region.id) === String(value));
+    const guesses = {};
+    for (const header of candidate?.headers ?? []) {
+      const key = suggestedIndicatorField(header.label);
+      if (key && guesses[key] === undefined) guesses[key] = header.column;
+    }
+    setColumnMap(guesses);
+  };
+
+  const eligible = preview?.rows?.filter(row => !row.hidden && !row.hasFormula && !row.promoted) ?? [];
+  const selectedCount = Object.values(selectedRows).filter(Boolean).length;
+  const completeMap = INDICATOR_REVIEW_FIELDS.filter(field => field.required).every(field => columnMap[field.key])
+    && new Set(Object.values(columnMap)).size === Object.values(columnMap).length;
+
+  const promote = async () => {
+    const approvedRows = Object.entries(selectedRows).filter(([, checked]) => checked).map(([row]) => Number(row));
+    if (!completeMap || !approvedRows.length) return;
+    setBusy(true);
+    setError('');
+    try {
+      setResult(await window.localApp.promoteIndicators({ batchId: staging.batchId, regionId: Number(regionId), columnMap, approvedRows }));
+      setSelectedRows({});
+      await loadRegions();
+      await loadPage(offset);
+    } catch (cause) {
+      setError(errText(cause) || 'تعذر اعتماد قياسات المؤشرات.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="مراجعة جداول المؤشرات" subtitle="لا يُعتمد أي ربط أو قياس تلقائيًا؛ تُراجع الأعمدة والصفوف وتُحفظ القيم مع الفترة والمصدر. الحالات الملتبسة تبقى للمراجعة.">
+      {error && <ErrorBanner message={error} />}
+      {regionData?.restricted && <Notice tone="warn" title="المراجعة غير متاحة في وضع المشاركة">{regionData.message}</Notice>}
+      {!regionData?.restricted && indicatorRegions.length === 0 && <Notice tone="info" title="لم يُكتشف جدول مؤشرات مرشح">تبقى المناطق غير المصنفة في الاستقبال، ولا تُحوّل إلى قياسات بالتخمين.</Notice>}
+      {indicatorRegions.length > 0 && (
+        <>
+          <div className="row between" style={{ gap: 12, flexWrap: 'wrap' }}>
+            <span>مناطق المؤشرات: {indicatorRegions.length} · الدفعة {staging.batchId}</span>
+            <select className="input" value={regionId} onChange={event => chooseRegion(event.target.value)} disabled={busy}>
+              {indicatorRegions.map(region => <option key={region.id} value={region.id}>{region.sheetName} · صف {region.headerRow} · {region.totalRows} صف</option>)}
+            </select>
+          </div>
+          {selectedRegion && (
+            <>
+              <div className="stat-strip" style={{ marginTop: 12 }}>
+                <MiniStat label="الصفوف" value={fmtNumber(selectedRegion.totalRows, 0)} />
+                <MiniStat label="معتمدة" value={fmtNumber(selectedRegion.promotedRows, 0)} />
+                <MiniStat label="الثقة في التصنيف" value={Math.round(selectedRegion.confidence * 100) + '%'} />
+                <MiniStat label="الصفحة" value={preview ? Math.floor(offset / 30) + 1 + ' / ' + Math.max(1, Math.ceil(preview.totalRows / 30)) : '—'} />
+              </div>
+              <div className="quote" style={{ marginTop: 12 }}>
+                <strong>مطابقة الأعمدة المقترحة — راجعها قبل الاعتماد</strong>
+                <div className="grid-2" style={{ marginTop: 10 }}>
+                  {INDICATOR_REVIEW_FIELDS.map(field => (
+                    <label className="stack tight" key={field.key}>
+                      <span>{field.label}{field.required ? ' *' : ''}</span>
+                      <select className="input" value={columnMap[field.key] ?? ''} onChange={event => setColumnMap(current => {
+                        const next = { ...current };
+                        if (event.target.value) next[field.key] = Number(event.target.value);
+                        else delete next[field.key];
+                        return next;
+                      })} disabled={busy}>
+                        <option value="">غير مربوط</option>{selectedRegion.headers.map(header => <option key={header.column} value={header.column}>{header.label} · عمود {header.column}</option>)}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              {selectedRegion.sheetState !== 'visible' && <Notice tone="warn" title="الورقة مخفية">لن يقبل الباكند اعتماد قياسات من ورقة مخفية.</Notice>}
+              {preview?.rows && (
+                <div className="stack" style={{ marginTop: 12 }}>
+                  <div className="row between">
+                    <strong>صفوف قابلة للاعتماد</strong>
+                    <button className="btn small ghost" onClick={() => setSelectedRows(current => {
+                      const next = { ...current };
+                      const select = eligible.some(row => !current[row.rowNumber]);
+                      for (const row of eligible) next[row.rowNumber] = select;
+                      return next;
+                    })} disabled={busy || !eligible.length}>اختيار الصفوف المؤهلة في الصفحة</button>
+                  </div>
+                  {preview.rows.map(row => (
+                    <div className="quote" key={row.id}>
+                      <label className="row gap-sm" style={{ cursor: row.hidden || row.hasFormula || row.promoted ? 'not-allowed' : 'pointer' }}>
+                        <input type="checkbox" checked={Boolean(selectedRows[row.rowNumber])} disabled={busy || row.hidden || row.hasFormula || row.promoted}
+                          onChange={event => setSelectedRows(current => ({ ...current, [row.rowNumber]: event.target.checked }))} />
+                        <strong>صف {row.rowNumber}</strong>
+                        {row.hidden && <Badge tone="warn">مخفي</Badge>}{row.hasFormula && <Badge tone="warn">صيغة</Badge>}{row.promoted && <Badge tone="ok">معتمد</Badge>}
+                      </label>
+                      <div className="chip-row" style={{ marginTop: 8 }}>
+                        <span className="chip"><strong>المؤشر:</strong> {stagedCellValue(row, columnMap.indicator) || '—'}</span>
+                        <span className="chip"><strong>المديرية:</strong> {stagedCellValue(row, columnMap.district) || '—'}</span>
+                        <span className="chip"><strong>الفترة:</strong> {stagedCellValue(row, columnMap.period_key) || '—'}</span>
+                        <span className="chip"><strong>القيمة:</strong> {stagedCellValue(row, columnMap.value) || '—'} {columnMap.unit ? stagedCellValue(row, columnMap.unit) : ''}</span>
+                      </div>
+                    </div>
+                  ))}
+                  <div className="row between">
+                    <button className="btn small ghost" onClick={() => loadPage(Math.max(0, offset - 30))} disabled={busy || !preview.hasPrevious}>السابق</button>
+                    <span className="muted">{preview.rows.length} من {preview.totalRows}</span>
+                    <button className="btn small ghost" onClick={() => loadPage(offset + 30)} disabled={busy || !preview.hasNext}>التالي</button>
+                  </div>
+                </div>
+              )}
+              {result && <Notice tone={result.refused.length ? 'warn' : 'info'} title="نتيجة اعتماد قياسات المؤشر">
+                <span className="chip">أُضيفت: {result.applied.length}</span><span className="chip">تحتاج مراجعة: {result.refused.length}</span><span className="chip">{result.status}</span>
+                {result.refused.map(item => <span className="chip warn" key={item.rowNumber}>صف {item.rowNumber}: {item.reason}</span>)}
+              </Notice>}
+              <div className="row between" style={{ marginTop: 12 }}>
+                <span className="muted">الصفوف المختارة صراحةً: {selectedCount}</span>
+                <button className="btn primary" onClick={promote} disabled={busy || !completeMap || selectedCount === 0}>
+                  {busy ? 'جارٍ الاعتماد...' : 'اعتماد القياسات المحددة'}
                 </button>
               </div>
             </>

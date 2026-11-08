@@ -47,6 +47,9 @@ jobs:
       - name: Run unit and integration tests
         run: npm test
 
+      - name: Build renderer
+        run: npm run build
+
       - name: Run full Electron end-to-end checks
         run: npx electron scripts/e2e-analysis.cjs
 
@@ -57,9 +60,6 @@ jobs:
           name: windows-release-test-evidence
           path: نتائج-الفحص/**
           if-no-files-found: warn
-
-      - name: Build renderer
-        run: npm run build
 
       - name: Package Windows x64 NSIS installer
         run: npx electron-builder --win nsis --x64 --publish never

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Activity, ArrowDown, ArrowUp, FileSpreadsheet, Search } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, FileSpreadsheet, FileText, Search } from 'lucide-react';
 import { Badge, Card, Empty, ErrorBanner, Loading, Segmented, SelectInput } from '../components/ui.jsx';
 import { errText, fmtNumber, fmtPercent } from '../lib/format.js';
 import { INDICATORS_META, NEED_LABEL } from '../lib/indicatorsMeta.mjs';
@@ -64,6 +64,19 @@ export default function Indicators({ notify }) {
     }
   }
 
+  async function exportPdf() {
+    try {
+      const result = await window.localApp.exportFilteredPdf({
+        type: 'indicators',
+        filters: { search: search.trim(), governorate },
+        view,
+      });
+      if (!result?.canceled) notify?.({ tone: 'ok', message: `صُدّر تقرير المؤشرات إلى ${result.filePath}` });
+    } catch (cause) {
+      notify?.({ tone: 'bad', message: errText(cause) || 'تعذر تصدير تقرير المؤشرات.' });
+    }
+  }
+
   if (loading && !payload) return <Card title="المؤشرات الـ 12"><Loading label="جارٍ حساب المؤشرات..." /></Card>;
 
   return (
@@ -77,6 +90,7 @@ export default function Indicators({ notify }) {
         actions={(
           <div className="btn-row">
             <button className="btn small" onClick={exportExcel}><FileSpreadsheet size={15} /> تصدير Excel</button>
+            <button className="btn small" onClick={exportPdf}><FileText size={15} /> تقرير PDF</button>
             <span className="chip gold">{rows.length} مديرية</span>
           </div>
         )}
@@ -234,7 +248,8 @@ function pickValue(row, code, view) {
   }
   if (view === 'contributions') {
     const contribution = row.contributions?.[code];
-    return Number.isFinite(contribution) ? contribution : null;
+    const value = contribution && typeof contribution === 'object' ? contribution.contribution : contribution;
+    return Number.isFinite(value) ? value : null;
   }
   const value = row.values?.[code];
   return Number.isFinite(value) ? value : null;

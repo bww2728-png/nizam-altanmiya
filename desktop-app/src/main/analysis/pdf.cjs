@@ -22,6 +22,109 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
+function reportValue(value, type = 'text') {
+  if (value === null || value === undefined || value === '') return '—';
+  if (type === 'boolean') return Number(value) === 1 || value === true ? 'نعم' : 'لا';
+  if (type === 'ratio') {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return '—';
+    const ratio = Math.abs(numeric) > 1.5 ? numeric : numeric * 100;
+    return `${new Intl.NumberFormat('ar-YE-u-nu-latn', { maximumFractionDigits: 1 }).format(ratio)}%`;
+  }
+  if (type === 'number') {
+    const numeric = Number(value);
+    return Number.isFinite(numeric)
+      ? new Intl.NumberFormat('ar-YE-u-nu-latn', { maximumFractionDigits: 2 }).format(numeric)
+      : '—';
+  }
+  return String(value);
+}
+
+function filterSummary(filters, labels = {}) {
+  const items = Object.entries(filters ?? {}).filter(([, value]) => Boolean(value));
+  if (!items.length) return 'من دون تصفية إضافية';
+  return items.map(([key, value]) => `<span><strong>${escapeHtml(labels[key] ?? key)}:</strong> ${escapeHtml(value)}</span>`).join(' — ');
+}
+
+const FILTERED_REPORT_STYLE = `
+  @page { size: A3 landscape; margin: 10mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", "Traditional Arabic", "Arial", sans-serif; direction: rtl; color: #17324d; margin: 0; font-size: 10pt; line-height: 1.55; }
+  h1 { font-size: 22pt; margin: 0 0 5px; color: #0f2740; }
+  h2 { font-size: 13pt; margin: 14px 0 6px; color: #0f2740; border-bottom: 2px solid #d9a441; padding-bottom: 4px; page-break-after: avoid; }
+  .cover { text-align: center; border-bottom: 3px double #d9a441; padding: 12px 0; margin-bottom: 12px; }
+  .muted { color: #64798c; font-size: 9pt; }
+  .summary { background: #f7fafc; border: 1px solid #d7e0e8; border-radius: 6px; padding: 8px 12px; margin: 10px 0; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; margin: 6px 0 14px; font-size: 8pt; page-break-inside: auto; }
+  thead { display: table-header-group; }
+  th { background: #18324b; color: white; padding: 5px 4px; text-align: right; font-weight: 600; overflow-wrap: anywhere; }
+  td { padding: 4px; border-bottom: 1px solid #e2e9ef; vertical-align: top; overflow-wrap: anywhere; }
+  tbody tr:nth-child(even) { background: #f6f9fb; }
+  tr { page-break-inside: avoid; }
+  .ltr { direction: ltr; unicode-bidi: embed; text-align: left; }
+  footer { position: fixed; bottom: 0; left: 0; right: 0; text-align: center; font-size: 8pt; color: #7b8fa1; }
+`;
+
+function renderDatabaseReportHtml({ rows = [], columns = [], filters = {}, generatedAt = new Date().toISOString() } = {}) {
+  const identity = columns.filter((column) => ['districtName', 'governorate'].includes(column.key));
+  const measures = columns.filter((column) => !['districtName', 'governorate'].includes(column.key));
+  const groups = [];
+  for (let index = 0; index < measures.length; index += 6) groups.push(measures.slice(index, index + 6));
+  if (!groups.length) groups.push([]);
+  const sections = groups.map((group, index) => {
+    const heading = group.length ? group.map((column) => column.header).join('، ') : identity.map((column) => column.header).join('، ');
+    const fields = [...identity, ...group];
+    return `<h2>${escapeHtml(heading || 'السجلات المطابقة')}</h2>
+      <table><thead><tr><th style="width:4%">#</th>${fields.map((column) => `<th>${escapeHtml(column.header)}</th>`).join('')}</tr></thead>
+      <tbody>${rows.length ? rows.map((row, rowIndex) => `<tr><td>${rowIndex + 1}</td>${fields.map((column) => `<td>${escapeHtml(reportValue(row[column.dbColumn], column.type))}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${fields.length + 1}">لا توجد سجلات مطابقة للفلاتر الحالية.</td></tr>`}</tbody></table>`;
+  }).join('');
+  const labels = { search: 'البحث', governorate: 'المحافظة', allColumns: 'الأعمدة المعروضة' };
+  const filterValues = { ...filters, ...(filters.allColumns ? { allColumns: 'كل الحقول' } : { allColumns: 'العرض المختصر' }) };
+  return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>تقرير قاعدة البيانات الشاملة</title><style>${FILTERED_REPORT_STYLE}</style></head><body>
+    <div class="cover"><div>الجمهورية اليمنية — نظام التنمية المحلية</div><h1>تقرير قاعدة البيانات الشاملة</h1><div class="muted">تاريخ الإنشاء: ${escapeHtml(arabicDate(generatedAt))}</div></div>
+    <div class="summary"><strong>الفلاتر:</strong> ${filterSummary(filterValues, labels)}<br><strong>عدد السجلات المعروضة:</strong> ${rows.length}</div>
+    ${sections}<footer>نظام التنمية المحلية — تقرير آلي من البيانات المحلية المعتمدة.</footer></body></html>`;
+}
+
+function indicatorValue(row, code, view) {
+  if (view === 'scores') return row.scores?.[code];
+  if (view === 'contributions') {
+    const contribution = row.contributions?.[code];
+    return contribution && typeof contribution === 'object' ? contribution.contribution : contribution;
+  }
+  return row.values?.[code];
+}
+
+function indicatorReportStat(rows, indicator, view) {
+  const values = rows.map((row) => indicatorValue(row, indicator.code, view))
+    .filter((value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)))
+    .map(Number);
+  return {
+    count: values.length,
+    missing: rows.length - values.length,
+    min: values.length ? Math.min(...values) : null,
+    max: values.length ? Math.max(...values) : null,
+    average: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null,
+  };
+}
+
+function renderIndicatorsReportHtml({ rows = [], registry = [], filters = {}, view = 'values', generatedAt = new Date().toISOString() } = {}) {
+  const viewLabels = { values: 'القيم الأصلية', scores: 'الدرجات 0–100', contributions: 'المساهمة في المؤشر المركّب' };
+  const summaries = registry.map((indicator) => {
+    const stat = indicatorReportStat(rows, indicator, view);
+    return `<tr><td>${escapeHtml(indicator.header)}</td><td>${stat.count}</td><td>${stat.missing}</td><td class="ltr">${escapeHtml(reportValue(stat.min, 'number'))}</td><td class="ltr">${escapeHtml(reportValue(stat.max, 'number'))}</td><td class="ltr">${escapeHtml(reportValue(stat.average, 'number'))}</td></tr>`;
+  }).join('');
+  const body = rows.length ? rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.districtName)}</td><td>${escapeHtml(row.governorate)}</td>${registry.map((indicator) => `<td class="ltr">${escapeHtml(reportValue(indicatorValue(row, indicator.code, view), 'number'))}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${registry.length + 3}">لا توجد مديريات مطابقة للفلاتر الحالية.</td></tr>`;
+  const labels = { search: 'البحث', governorate: 'المحافظة', view: 'طريقة العرض' };
+  const filterValues = { ...filters, view: viewLabels[view] ?? viewLabels.values };
+  return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>تقرير مؤشرات التنمية</title><style>${FILTERED_REPORT_STYLE}</style></head><body>
+    <div class="cover"><div>الجمهورية اليمنية — نظام التنمية المحلية</div><h1>تقرير مؤشرات التنمية</h1><div class="muted">تاريخ الإنشاء: ${escapeHtml(arabicDate(generatedAt))}</div></div>
+    <div class="summary"><strong>الفلاتر:</strong> ${filterSummary(filterValues, labels)}<br><strong>عدد المديريات:</strong> ${rows.length}</div>
+    <h2>ملخص المؤشرات ضمن النتائج المطابقة</h2><table><thead><tr><th>المؤشر</th><th>محسوب</th><th>ناقص</th><th>الأدنى</th><th>الأعلى</th><th>المتوسط</th></tr></thead><tbody>${summaries}</tbody></table>
+    <h2>تفاصيل النتائج — ${escapeHtml(viewLabels[view] ?? viewLabels.values)}</h2><table><thead><tr><th style="width:3%">#</th><th style="width:12%">المديرية</th><th style="width:9%">المحافظة</th>${registry.map((indicator) => `<th>${escapeHtml(indicator.header)}${indicator.unit ? `<div class="muted">${escapeHtml(indicator.unit)}</div>` : ''}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>
+    <footer>نظام التنمية المحلية — تقرير آلي من المؤشرات المحسوبة على البيانات المحلية.</footer></body></html>`;
+}
+
 function fixed(value, digits = 3) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
   return value.toFixed(digits);
@@ -306,10 +409,7 @@ function renderReportHtml(analysis, context = {}) {
  * @param {object} analysis
  * @param {{audit?:Array}} [context]
  */
-async function exportAnalysisPdf(electronApi, filePath, analysis, context = {}) {
-  const html = renderReportHtml(analysis, context);
-  // A private temp directory per export avoids predictable-name collisions between
-  // concurrent exports and lets cleanup remove every artefact in one step.
+async function exportReportHtmlPdf(electronApi, filePath, html, pageSize = 'A4') {
   const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-report-'));
   const tempFile = path.join(tempDirectory, 'report.html');
   let window = null;
@@ -325,7 +425,7 @@ async function exportAnalysisPdf(electronApi, filePath, analysis, context = {}) 
     await window.loadFile(tempFile);
     const data = await window.webContents.printToPDF({
       printBackground: true,
-      pageSize: 'A4',
+      pageSize,
       margins: { top: 0.55, bottom: 0.63, left: 0.47, right: 0.47 },
       preferCSSPageSize: true,
     });
@@ -337,4 +437,24 @@ async function exportAnalysisPdf(electronApi, filePath, analysis, context = {}) 
   }
 }
 
-module.exports = { renderReportHtml, exportAnalysisPdf, escapeHtml };
+async function exportAnalysisPdf(electronApi, filePath, analysis, context = {}) {
+  return exportReportHtmlPdf(electronApi, filePath, renderReportHtml(analysis, context));
+}
+
+async function exportDatabaseReportPdf(electronApi, filePath, report) {
+  return exportReportHtmlPdf(electronApi, filePath, renderDatabaseReportHtml(report), 'A3');
+}
+
+async function exportIndicatorsReportPdf(electronApi, filePath, report) {
+  return exportReportHtmlPdf(electronApi, filePath, renderIndicatorsReportHtml(report), 'A3');
+}
+
+module.exports = {
+  renderReportHtml,
+  renderDatabaseReportHtml,
+  renderIndicatorsReportHtml,
+  exportAnalysisPdf,
+  exportDatabaseReportPdf,
+  exportIndicatorsReportPdf,
+  escapeHtml,
+};

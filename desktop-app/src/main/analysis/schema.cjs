@@ -102,6 +102,28 @@ const MANDATORY_FIELDS = [
   { key: 'projectStatus', label: 'حالة مشروع', column: 'AG' },
 ];
 
+const DIRECTORATE_FIELD_CLASSES = Object.freeze({
+  identity: ['districtName', 'governorate'],
+  stable_attribute: ['districtNature', 'geographicDispersion'],
+  service_profile: ['lostOpportunityType', 'serviceGapType'],
+  temporal_measure: [
+    'population', 'migrants', 'densityPerKm2', 'expectedBeneficiaries', 'schools', 'enrolledStudents',
+    'govFacilities', 'privateFacilities', 'waterCoverage', 'pavedRoads', 'unpavedRoads', 'cutRoads',
+    'serviceDistanceKm', 'revenue', 'agriProduction', 'livestockHeads', 'valueChains',
+    'inactiveValueChains', 'unemployment', 'associations', 'goodsTons', 'frontLine',
+    'povertyRatio', 'vulnerableGroups', 'ruralPopulation',
+  ],
+  project_summary: [
+    'projectCost', 'projectStatus', 'partnerIntegration', 'communityParticipation',
+    'sustainabilityCriteria', 'projectContinuity', 'needAlignment', 'nationalAlignment',
+  ],
+  review_decision: ['reviewerDecision'],
+});
+
+const DIRECTORATE_FIELD_CLASS_BY_KEY = Object.freeze(Object.fromEntries(
+  Object.entries(DIRECTORATE_FIELD_CLASSES).flatMap(([classification, keys]) => keys.map(key => [key, classification]))
+));
+
 /**
  * The twelve indicators.
  *
@@ -251,6 +273,8 @@ module.exports = {
   FIELD_BY_COLUMN,
   DECISION_FIELD,
   MANDATORY_FIELDS,
+  DIRECTORATE_FIELD_CLASSES,
+  DIRECTORATE_FIELD_CLASS_BY_KEY,
   INDICATORS,
   INDICATOR_BY_CODE,
   RATIO_KEYS,

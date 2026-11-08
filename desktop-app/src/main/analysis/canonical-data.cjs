@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const ExcelJS = require('exceljs');
-const { INPUT_FIELDS, DECISION_FIELD, INDICATORS } = require('./schema.cjs');
+const { INPUT_FIELDS, DECISION_FIELD, INDICATORS, DIRECTORATE_FIELD_CLASS_BY_KEY } = require('./schema.cjs');
 
 const LIMITS = Object.freeze({
   sheets: 200, rowsPerSheet: 5000, columnsPerSheet: 400,
@@ -16,21 +16,29 @@ const LIMITS = Object.freeze({
 const TABLES = [
   "CREATE TABLE IF NOT EXISTS geographic_units (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES geographic_units(id), unit_type TEXT NOT NULL, official_code TEXT, name TEXT NOT NULL, normalized_name TEXT NOT NULL, valid_from TEXT, valid_to TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(unit_type, official_code))",
   "CREATE INDEX IF NOT EXISTS geographic_units_parent_idx ON geographic_units(parent_id, unit_type)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS geographic_units_name_parent_idx ON geographic_units(unit_type, IFNULL(parent_id,0), normalized_name)",
   "CREATE TABLE IF NOT EXISTS sectors (id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name_ar TEXT NOT NULL, description TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS data_sources (id INTEGER PRIMARY KEY, source_type TEXT NOT NULL, organization TEXT, document_title TEXT, file_name TEXT, mime_type TEXT, content_sha256 TEXT, file_size INTEGER, reference_period TEXT, collected_at TEXT, received_at TEXT NOT NULL, notes TEXT)",
   "CREATE INDEX IF NOT EXISTS data_sources_hash_idx ON data_sources(content_sha256)",
-  "CREATE TABLE IF NOT EXISTS data_field_definitions (id INTEGER PRIMARY KEY, entity_type TEXT NOT NULL, field_key TEXT NOT NULL, label_ar TEXT NOT NULL, data_type TEXT NOT NULL, unit TEXT, sensitivity TEXT NOT NULL DEFAULT 'public', required_for_identity INTEGER NOT NULL DEFAULT 0, description TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(entity_type, field_key))",
+  "CREATE TABLE IF NOT EXISTS data_field_definitions (id INTEGER PRIMARY KEY, entity_type TEXT NOT NULL, field_key TEXT NOT NULL, label_ar TEXT NOT NULL, data_type TEXT NOT NULL, unit TEXT, sensitivity TEXT NOT NULL DEFAULT 'public', required_for_identity INTEGER NOT NULL DEFAULT 0, field_class TEXT NOT NULL DEFAULT 'measure', temporal_behavior TEXT NOT NULL DEFAULT 'unspecified', validation_json TEXT NOT NULL DEFAULT '{}', description TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(entity_type, field_key))",
   "CREATE TABLE IF NOT EXISTS data_field_aliases (id INTEGER PRIMARY KEY, field_definition_id INTEGER NOT NULL REFERENCES data_field_definitions(id) ON DELETE CASCADE, alias TEXT NOT NULL, normalized_alias TEXT NOT NULL, locale TEXT NOT NULL DEFAULT 'ar', confidence REAL NOT NULL DEFAULT 1, approved INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE(field_definition_id, normalized_alias, locale))",
   "CREATE INDEX IF NOT EXISTS data_field_aliases_lookup_idx ON data_field_aliases(normalized_alias, approved)",
   "CREATE TABLE IF NOT EXISTS entity_records (id INTEGER PRIMARY KEY, entity_type TEXT NOT NULL, geographic_unit_id INTEGER REFERENCES geographic_units(id), sector_id INTEGER REFERENCES sectors(id), external_key TEXT, status TEXT NOT NULL DEFAULT 'draft', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
   "CREATE INDEX IF NOT EXISTS entity_records_geo_idx ON entity_records(geographic_unit_id, entity_type)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS entity_records_external_key_idx ON entity_records(entity_type, external_key) WHERE external_key IS NOT NULL",
+  "CREATE TABLE IF NOT EXISTS entity_record_versions (id INTEGER PRIMARY KEY, record_id INTEGER NOT NULL REFERENCES entity_records(id), action TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS entity_record_versions_record_idx ON entity_record_versions(record_id,id DESC)",
   "CREATE TABLE IF NOT EXISTS entity_field_values (id INTEGER PRIMARY KEY, record_id INTEGER NOT NULL REFERENCES entity_records(id) ON DELETE CASCADE, field_definition_id INTEGER NOT NULL REFERENCES data_field_definitions(id), period_key TEXT NOT NULL DEFAULT '', value_text TEXT, value_number REAL, value_date TEXT, value_boolean INTEGER, value_state TEXT NOT NULL DEFAULT 'known', valid_from TEXT, valid_to TEXT, source_id INTEGER REFERENCES data_sources(id), source_location TEXT, raw_value_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(record_id, field_definition_id, period_key))",
   "CREATE INDEX IF NOT EXISTS entity_field_values_field_idx ON entity_field_values(field_definition_id, period_key)",
   "CREATE TABLE IF NOT EXISTS indicator_definitions (id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, label_ar TEXT NOT NULL, sector_id INTEGER REFERENCES sectors(id), unit TEXT, direction TEXT, formula_json TEXT, methodology TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS indicator_observations (id INTEGER PRIMARY KEY, indicator_id INTEGER NOT NULL REFERENCES indicator_definitions(id), geographic_unit_id INTEGER NOT NULL REFERENCES geographic_units(id), period_key TEXT NOT NULL, period_start TEXT, period_end TEXT, value_number REAL, value_text TEXT, value_state TEXT NOT NULL DEFAULT 'known', source_id INTEGER REFERENCES data_sources(id), source_location TEXT, created_at TEXT NOT NULL, UNIQUE(indicator_id, geographic_unit_id, period_key))",
   "CREATE INDEX IF NOT EXISTS indicator_observations_period_idx ON indicator_observations(period_key, indicator_id)",
+  "CREATE TABLE IF NOT EXISTS indicator_observation_versions (id INTEGER PRIMARY KEY, observation_id INTEGER NOT NULL REFERENCES indicator_observations(id) ON DELETE CASCADE, action TEXT NOT NULL, payload_json TEXT NOT NULL, source_id INTEGER REFERENCES data_sources(id), created_at TEXT NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS indicator_observation_versions_observation_idx ON indicator_observation_versions(observation_id,id DESC)",
   "CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT NOT NULL, description TEXT, geographic_unit_id INTEGER REFERENCES geographic_units(id), sector_id INTEGER REFERENCES sectors(id), status TEXT NOT NULL DEFAULT 'draft', estimated_cost REAL, actual_cost REAL, currency_code TEXT, start_date TEXT, end_date TEXT, source_id INTEGER REFERENCES data_sources(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
   "CREATE INDEX IF NOT EXISTS projects_geo_sector_idx ON projects(geographic_unit_id, sector_id, status)",
+  "CREATE TABLE IF NOT EXISTS project_versions (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, action TEXT NOT NULL, payload_json TEXT NOT NULL, source_id INTEGER REFERENCES data_sources(id), created_at TEXT NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS project_versions_project_idx ON project_versions(project_id, id DESC)",
   "CREATE TABLE IF NOT EXISTS project_funding (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, partner_name TEXT NOT NULL, amount REAL, currency_code TEXT, funding_date TEXT, source_id INTEGER REFERENCES data_sources(id), created_at TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS managed_attachments (id INTEGER PRIMARY KEY, entity_type TEXT NOT NULL, entity_id INTEGER, source_id INTEGER REFERENCES data_sources(id), original_name TEXT NOT NULL, mime_type TEXT, extension TEXT, size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, content BLOB NOT NULL, source_location TEXT, classification TEXT NOT NULL DEFAULT 'unclassified', review_status TEXT NOT NULL DEFAULT 'unassigned', created_at TEXT NOT NULL)",
   "CREATE INDEX IF NOT EXISTS managed_attachments_entity_idx ON managed_attachments(entity_type, entity_id)",
@@ -98,18 +106,125 @@ function anchorsFor(sheet, media) {
   });
 }
 
-function migrateCanonicalData(database) {
-  database.exec(TABLES.join(';\n') + ';');
+function resolveLegacySource(database, sourceFile, now) {
+  if (!sourceFile) return null;
+  const existing = database.prepare('SELECT id FROM data_sources WHERE file_name=? ORDER BY id DESC LIMIT 1').get(sourceFile);
+  if (existing) return existing.id;
+  const created = database.prepare("INSERT INTO data_sources (source_type,document_title,file_name,received_at,notes) VALUES ('legacy-compatibility',?,?,?,'تم إنشاء مرجع توافق للبيانات الموجودة قبل نموذج المصادر المعياري')")
+    .run(String(sourceFile).slice(0,240),String(sourceFile).slice(0,240),now);
+  return Number(created.lastInsertRowid);
+}
+
+function syncLegacyDirectorate(database, id, options = {}) {
+  const recordId = Number(id);
+  if (!Number.isSafeInteger(recordId) || recordId <= 0) throw new Error('معرّف المديرية غير صالح للمزامنة المعيارية.');
+  const record = database.prepare('SELECT * FROM directorates WHERE id=?').get(recordId);
+  if (!record) return null;
   const now = new Date().toISOString();
-  const fieldInsert = database.prepare("INSERT INTO data_field_definitions (entity_type,field_key,label_ar,data_type,unit,sensitivity,required_for_identity,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_type,field_key) DO NOTHING");
+  const { INPUT_FIELDS, DECISION_FIELD, DIRECTORATE_FIELD_CLASS_BY_KEY } = require('./schema.cjs');
+  const fields = [...INPUT_FIELDS,DECISION_FIELD];
+  const fieldRows = database.prepare("SELECT id,field_key,data_type FROM data_field_definitions WHERE entity_type='directorate' AND active=1").all();
+  const fieldByKey = new Map(fieldRows.map(field => [field.field_key,field]));
+  const aliases = Object.fromEntries(fields.map(field => [field.key,field]));
+  const normalizedGovernorate = normalizeLabel(record.governorate);
+  const normalizedDistrict = normalizeLabel(record.district);
+  let governorateId = null;
+  if (record.governorate) {
+    database.prepare("INSERT OR IGNORE INTO geographic_units (unit_type,name,normalized_name,created_at,updated_at) VALUES ('governorate',?,?,?,?)")
+      .run(record.governorate,normalizedGovernorate,now,now);
+    governorateId = database.prepare("SELECT id FROM geographic_units WHERE unit_type='governorate' AND parent_id IS NULL AND normalized_name=?")
+      .get(normalizedGovernorate)?.id ?? null;
+  }
+  database.prepare("INSERT OR IGNORE INTO geographic_units (parent_id,unit_type,name,normalized_name,created_at,updated_at) VALUES (?,'district',?,?,?,?)")
+    .run(governorateId,record.district,normalizedDistrict,now,now);
+  const geographicUnitId = database.prepare("SELECT id FROM geographic_units WHERE unit_type='district' AND IFNULL(parent_id,0)=IFNULL(?,0) AND normalized_name=?")
+    .get(governorateId,normalizedDistrict)?.id;
+  if (!geographicUnitId) throw new Error('تعذر ربط المديرية بالمرجع الجغرافي المعياري.');
+  const externalKey = 'legacy-directorate:' + recordId;
+  database.prepare("INSERT INTO entity_records (entity_type,geographic_unit_id,external_key,status,created_at,updated_at) VALUES ('directorate',?,?,'approved',?,?) ON CONFLICT(entity_type,external_key) WHERE external_key IS NOT NULL DO UPDATE SET geographic_unit_id=excluded.geographic_unit_id,status='approved',updated_at=excluded.updated_at")
+    .run(geographicUnitId,externalKey,record.created_at ?? now,record.updated_at ?? now);
+  const entityRecord = database.prepare("SELECT id FROM entity_records WHERE entity_type='directorate' AND external_key=?").get(externalKey);
+  if (!entityRecord) throw new Error('تعذر إنشاء السجل المعياري للمديرية.');
+  const sourceRows = database.prepare('SELECT field_key,value_text,source_file,source_location FROM directorate_sources WHERE directorate_id=?').all(recordId);
+  const sourceByField = new Map(sourceRows.map(source => [source.field_key,source]));
+  const defaultSource = resolveLegacySource(database,record.source_file,now);
+  const staleGuard = options.force ? '' : ' WHERE excluded.updated_at>=entity_field_values.updated_at';
+  const insertValue = database.prepare("INSERT INTO entity_field_values (record_id,field_definition_id,period_key,value_text,value_number,value_boolean,value_state,source_id,source_location,raw_value_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(record_id,field_definition_id,period_key) DO UPDATE SET value_text=excluded.value_text,value_number=excluded.value_number,value_boolean=excluded.value_boolean,value_state=excluded.value_state,source_id=excluded.source_id,source_location=excluded.source_location,raw_value_json=excluded.raw_value_json,updated_at=excluded.updated_at" + staleGuard);
+  for (const [key,field] of Object.entries(aliases)) {
+    const definition = fieldByKey.get(key);
+    if (!definition) continue;
+    const column = legacyDirectorateColumn(key);
+    const value = key === 'districtName' ? record.district : key === 'governorate' ? record.governorate : record[column];
+    const source = sourceByField.get(key);
+    const sourceId = resolveLegacySource(database,source?.source_file,now) ?? defaultSource;
+    const sourceLocation = source?.source_location ?? (record.source_sheet && record.source_row ? record.source_sheet + '!row-' + record.source_row + ':' + key : null);
+    const dataType = definition.data_type;
+    const valueText = value === null || value === undefined || dataType === 'number' || dataType === 'boolean' ? null : String(value);
+    const valueNumber = value !== null && value !== undefined && dataType === 'number' && Number.isFinite(Number(value)) ? Number(value) : null;
+    const valueBoolean = dataType === 'boolean' && value !== null && value !== undefined ? (Number(value) ? 1 : 0) : null;
+    const temporal = DIRECTORATE_FIELD_CLASS_BY_KEY[key] === 'temporal_measure';
+    const state = value === null || value === undefined ? 'unknown' : temporal ? 'period-unspecified' : 'known';
+    const rawJson = value === null || value === undefined ? null : json({ value, unit: field.unit ?? null, legacyPeriod: temporal ? 'unspecified' : null });
+    insertValue.run(entityRecord.id,definition.id,'',valueText,valueNumber,valueBoolean,state,
+      sourceId,sourceLocation,rawJson,record.updated_at ?? now,record.updated_at ?? now);
+  }
+  return { recordId,entityRecordId:entityRecord.id,geographicUnitId };
+}
+
+function legacyDirectorateColumn(key) {
+  const overrides = { districtName:'district',districtNature:'nature',lostOpportunityType:'lost_opportunity' };
+  return overrides[key] ?? key.replace(/[A-Z]/g,letter => '_' + letter.toLowerCase());
+}
+
+function backfillLegacyDirectorates(database) {
+  const table = database.prepare("SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='directorates'").get();
+  if (!table) return 0;
+  const ids = database.prepare('SELECT id FROM directorates ORDER BY id').all();
+  for (const { id } of ids) syncLegacyDirectorate(database,id);
+  return ids.length;
+}
+
+function retireLegacyDirectorate(database, id) {
+  const recordId = Number(id);
+  if (!Number.isSafeInteger(recordId) || recordId <= 0) throw new Error('معرّف المديرية غير صالح للأرشفة.');
+  database.prepare("UPDATE entity_records SET status='deleted',updated_at=? WHERE entity_type='directorate' AND external_key=?")
+    .run(new Date().toISOString(),'legacy-directorate:' + recordId);
+}
+
+function ensureColumn(database, table, name, definition) {
+  const columns = database.prepare('PRAGMA table_info(' + table + ')').all().map(column => column.name);
+  if (!columns.includes(name)) database.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + name + ' ' + definition);
+}
+
+function applyCanonicalMigration(database) {
+  database.exec(TABLES.join(';\n') + ';');
+  ensureColumn(database,'data_field_definitions','field_class',"TEXT NOT NULL DEFAULT 'measure'");
+  ensureColumn(database,'data_field_definitions','temporal_behavior',"TEXT NOT NULL DEFAULT 'unspecified'");
+  ensureColumn(database,'data_field_definitions','validation_json',"TEXT NOT NULL DEFAULT '{}'");
+  const now = new Date().toISOString();
+  const fieldInsert = database.prepare("INSERT INTO data_field_definitions (entity_type,field_key,label_ar,data_type,unit,sensitivity,required_for_identity,field_class,temporal_behavior,validation_json,description,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_type,field_key) DO UPDATE SET label_ar=excluded.label_ar,data_type=excluded.data_type,unit=excluded.unit,sensitivity=excluded.sensitivity,required_for_identity=excluded.required_for_identity,field_class=excluded.field_class,temporal_behavior=excluded.temporal_behavior,validation_json=excluded.validation_json,description=excluded.description,updated_at=excluded.updated_at");
   const aliasInsert = database.prepare("INSERT INTO data_field_aliases (field_definition_id,alias,normalized_alias,locale,confidence,approved,created_at) VALUES (?,?,?,'ar',1,1,?) ON CONFLICT(field_definition_id,normalized_alias,locale) DO NOTHING");
   // Reuse the exact Arabic aliases already accepted by the existing matcher.
   // Load lazily: mapping.cjs imports store-schema.cjs, so loading it only when
   // the migration executes avoids a module-initialization cycle.
   const { ALIASES } = require('./mapping.cjs');
   for (const field of [...INPUT_FIELDS, DECISION_FIELD]) {
-    fieldInsert.run('directorate', field.key, field.header, field.type === 'ratio' ? 'number' : field.type,
-      field.unit ?? null, field.sensitivity ?? 'public', ['districtName','governorate'].includes(field.key) ? 1 : 0, now, now);
+    const classification = DIRECTORATE_FIELD_CLASS_BY_KEY[field.key] ?? 'measure';
+    const temporalBehavior = classification === 'temporal_measure' ? 'period-required-but-legacy-unspecified' : 'not-temporal';
+    const validation = {
+      nonNegative: field.type === 'number' || field.type === 'ratio',
+      minimum: field.type === 'ratio' ? 0 : (field.type === 'number' ? 0 : null),
+      maximum: field.type === 'ratio' ? 1 : null,
+      allowed: field.allowed ?? null,
+    };
+    const description = classification === 'project_summary'
+      ? 'حقل تلخيصي على مستوى المديرية في القالب القديم؛ لا يمثل سجل مشروع مستقلًا.'
+      : classification === 'temporal_measure'
+        ? 'قياس قابل للتغير زمنيًا؛ القالب القديم لا يوفر فترة مرجعية، لذلك تبقى الفترة غير محددة حتى يراجعها المستخدم.'
+        : null;
+    fieldInsert.run('directorate',field.key,field.header,field.type === 'ratio' ? 'number' : field.type,
+      field.unit ?? null,field.sensitivity ?? 'public',['districtName','governorate'].includes(field.key) ? 1 : 0,
+      classification,temporalBehavior,json(validation),description,now,now);
     const id = database.prepare("SELECT id FROM data_field_definitions WHERE entity_type='directorate' AND field_key=?").get(field.key)?.id;
     if (id) {
       aliasInsert.run(id, field.header, normalizeLabel(field.header), now);
@@ -123,7 +238,12 @@ function migrateCanonicalData(database) {
     indicatorInsert.run(indicator.code, indicator.header, indicator.unit ?? null, indicator.direction ?? null,
       json({ formula: indicator.formula, weight: indicator.weight, benchmark: indicator.benchmark ?? null }), now, now);
   }
+  backfillLegacyDirectorates(database);
   return true;
+}
+
+function migrateCanonicalData(database) {
+  return database.transaction(() => applyCanonicalMigration(database))();
 }
 
 async function stageWorkbook(database, filePath, workbookOption = null) {
@@ -648,6 +768,422 @@ function promoteProjectRegion(database, request = {}) {
 }
 
 
+function exactIndicator(database, value) {
+  const normalized = normalizeLabel(value);
+  if (!normalized) return null;
+  const matches = database.prepare('SELECT id,code,label_ar,unit FROM indicator_definitions WHERE active=1').all()
+    .filter(item => normalizeLabel(item.code) === normalized || normalizeLabel(item.label_ar) === normalized);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function exactGeographicMatch(database, districtValue, governorateValue) {
+  const districtName = String(districtValue ?? '').trim();
+  const governorateName = String(governorateValue ?? '').trim();
+  if (!districtName) return null;
+  const districts = database.prepare("SELECT unit.name AS district,governorate.name AS governorate FROM geographic_units unit LEFT JOIN geographic_units governorate ON governorate.id=unit.parent_id WHERE unit.unit_type='district'").all()
+    .filter(item => normalizeLabel(item.district) === normalizeLabel(districtName)
+      && (!governorateName || normalizeLabel(item.governorate) === normalizeLabel(governorateName)));
+  return districts.length === 1 ? districts[0] : null;
+}
+
+function ensureGeographicUnit(database, matched) {
+  const now = new Date().toISOString();
+  let parentId = null;
+  if (matched.governorate) {
+    database.prepare("INSERT OR IGNORE INTO geographic_units (unit_type,name,normalized_name,created_at,updated_at) VALUES ('governorate',?,?,?,?)")
+      .run(matched.governorate, normalizeLabel(matched.governorate), now, now);
+    parentId = database.prepare("SELECT id FROM geographic_units WHERE unit_type='governorate' AND parent_id IS NULL AND normalized_name=?")
+      .get(normalizeLabel(matched.governorate))?.id ?? null;
+  }
+  database.prepare("INSERT OR IGNORE INTO geographic_units (parent_id,unit_type,name,normalized_name,created_at,updated_at) VALUES (?,'district',?,?,?,?)")
+    .run(parentId, matched.district, normalizeLabel(matched.district), now, now);
+  return database.prepare("SELECT id FROM geographic_units WHERE unit_type='district' AND IFNULL(parent_id,0)=IFNULL(?,0) AND normalized_name=?")
+    .get(parentId, normalizeLabel(matched.district))?.id ?? null;
+}
+
+function findGeographicUnit(database, matched) {
+  let parentId = null;
+  if (matched.governorate) {
+    parentId = database.prepare("SELECT id FROM geographic_units WHERE unit_type='governorate' AND parent_id IS NULL AND normalized_name=?")
+      .get(normalizeLabel(matched.governorate))?.id ?? null;
+    if (!parentId) return null;
+  }
+  return database.prepare("SELECT id FROM geographic_units WHERE unit_type='district' AND IFNULL(parent_id,0)=IFNULL(?,0) AND normalized_name=?")
+    .get(parentId, normalizeLabel(matched.district))?.id ?? null;
+}
+
+function promoteIndicatorRegion(database, request = {}) {
+  const batchId = Number(request.batchId), regionId = Number(request.regionId);
+  const approvedRows = Array.isArray(request.approvedRows) ? request.approvedRows : [];
+  if (!Number.isSafeInteger(batchId) || batchId <= 0 || !Number.isSafeInteger(regionId) || regionId <= 0) throw new Error('معرّف دفعة أو منطقة الاستيراد غير صالح.');
+  if (approvedRows.length < 1 || approvedRows.length > 500) throw new Error('اختر صفًا واحدًا على الأقل، وبحد أقصى 500 صف في العملية.');
+  const rowNumbers = approvedRows.map(Number);
+  if (rowNumbers.some(row => !Number.isSafeInteger(row) || row <= 0) || new Set(rowNumbers).size !== rowNumbers.length) throw new Error('قائمة الصفوف المعتمدة تحتوي أرقامًا غير صالحة أو مكررة.');
+  const allowedFields = new Set(['indicator','governorate','district','period_key','value','unit']);
+  const inputMap = request.columnMap && typeof request.columnMap === 'object' ? request.columnMap : {};
+  const columnMap = {};
+  for (const [field, sourceColumn] of Object.entries(inputMap)) {
+    if (!allowedFields.has(field)) throw new Error('حقل مؤشر غير مدعوم في خريطة الاستيراد: ' + field);
+    const column = Number(sourceColumn);
+    if (!Number.isSafeInteger(column) || column < 1 || column > LIMITS.columnsPerSheet) throw new Error('رقم عمود غير صالح في خريطة الاستيراد.');
+    columnMap[field] = column;
+  }
+  for (const field of ['indicator','district','period_key','value']) if (!columnMap[field]) throw new Error('اربط الحقول الإلزامية للمؤشر قبل الاعتماد: اسم المؤشر، المديرية، الفترة، والقيمة.');
+  if (new Set(Object.values(columnMap)).size !== Object.values(columnMap).length) throw new Error('لا يمكن ربط العمود نفسه بأكثر من حقل.');
+  const region = database.prepare('SELECT r.*,s.name AS sheet_name,s.sheet_index,s.state AS sheet_state,b.source_id FROM workbook_import_regions r JOIN workbook_import_sheets s ON s.id=r.sheet_id JOIN workbook_import_batches b ON b.id=r.batch_id WHERE r.id=? AND r.batch_id=?').get(regionId,batchId);
+  if (!region) throw new Error('منطقة البيانات لا تنتمي إلى دفعة الاستيراد المحددة.');
+  if (region.candidate_type !== 'indicator-candidate') throw new Error('المنطقة ليست مرشحة للمؤشرات.');
+  if (region.sheet_state !== 'visible') throw new Error('لا يمكن اعتماد صفوف ورقة مخفية قبل إظهارها ومراجعتها.');
+  const headerColumns = new Set(stagedHeaderCells(database,region.sheet_id,region.header_row).map(cell => cell.column));
+  for (const column of Object.values(columnMap)) if (!headerColumns.has(column)) throw new Error('الخريطة تشير إلى عمود لا يحتوي عنوانًا في صف الرؤوس المحدد.');
+  const placeholders = rowNumbers.map(() => '?').join(',');
+  const rows = database.prepare('SELECT * FROM workbook_import_rows WHERE batch_id=? AND sheet_id=? AND row_number BETWEEN ? AND ? AND row_number IN (' + placeholders + ') ORDER BY row_number')
+    .all(batchId,region.sheet_id,region.first_data_row,region.last_data_row,...rowNumbers);
+  if (rows.length !== rowNumbers.length) throw new Error('بعض الصفوف المختارة لا تنتمي إلى المنطقة المحددة.');
+  const prepared = [], refused = [], preparedKeys = new Set();
+  for (const row of rows) {
+    const refuse = reason => refused.push({ rowNumber: row.row_number, reason });
+    if (row.is_hidden) { refuse('صف مخفي؛ يلزم مراجعته قبل الاعتماد.'); continue; }
+    if (row.has_formula) { refuse('صف يتضمن صيغة؛ لا تُعتمد القيم المخزنة تلقائيًا.'); continue; }
+    const cells = new Map(safeJsonParse(row.cells_json,[]).map(cell => [Number(cell.column),cell]));
+    const value = field => String(cells.get(columnMap[field])?.text ?? '').trim();
+    const indicator = exactIndicator(database,value('indicator'));
+    if (!indicator) { refuse('لم يطابق اسم أو رمز المؤشر تعريفًا معتمدًا وحيدًا.'); continue; }
+    const period = value('period_key');
+    if (!period || period.length > 80) { refuse('الفترة مطلوبة وبحد أقصى 80 حرفًا.'); continue; }
+    const parsed = parseProjectNumber(value('value'),'قيمة المؤشر');
+    if (parsed.error || parsed.value === null) { refuse(parsed.error || 'قيمة المؤشر مطلوبة.'); continue; }
+    const sourceUnit = value('unit');
+    if (sourceUnit && indicator.unit && normalizeLabel(sourceUnit) !== normalizeLabel(indicator.unit)) { refuse('وحدة الملف لا تطابق وحدة المؤشر المعتمد؛ لم يُجر تحويل تلقائي.'); continue; }
+    if (String(indicator.unit ?? '').includes('%') && parsed.value > 100) { refuse('قيمة النسبة المئوية تتجاوز 100.'); continue; }
+    const geographic = exactGeographicMatch(database,value('district'),value('governorate'));
+    if (!geographic) { refuse('تعذر ربط المديرية بمحافظة واحدة معتمدة بالاسم؛ يلزم حسم الهوية يدويًا.'); continue; }
+    const geographicUnitId = findGeographicUnit(database,geographic);
+    const observationKey = [indicator.id,normalizeLabel(geographic.governorate),normalizeLabel(geographic.district),period].join('|');
+    if ((geographicUnitId && database.prepare('SELECT id FROM indicator_observations WHERE indicator_id=? AND geographic_unit_id=? AND period_key=?').get(indicator.id,geographicUnitId,period)) || preparedKeys.has(observationKey)) {
+      refuse('توجد قيمة معتمدة أو مكررة للمؤشر والمديرية والفترة نفسها؛ راجع التعارض قبل الاعتماد.');
+      continue;
+    }
+    if (database.prepare('SELECT id FROM workbook_import_promotions WHERE row_id=?').get(row.id)) { refuse('هذا الصف سبق اعتماده في كيان آخر.'); continue; }
+    preparedKeys.add(observationKey);
+    prepared.push({ rowId: row.id,rowNumber: row.row_number,indicator,geographic,geographicUnitId,period,value: parsed.value,sourceLocation: region.sheet_name + '!row-' + row.row_number,columnMap });
+  }
+  const now = new Date().toISOString();
+  return database.transaction(() => {
+    const insert = database.prepare('INSERT INTO indicator_observations (indicator_id,geographic_unit_id,period_key,value_number,value_state,source_id,source_location,created_at) VALUES (?,?,?,? ,\'known\',?,?,?)');
+    const promotion = database.prepare("INSERT INTO workbook_import_promotions (batch_id,region_id,row_id,entity_type,target_id,source_location,mapping_json,mapped_values_json,created_at) VALUES (?,?,?,'indicator_observation',?,?,?,?,?)");
+    const applied = [];
+    for (const item of prepared) {
+      const geographicUnitId = item.geographicUnitId ?? ensureGeographicUnit(database,item.geographic);
+      if (!geographicUnitId) throw new Error('تعذر إنشاء المرجع الجغرافي المعياري داخل المعاملة.');
+      const created = insert.run(item.indicator.id,geographicUnitId,item.period,item.value,region.source_id,item.sourceLocation,now);
+      const observationId = Number(created.lastInsertRowid);
+      promotion.run(batchId,regionId,item.rowId,observationId,item.sourceLocation,json(item.columnMap),json({ indicator: item.indicator.code,period: item.period,value: item.value }),now);
+      applied.push({ rowNumber: item.rowNumber, observationId });
+    }
+    const regionRows = database.prepare('SELECT COUNT(*) AS n FROM workbook_import_rows WHERE batch_id=? AND sheet_id=? AND row_number BETWEEN ? AND ?').get(batchId,region.sheet_id,region.first_data_row,region.last_data_row).n;
+    const promotedCount = database.prepare('SELECT COUNT(*) AS n FROM workbook_import_promotions WHERE region_id=?').get(regionId).n;
+    const status = refused.length ? (applied.length ? 'indicators-partially-promoted' : 'indicators-review-required')
+      : (promotedCount >= regionRows ? 'indicators-promoted' : 'indicators-partially-promoted');
+    database.prepare('UPDATE workbook_import_regions SET mapping_json=?,review_status=? WHERE id=?')
+      .run(json({ ...safeJsonParse(region.mapping_json,{}),approvedMapping:{entityType:'indicator_observation',columns:columnMap,approvedAt:now} }),promotedCount >= regionRows ? 'promoted' : (promotedCount ? 'partially-promoted' : 'mapped'),regionId);
+    const previous = safeJsonParse(database.prepare('SELECT result_json FROM workbook_import_batches WHERE id=?').get(batchId)?.result_json,{}) ?? {};
+    const indicatorPromotions = Array.isArray(previous.indicatorPromotions) ? previous.indicatorPromotions : [];
+    indicatorPromotions.push({ regionId,applied,refused,skipped:Math.max(0,regionRows-rowNumbers.length),status,promotedAt:now });
+    database.prepare('UPDATE workbook_import_batches SET status=?,result_json=?,updated_at=? WHERE id=?')
+      .run(status,json({ ...previous,indicatorPromotions }),now,batchId);
+    return { applied,refused,skipped:Math.max(0,regionRows-rowNumbers.length),total:rowNumbers.length,status };
+  })();
+}
+
+function listCanonicalReferences(database) {
+  return {
+    geographicUnits: database.prepare('SELECT id,unit_type,name,parent_id FROM geographic_units ORDER BY unit_type,name').all(),
+    sectors: database.prepare('SELECT id,code,name_ar FROM sectors WHERE active=1 ORDER BY name_ar').all(),
+    indicators: database.prepare('SELECT id,code,label_ar,unit,direction FROM indicator_definitions WHERE active=1 ORDER BY label_ar').all(),
+  };
+}
+
+function listIndicatorObservations(database, request = {}) {
+  const limit = Math.max(1, Math.min(100, Number(request.limit) || 30));
+  const offset = Math.max(0, Math.min(1000000, Number(request.offset) || 0));
+  const search = String(request.search ?? '').trim().slice(0, 120);
+  const indicatorId = request.indicatorId == null || request.indicatorId === '' ? null : Number(request.indicatorId);
+  const conditions = [];
+  const params = [];
+  if (search) {
+    conditions.push("(instr(lower(indicator.label_ar),lower(?))>0 OR instr(lower(geo.name),lower(?))>0 OR instr(lower(coalesce(governorate.name,'')),lower(?))>0 OR instr(lower(observation.period_key),lower(?))>0)");
+    params.push(search,search,search,search);
+  }
+  if (indicatorId !== null) {
+    if (!Number.isSafeInteger(indicatorId) || indicatorId <= 0) throw new Error('معرّف المؤشر غير صالح.');
+    conditions.push('observation.indicator_id=?');
+    params.push(indicatorId);
+  }
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+  const from = `FROM indicator_observations observation
+    JOIN indicator_definitions indicator ON indicator.id=observation.indicator_id
+    JOIN geographic_units geo ON geo.id=observation.geographic_unit_id
+    LEFT JOIN geographic_units governorate ON governorate.id=geo.parent_id
+    LEFT JOIN data_sources source ON source.id=observation.source_id`;
+  const total = database.prepare('SELECT COUNT(*) AS count ' + from + ' ' + where).get(...params).count;
+  const rows = database.prepare(`SELECT observation.id,observation.indicator_id,observation.geographic_unit_id,observation.period_key,
+      observation.value_number,observation.value_text,observation.value_state,observation.source_id,observation.source_location,observation.created_at,
+      indicator.code AS indicator_code,indicator.label_ar AS indicator_label,indicator.unit,geo.name AS district,governorate.name AS governorate,
+      source.source_type,source.file_name AS source_file,source.document_title AS source_title,
+      (SELECT COUNT(*) FROM indicator_observation_versions version WHERE version.observation_id=observation.id) AS version_count
+    ${from} ${where} ORDER BY observation.id DESC LIMIT ? OFFSET ?`).all(...params,limit,offset);
+  return { rows,total,limit,offset,hasPrevious:offset>0,hasNext:offset+rows.length<total };
+}
+
+function saveIndicatorObservation(database, request = {}) {
+  const id = request.id == null || request.id === '' ? null : Number(request.id);
+  if (id !== null && (!Number.isSafeInteger(id) || id <= 0)) throw new Error('معرّف القياس غير صالح.');
+  const indicatorId = Number(request.indicator_id);
+  const geographicUnitId = Number(request.geographic_unit_id);
+  const period = String(request.period_key ?? '').trim();
+  if (!Number.isSafeInteger(indicatorId) || indicatorId <= 0) throw new Error('اختر مؤشرًا معتمدًا.');
+  if (!Number.isSafeInteger(geographicUnitId) || geographicUnitId <= 0) throw new Error('اختر مديرية معتمدة.');
+  if (!period || period.length > 80) throw new Error('الفترة إلزامية وبحد أقصى 80 حرفًا.');
+  const parsed = parseProjectNumber(request.value_number,'قيمة المؤشر');
+  if (parsed.error || parsed.value === null) throw new Error(parsed.error ?? 'قيمة المؤشر إلزامية.');
+  const now = new Date().toISOString();
+  return database.transaction(() => {
+    const indicator = database.prepare('SELECT id,label_ar,unit FROM indicator_definitions WHERE id=? AND active=1').get(indicatorId);
+    if (!indicator) throw new Error('المؤشر غير موجود أو غير نشط.');
+    if (indicator.unit === '%' && parsed.value > 100) throw new Error('قيمة النسبة المئوية تتجاوز 100.');
+    const geographic = database.prepare("SELECT id FROM geographic_units WHERE id=? AND unit_type='district'").get(geographicUnitId);
+    if (!geographic) throw new Error('يجب ربط القياس بمديرية معتمدة.');
+    const previous = id ? database.prepare('SELECT * FROM indicator_observations WHERE id=?').get(id) : null;
+    if (id && !previous) throw new Error('القياس المطلوب غير موجود.');
+    const duplicate = database.prepare('SELECT id FROM indicator_observations WHERE indicator_id=? AND geographic_unit_id=? AND period_key=? AND id<>coalesce(?,0)')
+      .get(indicatorId,geographicUnitId,period,id);
+    if (duplicate) throw new Error('يوجد قياس آخر للمؤشر والمديرية والفترة نفسها.');
+    const source = database.prepare("INSERT INTO data_sources (source_type,document_title,received_at,notes) VALUES ('manual-indicator-observation',?,?,?)")
+      .run(id ? 'تعديل قياس مؤشر #' + id : 'إدخال يدوي لقياس مؤشر',now,id ? 'تعديل يدوي للقياس #' + id : 'إنشاء قياس مؤشر يدوي');
+    const sourceId = Number(source.lastInsertRowid);
+    let observationId = id;
+    if (previous) {
+      database.prepare('INSERT INTO indicator_observation_versions (observation_id,action,payload_json,source_id,created_at) VALUES (?,?,?,?,?)')
+        .run(id,'manual-update',json(previous),sourceId,now);
+      database.prepare('UPDATE indicator_observations SET indicator_id=?,geographic_unit_id=?,period_key=?,value_number=?,value_text=NULL,value_state=\'known\',source_id=?,source_location=? WHERE id=?')
+        .run(indicatorId,geographicUnitId,period,parsed.value,sourceId,'إدخال يدوي',id);
+    } else {
+      const created = database.prepare('INSERT INTO indicator_observations (indicator_id,geographic_unit_id,period_key,value_number,value_state,source_id,source_location,created_at) VALUES (?,?,?,? ,\'known\',?,?,?)')
+        .run(indicatorId,geographicUnitId,period,parsed.value,sourceId,'إدخال يدوي',now);
+      observationId = Number(created.lastInsertRowid);
+    }
+    database.prepare('INSERT INTO access_log (action,entity,entity_id,fields,detail,created_at) VALUES (?,?,?,?,?,?)')
+      .run(previous ? 'manual-update' : 'manual-create','indicator_observations',String(observationId),'indicator_id,geographic_unit_id,period_key,value_number','source=' + sourceId,now);
+    return { id:observationId,action:previous?'updated':'created',sourceId,updatedAt:now,unit:indicator.unit };
+  })();
+}
+
+function listDataQualityIssues(database, request = {}) {
+  const limit = Math.max(1,Math.min(100,Number(request.limit)||50));
+  const offset = Math.max(0,Math.min(1000000,Number(request.offset)||0));
+  const status = ['open','resolved','all'].includes(request.status) ? request.status : 'open';
+  const severity = String(request.severity ?? '').trim();
+  const conditions = [];
+  const params = [];
+  if (status !== 'all') { conditions.push('issue.status=?'); params.push(status); }
+  if (severity) { conditions.push('issue.severity=?'); params.push(severity); }
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+  const from = `FROM data_quality_issues issue
+    LEFT JOIN workbook_import_batches batch ON batch.id=issue.batch_id
+    LEFT JOIN workbook_import_sheets sheet ON sheet.id=issue.sheet_id
+    LEFT JOIN workbook_import_rows source_row ON source_row.id=issue.row_id
+    LEFT JOIN workbook_import_promotions promotion ON promotion.row_id=issue.row_id
+    LEFT JOIN projects project ON promotion.entity_type='project' AND project.id=promotion.target_id
+    LEFT JOIN indicator_observations observation ON promotion.entity_type='indicator_observation' AND observation.id=promotion.target_id
+    LEFT JOIN entity_records record ON record.id=issue.record_id
+    LEFT JOIN data_field_definitions field ON field.id=issue.field_definition_id`;
+  const total = database.prepare('SELECT COUNT(*) AS count ' + from + ' ' + where).get(...params).count;
+  const rows = database.prepare(`SELECT issue.id,issue.batch_id,issue.sheet_id,issue.row_id,issue.record_id,issue.field_definition_id,
+      issue.severity,issue.issue_code,issue.message,issue.status,issue.resolution,issue.created_at,issue.resolved_at,
+      batch.file_name,sheet.name AS sheet_name,source_row.row_number,project.name AS project_name,
+      observation.id AS observation_id,record.entity_type,record.external_key,field.label_ar AS field_label,
+      promotion.entity_type AS promoted_entity_type,promotion.target_id
+    ${from} ${where} ORDER BY CASE issue.status WHEN 'open' THEN 0 ELSE 1 END,issue.id DESC LIMIT ? OFFSET ?`).all(...params,limit,offset);
+  return { rows,total,limit,offset,hasPrevious:offset>0,hasNext:offset+rows.length<total };
+}
+
+function resolveDataQualityIssue(database, issueId, resolution) {
+  const id = Number(issueId);
+  const note = String(resolution ?? '').trim();
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('معرّف ملاحظة الجودة غير صالح.');
+  if (!note || note.length > 1000) throw new Error('سبب التسوية إلزامي وبحد أقصى 1000 حرف.');
+  const now = new Date().toISOString();
+  return database.transaction(() => {
+    const issue = database.prepare('SELECT id,status FROM data_quality_issues WHERE id=?').get(id);
+    if (!issue) throw new Error('ملاحظة الجودة غير موجودة.');
+    if (issue.status !== 'open') throw new Error('ملاحظة الجودة ليست مفتوحة أو سبق تسويتها.');
+    database.prepare("UPDATE data_quality_issues SET status='resolved',resolution=?,resolved_at=? WHERE id=? AND status='open'")
+      .run(note,now,id);
+    database.prepare('INSERT INTO access_log (action,entity,entity_id,fields,detail,created_at) VALUES (?,?,?,?,?,?)')
+      .run('quality-resolved','data_quality_issues',String(id),'status,resolution','rationale-required',now);
+    return { id,status:'resolved',resolvedAt:now };
+  })();
+}
+
+function saveCanonicalProject(database, request = {}) {
+  const id = request.id == null || request.id === '' ? null : Number(request.id);
+  if (id !== null && (!Number.isSafeInteger(id) || id <= 0)) throw new Error('معرّف المشروع غير صالح.');
+  const name = String(request.name ?? '').trim();
+  const code = String(request.code ?? '').trim() || null;
+  const description = String(request.description ?? '').trim() || null;
+  const status = String(request.status ?? '').trim() || 'draft';
+  if (!name || name.length > 240) throw new Error('اسم المشروع إلزامي وبحد أقصى 240 حرفًا.');
+  if (code && code.length > 80) throw new Error('رمز المشروع يتجاوز 80 حرفًا.');
+  if (description && description.length > 4000) throw new Error('وصف المشروع يتجاوز 4000 حرف.');
+  if (status.length > 80) throw new Error('حالة المشروع تتجاوز 80 حرفًا.');
+  const estimated = parseProjectNumber(request.estimated_cost, 'التكلفة التقديرية');
+  const actual = parseProjectNumber(request.actual_cost, 'التكلفة الفعلية');
+  const start = parseProjectDate(request.start_date, 'تاريخ البداية');
+  const end = parseProjectDate(request.end_date, 'تاريخ النهاية');
+  const validationError = estimated.error ?? actual.error ?? start.error ?? end.error;
+  if (validationError) throw new Error(validationError);
+  if (start.value && end.value && start.value > end.value) throw new Error('تاريخ البداية يأتي بعد تاريخ النهاية.');
+  const currency = String(request.currency_code ?? '').trim().toUpperCase();
+  if (currency && !/^[A-Z]{3}$/.test(currency)) throw new Error('رمز العملة يجب أن يتكون من ثلاثة أحرف لاتينية مثل USD.');
+  if ((estimated.value !== null || actual.value !== null) && !currency) throw new Error('أدخل رمز عملة التكلفة؛ لا يفترض النظام عملة تلقائيًا.');
+  const geographicUnitId = request.geographic_unit_id == null || request.geographic_unit_id === '' ? null : Number(request.geographic_unit_id);
+  const sectorId = request.sector_id == null || request.sector_id === '' ? null : Number(request.sector_id);
+  if (geographicUnitId !== null && (!Number.isSafeInteger(geographicUnitId) || !database.prepare('SELECT id FROM geographic_units WHERE id=?').get(geographicUnitId))) throw new Error('المرجع الجغرافي المحدد غير موجود.');
+  if (sectorId !== null && (!Number.isSafeInteger(sectorId) || !database.prepare('SELECT id FROM sectors WHERE id=? AND active=1').get(sectorId))) throw new Error('القطاع المحدد غير موجود أو غير نشط.');
+  const now = new Date().toISOString();
+  return database.transaction(() => {
+    const previous = id ? database.prepare('SELECT * FROM projects WHERE id=?').get(id) : null;
+    if (id && !previous) throw new Error('المشروع المطلوب غير موجود.');
+    if (code) {
+      const duplicate = database.prepare('SELECT id FROM projects WHERE code=? AND id<>coalesce(?,0)').get(code, id);
+      if (duplicate) throw new Error('رمز المشروع مستخدم في سجل آخر.');
+    }
+    const source = database.prepare("INSERT INTO data_sources (source_type,document_title,received_at,notes) VALUES ('manual','إدخال يدوي',?,?)")
+      .run(now, id ? 'تعديل يدوي للمشروع #' + id : 'إنشاء يدوي لمشروع');
+    const sourceId = Number(source.lastInsertRowid);
+    const values = [code,name,description,geographicUnitId,sectorId,status,estimated.value,actual.value,currency || null,start.value,end.value,sourceId,now];
+    let projectId = id;
+    if (previous) {
+      database.prepare('INSERT INTO project_versions (project_id,action,payload_json,source_id,created_at) VALUES (?,?,?,?,?)')
+        .run(id,'manual-update',json(previous),sourceId,now);
+      database.prepare('UPDATE projects SET code=?,name=?,description=?,geographic_unit_id=?,sector_id=?,status=?,estimated_cost=?,actual_cost=?,currency_code=?,start_date=?,end_date=?,source_id=?,updated_at=? WHERE id=?')
+        .run(...values,id);
+    } else {
+      const created = database.prepare('INSERT INTO projects (code,name,description,geographic_unit_id,sector_id,status,estimated_cost,actual_cost,currency_code,start_date,end_date,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(...values.slice(0,12),now,now);
+      projectId = Number(created.lastInsertRowid);
+    }
+    const current = database.prepare('SELECT * FROM projects WHERE id=?').get(projectId);
+    if (!previous) database.prepare('INSERT INTO project_versions (project_id,action,payload_json,source_id,created_at) VALUES (?,?,?,?,?)')
+      .run(projectId,'manual-create',json(current),sourceId,now);
+    database.prepare('INSERT INTO access_log (action,entity,entity_id,fields,detail,created_at) VALUES (?,?,?,?,?,?)')
+      .run(previous ? 'manual-update' : 'manual-create','projects',String(projectId),String(values.length),'source=' + sourceId,now);
+    return { id: projectId, action: previous ? 'updated' : 'created', sourceId, updatedAt: now };
+  })();
+}
+
+function resolveProjectQualityIssue(database, projectId, issueId, resolution) {
+  const project = Number(projectId);
+  const issue = Number(issueId);
+  const note = String(resolution ?? '').trim();
+  if (!Number.isSafeInteger(project) || project <= 0 || !Number.isSafeInteger(issue) || issue <= 0) throw new Error('معرّف المشروع أو الملاحظة غير صالح.');
+  if (!note || note.length > 1000) throw new Error('سبب التسوية إلزامي وبحد أقصى 1000 حرف.');
+  const now = new Date().toISOString();
+  return database.transaction(() => {
+    const record = database.prepare(`
+      SELECT issue.id,issue.status FROM data_quality_issues issue
+      JOIN workbook_import_promotions promotion ON promotion.row_id=issue.row_id
+      WHERE issue.id=? AND promotion.entity_type='project' AND promotion.target_id=?
+    `).get(issue,project);
+    if (!record) throw new Error('ملاحظة الجودة لا ترتبط بهذا المشروع.');
+    if (record.status !== 'open') throw new Error('ملاحظة الجودة ليست مفتوحة أو سبق تسويتها.');
+    database.prepare("UPDATE data_quality_issues SET status='resolved',resolution=?,resolved_at=? WHERE id=? AND status='open'")
+      .run(note,now,issue);
+    database.prepare('INSERT INTO access_log (action,entity,entity_id,fields,detail,created_at) VALUES (?,?,?,?,?,?)')
+      .run('quality-resolved','data_quality_issues',String(issue),'status,resolution','project=' + project,now);
+    return { projectId: project, issueId: issue, status: 'resolved', resolvedAt: now };
+  })();
+}
+
+function addProjectFunding(database, projectId, request = {}) {
+  const id = Number(projectId);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('معرّف المشروع غير صالح.');
+  const partner = String(request.partner_name ?? '').trim();
+  if (!partner || partner.length > 240) throw new Error('اسم جهة التمويل إلزامي وبحد أقصى 240 حرفًا.');
+  const amount = parseProjectNumber(request.amount, 'مبلغ التمويل');
+  const date = parseProjectDate(request.funding_date, 'تاريخ التمويل');
+  if (amount.error || date.error) throw new Error(amount.error ?? date.error);
+  const currency = String(request.currency_code ?? '').trim().toUpperCase();
+  if (currency && !/^[A-Z]{3}$/.test(currency)) throw new Error('رمز العملة يجب أن يتكون من ثلاثة أحرف لاتينية مثل USD.');
+  if (amount.value !== null && !currency) throw new Error('أدخل رمز عملة مبلغ التمويل.');
+  const now = new Date().toISOString();
+  return database.transaction(() => {
+    const project = database.prepare('SELECT * FROM projects WHERE id=?').get(id);
+    if (!project) throw new Error('المشروع المطلوب غير موجود.');
+    const fundingBefore = database.prepare('SELECT * FROM project_funding WHERE project_id=? ORDER BY id').all(id);
+    const source = database.prepare("INSERT INTO data_sources (source_type,document_title,file_name,mime_type,received_at,notes) VALUES ('manual-funding',?,?,?,?,?)")
+      .run(partner, null, null, now, 'إضافة تمويل للمشروع #' + id);
+    const sourceId = Number(source.lastInsertRowid);
+    database.prepare('INSERT INTO project_versions (project_id,action,payload_json,source_id,created_at) VALUES (?,?,?,?,?)')
+      .run(id,'funding-added',json({ project, funding: fundingBefore }),sourceId,now);
+    const inserted = database.prepare('INSERT INTO project_funding (project_id,partner_name,amount,currency_code,funding_date,source_id,created_at) VALUES (?,?,?,?,?,?,?)')
+      .run(id,partner,amount.value,currency || null,date.value,sourceId,now);
+    database.prepare('UPDATE projects SET updated_at=?,source_id=? WHERE id=?').run(now,sourceId,id);
+    database.prepare('INSERT INTO access_log (action,entity,entity_id,fields,detail,created_at) VALUES (?,?,?,?,?,?)')
+      .run('funding-added','projects',String(id),'partner_name,amount,currency_code,funding_date','source=' + sourceId,now);
+    return { id: Number(inserted.lastInsertRowid), sourceId, projectId: id, createdAt: now };
+  })();
+}
+
+function addProjectAttachment(database, projectId, request = {}) {
+  const id = Number(projectId);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('معرّف المشروع غير صالح.');
+  const content = request.content;
+  if (!Buffer.isBuffer(content) || content.length === 0 || content.length > LIMITS.mediaItemBytes) throw new Error('حجم المرفق غير صالح أو يتجاوز الحد الآمن (20 ميغابايت).');
+  const signatures = [
+    { extension: '.pdf', mimeType: 'application/pdf', valid: content.subarray(0, 5).toString('ascii') === '%PDF-' },
+    { extension: '.png', mimeType: 'image/png', valid: content.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) },
+    { extension: '.jpg', mimeType: 'image/jpeg', valid: content.subarray(0, 3).equals(Buffer.from([255,216,255])) },
+    { extension: '.webp', mimeType: 'image/webp', valid: content.subarray(0, 4).toString('ascii') === 'RIFF' && content.subarray(8, 12).toString('ascii') === 'WEBP' },
+  ];
+  const signature = signatures.find(item => item.valid);
+  if (!signature || (request.mimeType && request.mimeType !== signature.mimeType)) throw new Error('نوع المرفق غير مدعوم أو لا يطابق محتواه. الأنواع المقبولة PDF وPNG وJPEG وWebP.');
+  const originalName = String(request.originalName ?? '').split(/[\\/]/).pop().trim().slice(0, 240);
+  if (!originalName) throw new Error('اسم المرفق غير صالح.');
+  const hash = crypto.createHash('sha256').update(content).digest('hex');
+  const now = new Date().toISOString();
+  return database.transaction(() => {
+    const project = database.prepare('SELECT * FROM projects WHERE id=?').get(id);
+    if (!project) throw new Error('المشروع المطلوب غير موجود.');
+    if (database.prepare("SELECT id FROM managed_attachments WHERE entity_type='project' AND entity_id=? AND sha256=?").get(id,hash)) throw new Error('هذا المرفق مرتبط بالمشروع مسبقًا.');
+    const source = database.prepare("INSERT INTO data_sources (source_type,document_title,file_name,mime_type,content_sha256,file_size,received_at,notes) VALUES ('manual-attachment',?,?,?,?,?,?,?)")
+      .run(originalName,originalName,signature.mimeType,hash,content.length,now,'مرفق للمشروع #' + id);
+    const sourceId = Number(source.lastInsertRowid);
+    const fundingBefore = database.prepare('SELECT * FROM project_funding WHERE project_id=? ORDER BY id').all(id);
+    database.prepare('INSERT INTO project_versions (project_id,action,payload_json,source_id,created_at) VALUES (?,?,?,?,?)')
+      .run(id,'attachment-added',json({ project, funding: fundingBefore }),sourceId,now);
+    const result = database.prepare("INSERT INTO managed_attachments (entity_type,entity_id,source_id,original_name,mime_type,extension,size_bytes,sha256,content,classification,review_status,created_at) VALUES ('project',?,?,?,?,?,?,?,?,'unclassified','linked',?)")
+      .run(id,sourceId,originalName,signature.mimeType,signature.extension,content.length,hash,content,now);
+    database.prepare('UPDATE projects SET updated_at=?,source_id=? WHERE id=?').run(now,sourceId,id);
+    database.prepare('INSERT INTO access_log (action,entity,entity_id,fields,detail,created_at) VALUES (?,?,?,?,?,?)')
+      .run('attachment-added','projects',String(id),'attachment','sha256=' + hash,now);
+    return { id: Number(result.lastInsertRowid), projectId: id, originalName, mimeType: signature.mimeType, extension: signature.extension, sizeBytes: content.length, sha256: hash, sourceId, createdAt: now };
+  })();
+}
+
+function getProjectAttachment(database, projectId, attachmentId) {
+  const project = Number(projectId), attachment = Number(attachmentId);
+  if (!Number.isSafeInteger(project) || project <= 0 || !Number.isSafeInteger(attachment) || attachment <= 0) throw new Error('معرّف المشروع أو المرفق غير صالح.');
+  const row = database.prepare("SELECT id,original_name,mime_type,extension,size_bytes,sha256,content FROM managed_attachments WHERE id=? AND entity_type='project' AND entity_id=?")
+    .get(attachment,project);
+  if (!row) throw new Error('المرفق غير موجود لهذا المشروع.');
+  if (!Buffer.isBuffer(row.content) || row.content.length !== row.size_bytes) throw new Error('محتوى المرفق المحفوظ غير مكتمل.');
+  const digest = crypto.createHash('sha256').update(row.content).digest('hex');
+  if (digest !== row.sha256) throw new Error('بصمة المرفق المحفوظ لا تطابق محتواه.');
+  return row;
+}
+
 function listCanonicalProjects(database, request = {}) {
   const limit = Math.max(1, Math.min(100, Number(request.limit) || 30));
   const offset = Math.max(0, Math.min(1000000, Number(request.offset) || 0));
@@ -666,7 +1202,7 @@ function listCanonicalProjects(database, request = {}) {
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   const total = database.prepare('SELECT COUNT(*) AS count FROM projects p ' + where).get(...params).count;
   const rows = database.prepare(`
-    SELECT p.id,p.code,p.name,p.description,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
+    SELECT p.id,p.code,p.name,p.description,p.geographic_unit_id,p.sector_id,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
       p.start_date,p.end_date,p.created_at,p.updated_at,
       geo.name AS geographic_unit_name, geo.unit_type AS geographic_unit_type,
       sector.name_ar AS sector_name,
@@ -708,7 +1244,7 @@ function getCanonicalProject(database, projectId) {
   const id = Number(projectId);
   if (!Number.isSafeInteger(id) || id <= 0) throw new Error('معرّف المشروع غير صالح.');
   const project = database.prepare(`
-    SELECT p.id,p.code,p.name,p.description,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
+    SELECT p.id,p.code,p.name,p.description,p.geographic_unit_id,p.sector_id,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
       p.start_date,p.end_date,p.created_at,p.updated_at,
       geo.name AS geographic_unit_name,geo.unit_type AS geographic_unit_type,
       sector.name_ar AS sector_name,source.file_name AS source_file
@@ -729,13 +1265,15 @@ function getCanonicalProject(database, projectId) {
     ORDER BY promotion.id DESC LIMIT 1
   `).get(id);
   const issues = database.prepare(`
-    SELECT issue.id,issue.severity,issue.issue_code,issue.message,issue.status,issue.created_at
+    SELECT issue.id,issue.severity,issue.issue_code,issue.message,issue.status,issue.resolution,issue.resolved_at,issue.created_at
     FROM data_quality_issues issue
     JOIN workbook_import_promotions promotion ON promotion.row_id = issue.row_id
     WHERE promotion.entity_type = 'project' AND promotion.target_id = ?
     ORDER BY issue.id DESC
   `).all(id);
-  return { project, funding, provenance: provenance ?? null, issues };
+  const versions = database.prepare('SELECT id,action,created_at,source_id FROM project_versions WHERE project_id=? ORDER BY id DESC LIMIT 50').all(id);
+  const attachments = database.prepare('SELECT id,original_name,mime_type,extension,size_bytes,sha256,classification,review_status,created_at FROM managed_attachments WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all('project',id);
+  return { project, funding, attachments, provenance: provenance ?? null, issues, versions };
 }
 
 function completeWorkbookImport(database, batchId, result = {}) {
@@ -774,4 +1312,4 @@ function listWorkbookImports(database, limit = 30) {
   return database.prepare("SELECT b.id,b.file_name,b.file_size,b.sha256,b.sheet_count,b.row_count,b.cell_count,b.media_count,b.media_stored_count,b.truncated,b.status,b.created_at,b.updated_at,(SELECT COUNT(*) FROM workbook_import_regions r WHERE r.batch_id=b.id) AS region_count,(SELECT COUNT(*) FROM workbook_import_rows w WHERE w.batch_id=b.id) AS stored_row_count FROM workbook_import_batches b ORDER BY b.id DESC LIMIT ?").all(bounded);
 }
 
-module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, migrateCanonicalData, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, listCanonicalProjects, getCanonicalProject, completeWorkbookImport, listWorkbookImports };
+module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, migrateCanonicalData, syncLegacyDirectorate, retireLegacyDirectorate, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, promoteIndicatorRegion, listCanonicalReferences, listIndicatorObservations, saveIndicatorObservation, listDataQualityIssues, resolveDataQualityIssue, saveCanonicalProject, resolveProjectQualityIssue, addProjectFunding, addProjectAttachment, getProjectAttachment, listCanonicalProjects, getCanonicalProject, completeWorkbookImport, listWorkbookImports };
