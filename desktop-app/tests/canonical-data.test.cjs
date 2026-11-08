@@ -68,7 +68,7 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
     districts.addImage(imageId, 'F2:G4');
 
     const projects = workbook.addWorksheet('المشاريع');
-    projects.getRow(1).values = [null, 'اسم المشروع', 'حالة التنفيذ', 'التكلفة'];
+    projects.getRow(1).values = [null, 'تكلفة المشروع', 'حالة المشروع', 'عدد المدارس'];
     projects.getRow(2).values = [null, 'تأهيل شبكة مياه', 'قيد التنفيذ', 25000000];
     projects.getRow(3).values = [null, 'إنشاء مدرسة', 'مقترح', 48000000];
 
