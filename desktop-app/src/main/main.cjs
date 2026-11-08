@@ -344,20 +344,28 @@ function registerHandlers() {
     return { success: true };
   });
 
-  async function createConsistentBackup(db) {
-    const directory = path.join(app.getPath('userData'), 'backups');
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    if (process.platform !== 'win32') fs.chmodSync(directory, 0o700);
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const target = path.join(directory, 'development-data.db.' + stamp + '-' + crypto.randomBytes(3).toString('hex') + '.bak');
-    await db.backup(target);
-    try {
-      if (process.platform !== 'win32') fs.chmodSync(target, 0o600);
-      copyStoreKey(getStoreKeyPath(), target + '.key');
-    } catch (error) {
-      try { fs.rmSync(target, { force: true }); } catch { /* best effort cleanup */ }
-      try { fs.rmSync(target + '.key', { force: true }); } catch { /* best effort cleanup */ }
-      throw new Error('فشل إنشاء نسخة احتياطية قابلة للاستعادة؛ حُذفت النسخة الجزئية: ' + error.message);
+  function createConsistentBackup(db) {
+    // SQLCipher's backup API rejects a plain target database created by the
+    // default backup helper. Flush WAL first, then copy the encrypted database,
+    // any remaining sidecars and its companion key as a single bundle. The
+    // synchronous copy runs on the main-process event loop, so no IPC write can
+    // interleave between checkpoint and file copies.
+    const checkpointRows = db.pragma('wal_checkpoint(TRUNCATE)');
+    const checkpoint = Array.isArray(checkpointRows) ? checkpointRows[0] : checkpointRows;
+    if (checkpoint && Number(checkpoint.busy ?? 0) > 0) {
+      throw new Error('تعذّر أخذ لقطة متسقة لقاعدة البيانات؛ توجد عملية قراءة تمنع إتمام WAL checkpoint. أعد المحاولة بعد انتهاء القراءة.');
+    }
+
+    const target = backupStore(getDatabasePath(), { keyPath: getStoreKeyPath() });
+    if (!target) throw new Error('تعذّر إنشاء النسخة الاحتياطية لأن ملف قاعدة البيانات غير موجود.');
+
+    const key = fs.readFileSync(target + '.key', 'utf8').trim();
+    const verdict = classifyStore(target, key);
+    if (!verdict.ok) {
+      for (const suffix of ['', '.key', '-wal', '-shm', '-journal']) {
+        try { fs.rmSync(target + suffix, { force: true }); } catch { /* best effort cleanup */ }
+      }
+      throw new Error('أُنشئت ملفات النسخة لكن فشل التحقق من قابليتها للفتح؛ أزيلت النسخة غير الموثوقة. السبب: ' + verdict.reason);
     }
     return target;
   }
