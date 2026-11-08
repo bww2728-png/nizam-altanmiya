@@ -59,24 +59,24 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
     const districts = workbook.addWorksheet('المديريات');
     districts.mergeCells('A1:C1');
     districts.getCell('A1').value = 'بيانات المديريات';
-    districts.getRow(2).values = [null, 'اسم المديرية', 'المحافظة', 'عدد السكان', 'نتيجة محسوبة'];
-    districts.getRow(3).values = [null, 'بني الحارث', 'أمانة العاصمة', 150000];
+    districts.getRow(2).values = ['اسم المديرية', 'المحافظة', 'عدد السكان', 'نتيجة محسوبة'];
+    districts.getRow(3).values = ['بني الحارث', 'أمانة العاصمة', 150000];
     districts.getCell('D3').value = { formula: 'C3*2', result: 300000 };
     districts.getCell('C3').note = 'المصدر: تقدير محلي';
-    districts.getRow(4).values = [null, 'همدان', 'صنعاء', 70000, 140000];
+    districts.getRow(4).values = ['همدان', 'صنعاء', 70000, 140000];
     districts.getRow(4).hidden = true;
     const imageId = workbook.addImage({ buffer: ONE_PIXEL_PNG, extension: 'png' });
     districts.addImage(imageId, 'F2:G4');
 
     const projects = workbook.addWorksheet('المشاريع');
-    projects.getRow(1).values = [null, 'تكلفة المشروع', 'حالة المشروع', 'عدد المدارس'];
-    projects.getRow(2).values = [null, 'تأهيل شبكة مياه', 'قيد التنفيذ', 25000000];
-    projects.getRow(3).values = [null, 'إنشاء مدرسة', 'مقترح', 48000000];
+    projects.getRow(1).values = ['تكلفة المشروع', 'حالة المشروع', 'عدد المدارس'];
+    projects.getRow(2).values = ['تأهيل شبكة مياه', 'قيد التنفيذ', 25000000];
+    projects.getRow(3).values = ['إنشاء مدرسة', 'مقترح', 48000000];
 
     const sources = workbook.addWorksheet('مصادر البيانات');
     sources.state = 'hidden';
-    sources.getRow(1).values = [null, 'الجهة', 'تاريخ البيانات'];
-    sources.getRow(2).values = [null, 'مكتب التخطيط', '2026'];
+    sources.getRow(1).values = ['الجهة', 'تاريخ البيانات'];
+    sources.getRow(2).values = ['مكتب التخطيط', '2026'];
 
     await workbook.xlsx.writeFile(filePath);
     const originalBytes = fs.readFileSync(filePath);
