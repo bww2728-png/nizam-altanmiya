@@ -4,6 +4,7 @@ import AppShell from './components/AppShell.jsx';
 import { ErrorBanner, Loading, ToastStack } from './components/ui.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import ImportPage from './pages/Import.jsx';
+import Projects from './pages/Projects.jsx';
 import Correction from './pages/Correction.jsx';
 import Indicators from './pages/Indicators.jsx';
 import Ranking from './pages/Ranking.jsx';
@@ -273,6 +274,8 @@ export default function App() {
 
   function renderPage() {
     switch (route) {
+      case 'projects':
+        return <Projects notify={notify} refreshKey={refreshKey} />;
       case 'import':
         return <ImportPage onNavigate={navigate} notify={notify} onApplied={refresh} />;
       case 'correction':
