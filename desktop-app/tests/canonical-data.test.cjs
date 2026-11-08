@@ -60,7 +60,8 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
     districts.mergeCells('A1:C1');
     districts.getCell('A1').value = 'بيانات المديريات';
     districts.getRow(2).values = [null, 'اسم المديرية', 'المحافظة', 'عدد السكان', 'نتيجة محسوبة'];
-    districts.getRow(3).values = [null, 'بني الحارث', 'أمانة العاصمة', 150000, { formula: 'C3*2', result: 300000 }];
+    districts.getRow(3).values = [null, 'بني الحارث', 'أمانة العاصمة', 150000];
+    districts.getCell('D3').value = { formula: 'C3*2', result: 300000 };
     districts.getCell('C3').note = 'المصدر: تقدير محلي';
     districts.getRow(4).values = [null, 'همدان', 'صنعاء', 70000, 140000];
     districts.getRow(4).hidden = true;
@@ -81,7 +82,10 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
     const originalBytes = fs.readFileSync(filePath);
     const expectedSha = crypto.createHash('sha256').update(originalBytes).digest('hex');
 
-    const staged = await canonical.stageWorkbook(db, filePath, workbook);
+    // Use the same read-after-write path as the production importer.
+    const parsedWorkbook = new ExcelJS.Workbook();
+    await parsedWorkbook.xlsx.readFile(filePath);
+    const staged = await canonical.stageWorkbook(db, filePath, parsedWorkbook);
     assert.equal(staged.status, 'staged');
     assert.equal(staged.sheetCount, 3);
     assert.equal(staged.mediaCount, 1);
