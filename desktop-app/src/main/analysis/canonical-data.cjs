@@ -476,7 +476,7 @@ function promoteProjectRegion(database, request = {}) {
   const batchId = Number(request.batchId), regionId = Number(request.regionId);
   const approvedRows = Array.isArray(request.approvedRows) ? request.approvedRows : [];
   if (!Number.isSafeInteger(batchId) || batchId <= 0 || !Number.isSafeInteger(regionId) || regionId <= 0) throw new Error('معرّف دفعة أو منطقة الاستيراد غير صالح.');
-  if (approvedRows.length < 1 || approvedRows.length > 1000) throw new Error('اختر صفًا واحدًا على الأقل، وبحد أقصى 1000 صف في العملية.');
+  if (approvedRows.length < 1 || approvedRows.length > 500) throw new Error('اختر صفًا واحدًا على الأقل، وبحد أقصى 500 صف في العملية.');
   const normalizedRows = approvedRows.map(Number);
   if (normalizedRows.some(row => !Number.isSafeInteger(row) || row <= 0) || new Set(normalizedRows).size !== normalizedRows.length) throw new Error('قائمة الصفوف المعتمدة تحتوي أرقامًا غير صالحة أو مكررة.');
 
@@ -495,6 +495,7 @@ function promoteProjectRegion(database, request = {}) {
   const region = database.prepare('SELECT r.*,s.name AS sheet_name,s.state AS sheet_state,b.source_id,b.file_name FROM workbook_import_regions r JOIN workbook_import_sheets s ON s.id = r.sheet_id JOIN workbook_import_batches b ON b.id = r.batch_id WHERE r.id = ? AND r.batch_id = ?')
     .get(regionId, batchId);
   if (!region) throw new Error('منطقة البيانات لا تنتمي إلى دفعة الاستيراد المحددة.');
+  if (region.candidate_type !== 'project-candidate') throw new Error('هذه المنطقة لم تُصنّف كجدول مشاريع؛ لا يمكن ترحيلها إلى كيان المشاريع دون تصنيف ومراجعة منفصلين.');
   if (region.sheet_state !== 'visible') throw new Error('لا يمكن اعتماد صفوف ورقة مخفية قبل إظهارها وفحصها يدويًا.');
   const headers = stagedHeaderCells(database, region.sheet_id, region.header_row);
   const headerColumns = new Set(headers.map(cell => cell.column));
@@ -542,7 +543,9 @@ function promoteProjectRegion(database, request = {}) {
     const fundingCurrency = (values.funding_currency ?? currency).trim().toUpperCase();
     if (currency && !/^[A-Z]{3}$/.test(currency)) { refuse('رمز العملة يجب أن يتكون من ثلاثة أحرف لاتينية مثل USD.'); continue; }
     if (fundingCurrency && !/^[A-Z]{3}$/.test(fundingCurrency)) { refuse('رمز عملة التمويل يجب أن يتكون من ثلاثة أحرف لاتينية مثل USD.'); continue; }
+    if ((estimated.value !== null || actual.value !== null) && !currency) { refuse('أدخل رمز عملة التكلفة؛ لا يفترض النظام عملة تلقائيًا.'); continue; }
     if (funding.value !== null && !(values.funding_partner ?? '').trim()) { refuse('تم إدخال مبلغ تمويل دون تحديد جهة التمويل.'); continue; }
+    if (funding.value !== null && !fundingCurrency) { refuse('أدخل عملة مبلغ التمويل؛ لا تُفترض العملة من البلد.'); continue; }
     const code = (values.project_code ?? '').trim() || null;
     const sourceLocation = region.sheet_name + '!row-' + row.row_number;
     if (database.prepare('SELECT id FROM workbook_import_promotions WHERE row_id = ?').get(row.id)) { refuse('هذا الصف سبق اعتماده في قاعدة البيانات.'); continue; }
