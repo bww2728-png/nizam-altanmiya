@@ -52,30 +52,89 @@ function loadOrCreateStoreKey(keyPath, options = {}) {
  * Backups are pruned to the newest `keep` files so the folder cannot grow without
  * bound; pruning only ever removes files this function created.
  */
+/**
+ * Copy a validated encryption key beside a backup using private file permissions.
+ * A database backup without this key is not a recoverable backup.
+ */
+function copyStoreKey(keyPath, targetPath) {
+  const stat = fs.lstatSync(keyPath);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error('ملف مفتاح التخزين ليس ملفًا عاديًا آمنًا.');
+  }
+  const key = fs.readFileSync(keyPath, 'utf8').trim();
+  if (!/^[0-9a-f]{64}$/i.test(key)) {
+    throw new Error('مفتاح التخزين غير صالح؛ أُوقفت عملية النسخ الاحتياطي لحماية قابلية الاستعادة.');
+  }
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(targetPath, key + '\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  if (process.platform !== 'win32') fs.chmodSync(targetPath, 0o600);
+  return targetPath;
+}
+
+/**
+ * Copy a complete encrypted store (database, sidecars and encryption key) into
+ * the backups folder. keyPath is mandatory: failure to copy the key or any
+ * existing sidecar aborts the backup and removes the partial files.
+ *
+ * Backups are pruned as complete bundles: database, key and SQLite sidecars.
+ */
 function backupStore(filePath, options = {}) {
   if (!fs.existsSync(filePath)) return null;
+  if (!options.keyPath) {
+    throw new Error('تعذّر إنشاء نسخة احتياطية آمنة: يجب توفير مفتاح التخزين store.key مع قاعدة البيانات.');
+  }
+  const keyPath = path.resolve(options.keyPath);
+  if (!fs.existsSync(keyPath)) {
+    throw new Error('تعذّر إنشاء نسخة قابلة للاستعادة: مفتاح التخزين store.key غير موجود.');
+  }
+
   const keep = Math.max(1, Number(options.keep) || 10);
   const directory = path.join(path.dirname(filePath), 'backups');
-  fs.mkdirSync(directory, { recursive: true });
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') fs.chmodSync(directory, 0o700);
+
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const base = path.join(directory, `${path.basename(filePath)}.${stamp}.bak`);
-  fs.copyFileSync(filePath, base);
-  for (const suffix of SIDECAR_SUFFIXES) {
-    if (fs.existsSync(`${filePath}${suffix}`)) {
-      try { fs.copyFileSync(`${filePath}${suffix}`, `${base}${suffix}`); } catch { /* optional */ }
+  const base = path.join(directory, path.basename(filePath) + '.' + stamp + '.bak');
+  const created = [];
+
+  try {
+    fs.copyFileSync(filePath, base);
+    created.push(base);
+    if (process.platform !== 'win32') fs.chmodSync(base, 0o600);
+
+    for (const suffix of SIDECAR_SUFFIXES) {
+      const source = filePath + suffix;
+      if (!fs.existsSync(source)) continue;
+      const target = base + suffix;
+      fs.copyFileSync(source, target);
+      created.push(target);
+      if (process.platform !== 'win32') fs.chmodSync(target, 0o600);
+    }
+
+    if (keyPath) {
+      const target = base + '.key';
+      copyStoreKey(keyPath, target);
+      created.push(target);
+    }
+  } catch (error) {
+    for (const target of created) {
+      try { fs.rmSync(target, { force: true }); } catch { /* best effort cleanup */ }
+    }
+    throw new Error('فشل إنشاء نسخة احتياطية مكتملة؛ أزيلت الملفات الجزئية: ' + error.message);
+  }
+
+  const prefix = path.basename(filePath) + '.';
+  const stale = fs.readdirSync(directory)
+    .filter((name) => name.startsWith(prefix) && name.endsWith('.bak'))
+    .sort()
+    .reverse()
+    .slice(keep);
+  for (const name of stale) {
+    const oldBase = path.join(directory, name);
+    for (const suffix of ['', '.key', ...SIDECAR_SUFFIXES]) {
+      try { fs.rmSync(oldBase + suffix, { force: true }); } catch { /* best effort */ }
     }
   }
-  try {
-    const prefix = `${path.basename(filePath)}.`;
-    const stale = fs.readdirSync(directory)
-      .filter((name) => name.startsWith(prefix) && name.endsWith('.bak'))
-      .sort()
-      .reverse()
-      .slice(keep);
-    for (const name of stale) {
-      try { fs.rmSync(path.join(directory, name), { force: true }); } catch { /* best effort */ }
-    }
-  } catch { /* pruning is best effort */ }
   return base;
 }
 
@@ -91,6 +150,104 @@ function listBackups(filePath) {
       .map((name) => path.join(directory, name));
   } catch {
     return [];
+  }
+}
+
+
+/**
+ * Restore one self-contained encrypted backup bundle (<file>.bak + <file>.bak.key).
+ * The source is validated before current files move. Same-directory staging and
+ * a rollback set prevent a failed swap from leaving a database without its key.
+ */
+function restoreBackupBundle(backupPath, databasePath, keyPath) {
+  const source = path.resolve(backupPath);
+  const target = path.resolve(databasePath);
+  const targetKey = path.resolve(keyPath);
+  if (source === target) throw new Error('لا يمكن استعادة قاعدة البيانات من المسار نفسه.');
+  const sourceKey = source + '.key';
+
+  const regularFile = (filePath, label) => {
+    let stat;
+    try { stat = fs.lstatSync(filePath); } catch {
+      throw new Error(label + ' غير موجود.');
+    }
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(label + ' يجب أن يكون ملفًا عاديًا وليس رابطًا رمزيًا.');
+  };
+  regularFile(source, 'ملف النسخة الاحتياطية');
+  regularFile(sourceKey, 'مفتاح النسخة الاحتياطية (.key)');
+  for (const suffix of SIDECAR_SUFFIXES) {
+    if (fs.existsSync(source + suffix)) regularFile(source + suffix, 'ملف جانبي للنسخة الاحتياطية');
+  }
+
+  const key = fs.readFileSync(sourceKey, 'utf8').trim();
+  if (!/^[0-9a-f]{64}$/i.test(key)) throw new Error('مفتاح النسخة الاحتياطية تالف أو غير صالح.');
+  const sourceVerdict = classifyStore(source, key);
+  if (!sourceVerdict.ok) {
+    throw new Error('تعذّر التحقق من النسخة الاحتياطية (' + sourceVerdict.reason + '); لم يتم تغيير قاعدة البيانات الحالية.');
+  }
+
+  const directory = path.dirname(target);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const token = process.pid + '-' + crypto.randomBytes(6).toString('hex');
+  const staged = target + '.restore-' + token + '.tmp';
+  const stagedKey = targetKey + '.restore-' + token + '.tmp';
+  const rollback = target + '.rollback-' + token;
+  const rollbackKey = targetKey + '.rollback-' + token;
+  const suffixes = SIDECAR_SUFFIXES;
+  const movedOld = [];
+  const installed = [];
+
+  const remove = (filePath) => {
+    try { fs.rmSync(filePath, { force: true }); } catch { /* best effort cleanup */ }
+  };
+  const moveIfPresent = (from, to, bucket) => {
+    if (!fs.existsSync(from)) return;
+    fs.renameSync(from, to);
+    bucket.push({ from, to });
+  };
+  const rollbackMoves = (bucket) => {
+    for (const item of [...bucket].reverse()) {
+      try {
+        if (fs.existsSync(item.to)) fs.renameSync(item.to, item.from);
+      } catch { /* retain the original location whenever the filesystem permits */ }
+    }
+  };
+
+  try {
+    fs.copyFileSync(source, staged, fs.constants.COPYFILE_EXCL);
+    if (process.platform !== 'win32') fs.chmodSync(staged, 0o600);
+    for (const suffix of suffixes) {
+      if (fs.existsSync(source + suffix)) {
+        fs.copyFileSync(source + suffix, staged + suffix, fs.constants.COPYFILE_EXCL);
+        if (process.platform !== 'win32') fs.chmodSync(staged + suffix, 0o600);
+      }
+    }
+    copyStoreKey(sourceKey, stagedKey);
+    if (!classifyStore(staged, key).ok) throw new Error('فشل التحقق من النسخة المرحلية بعد نسخها.');
+
+    // Preserve the live database, its WAL/journal files and key as one rollback set.
+    moveIfPresent(target, rollback, movedOld);
+    for (const suffix of suffixes) moveIfPresent(target + suffix, rollback + suffix, movedOld);
+    moveIfPresent(targetKey, rollbackKey, movedOld);
+
+    moveIfPresent(staged, target, installed);
+    for (const suffix of suffixes) moveIfPresent(staged + suffix, target + suffix, installed);
+    moveIfPresent(stagedKey, targetKey, installed);
+
+    const installedVerdict = classifyStore(target, key);
+    if (!installedVerdict.ok) throw new Error('تعذّر التحقق من قاعدة البيانات بعد الاستعادة.');
+
+    // The caller creates a recoverable safety backup before invoking this function.
+    for (const item of movedOld) remove(item.to);
+    return { restoredPath: target, keyPath: targetKey, backupPath: source };
+  } catch (error) {
+    for (const item of [...installed].reverse()) remove(item.to);
+    rollbackMoves(movedOld);
+    throw new Error('فشلت الاستعادة وأُعيدت ملفات قاعدة البيانات السابقة إن أمكن: ' + error.message);
+  } finally {
+    remove(staged);
+    remove(stagedKey);
+    for (const suffix of suffixes) remove(staged + suffix);
   }
 }
 
@@ -265,6 +422,8 @@ module.exports = {
   canOpenWithKey,
   classifyStore,
   backupStore,
+  copyStoreKey,
+  restoreBackupBundle,
   listBackups,
   findLegacyBackups,
   quarantineLegacyDatabase,

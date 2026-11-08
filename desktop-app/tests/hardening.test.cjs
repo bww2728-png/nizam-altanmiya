@@ -18,10 +18,11 @@ const test = require('node:test');
 const Database = require('better-sqlite3-multiple-ciphers');
 
 const { migrate, DIRECTORATE_COLUMN_MIGRATIONS } = require('../src/main/analysis/store-schema.cjs');
-const { openEncryptedStore } = require('../src/main/store.cjs');
+const { openEncryptedStore, backupStore, copyStoreKey, restoreBackupBundle, classifyStore, listBackups } = require('../src/main/store.cjs');
 const persist = require('../src/main/analysis/persist.cjs');
 const security = require('../src/main/security.cjs');
 const { serializeAnalysis } = require('../src/main/analysis/serialize.cjs');
+
 
 function openTestDatabase() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-hardening-'));
@@ -174,3 +175,128 @@ test('compact serialization drops per-row values but keeps the analysis usable',
   const full = serializeAnalysis(analysis);
   assert.equal(full.rows[0].values.population, 43739);
 });
+
+test('an encrypted-store backup includes its matching key and sidecars as one recoverable bundle', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-backup-bundle-'));
+  try {
+    const databasePath = path.join(directory, 'development-data.db');
+    const keyPath = path.join(directory, 'store.key');
+    const key = 'a'.repeat(64);
+    fs.writeFileSync(databasePath, 'encrypted-database-bytes');
+    fs.writeFileSync(keyPath, key, { mode: 0o600 });
+    fs.writeFileSync(databasePath + '-wal', 'wal-bytes');
+    fs.writeFileSync(databasePath + '-shm', 'shm-bytes');
+
+    const backup = backupStore(databasePath, { keyPath });
+    assert.ok(backup);
+    assert.equal(fs.readFileSync(backup, 'utf8'), 'encrypted-database-bytes');
+    assert.equal(fs.readFileSync(backup + '.key', 'utf8').trim(), key);
+    assert.equal(fs.readFileSync(backup + '-wal', 'utf8'), 'wal-bytes');
+    assert.equal(fs.readFileSync(backup + '-shm', 'utf8'), 'shm-bytes');
+    assert.deepEqual(listBackups(databasePath), [backup]);
+
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(backup).mode & 0o077, 0);
+      assert.equal(fs.statSync(backup + '.key').mode & 0o077, 0);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a missing or malformed encryption key prevents creation of a misleading database-only backup', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-backup-invalid-key-'));
+  try {
+    const databasePath = path.join(directory, 'development-data.db');
+    const keyPath = path.join(directory, 'store.key');
+    fs.writeFileSync(databasePath, 'encrypted-database-bytes');
+    assert.throws(() => backupStore(databasePath), /يجب توفير مفتاح التخزين/);
+    assert.throws(() => backupStore(databasePath, { keyPath }), /store.key غير موجود/);
+    assert.equal(fs.existsSync(path.join(directory, 'backups')), false);
+
+    fs.writeFileSync(keyPath, 'not-a-valid-key');
+    assert.throws(() => backupStore(databasePath, { keyPath }), /مفتاح التخزين غير صالح/);
+    assert.equal(listBackups(databasePath).length, 0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('copyStoreKey writes only validated key material with private permissions', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-copy-key-'));
+  try {
+    const keyPath = path.join(directory, 'store.key');
+    const targetPath = path.join(directory, 'backup.key');
+    fs.writeFileSync(keyPath, 'b'.repeat(64));
+    copyStoreKey(keyPath, targetPath);
+    assert.equal(fs.readFileSync(targetPath, 'utf8').trim(), 'b'.repeat(64));
+    if (process.platform !== 'win32') assert.equal(fs.statSync(targetPath).mode & 0o077, 0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('restore swaps an encrypted database and its matching key as one verified bundle', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-restore-bundle-'));
+  const livePath = path.join(directory, 'development-data.db');
+  const liveKeyPath = path.join(directory, 'store.key');
+  const backupPath = path.join(directory, 'development-data.db.2026-11-08.bak');
+  const liveKey = 'b'.repeat(64);
+  const backupKey = 'a'.repeat(64);
+  try {
+    const live = openEncryptedStore(livePath, liveKey);
+    live.exec("CREATE TABLE restore_marker (value TEXT NOT NULL); INSERT INTO restore_marker VALUES ('live-before-restore')");
+    live.close();
+    fs.writeFileSync(liveKeyPath, liveKey, { mode: 0o600 });
+
+    const backup = openEncryptedStore(backupPath, backupKey);
+    backup.exec("CREATE TABLE restore_marker (value TEXT NOT NULL); INSERT INTO restore_marker VALUES ('from-backup')");
+    backup.close();
+    const sourceKeyPath = path.join(directory, 'source.key');
+    fs.writeFileSync(sourceKeyPath, backupKey, { mode: 0o600 });
+    copyStoreKey(sourceKeyPath, backupPath + '.key');
+
+    const restored = restoreBackupBundle(backupPath, livePath, liveKeyPath);
+    assert.equal(restored.restoredPath, livePath);
+    assert.equal(fs.readFileSync(liveKeyPath, 'utf8').trim(), backupKey);
+    assert.equal(classifyStore(livePath, backupKey).ok, true);
+    const opened = openEncryptedStore(livePath, backupKey);
+    try {
+      assert.equal(opened.prepare('SELECT value FROM restore_marker').get().value, 'from-backup');
+    } finally {
+      opened.close();
+    }
+    assert.equal(fs.readdirSync(directory).some((name) => name.includes('.rollback-')), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('invalid restore bundle is rejected before changing the live encrypted database', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-restore-invalid-'));
+  const livePath = path.join(directory, 'development-data.db');
+  const liveKeyPath = path.join(directory, 'store.key');
+  const backupPath = path.join(directory, 'bad-backup.bak');
+  const liveKey = 'c'.repeat(64);
+  try {
+    const live = openEncryptedStore(livePath, liveKey);
+    live.exec("CREATE TABLE restore_marker (value TEXT NOT NULL); INSERT INTO restore_marker VALUES ('preserve-me')");
+    live.close();
+    fs.writeFileSync(liveKeyPath, liveKey, { mode: 0o600 });
+    fs.writeFileSync(backupPath, 'not-a-sqlcipher-database');
+    fs.writeFileSync(backupPath + '.key', 'd'.repeat(64), { mode: 0o600 });
+
+    assert.throws(() => restoreBackupBundle(backupPath, livePath, liveKeyPath), /تعذّر التحقق من النسخة الاحتياطية/);
+    assert.equal(fs.readFileSync(liveKeyPath, 'utf8').trim(), liveKey);
+    const opened = openEncryptedStore(livePath, liveKey);
+    try {
+      assert.equal(opened.prepare('SELECT value FROM restore_marker').get().value, 'preserve-me');
+    } finally {
+      opened.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+

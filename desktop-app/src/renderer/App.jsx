@@ -4,6 +4,7 @@ import AppShell from './components/AppShell.jsx';
 import { ErrorBanner, Loading, ToastStack } from './components/ui.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import ImportPage from './pages/Import.jsx';
+import Projects from './pages/Projects.jsx';
 import Correction from './pages/Correction.jsx';
 import Indicators from './pages/Indicators.jsx';
 import Ranking from './pages/Ranking.jsx';
@@ -23,7 +24,7 @@ import { cx, errText } from './lib/format.js';
 const PAGES_NEEDING_CATALOGUE = new Set(['correction', 'database', 'ranking', 'card']);
 
 /** Auto-update states that deserve a banner; idle/checking/not-available stay silent. */
-const UPDATE_BANNER_STATES = new Set(['available', 'downloading', 'downloaded', 'error']);
+const UPDATE_BANNER_STATES = new Set(['available', 'downloading', 'downloaded', 'error', 'offline-only']);
 
 /** Whole percent, clamped, or null when the main process has not reported one. */
 function updatePercent(value) {
@@ -143,6 +144,27 @@ export default function App() {
     }
   }, [notify]);
 
+  const restore = useCallback(async () => {
+    const confirmed = window.confirm('ستُستبدل قاعدة البيانات الحالية بالنسخة المختارة. سيُنشئ النظام نسخة أمان من البيانات الحالية أولًا. هل تريد المتابعة؟');
+    if (!confirmed) return;
+    try {
+      const result = await window.localApp.restoreDatabase();
+      if (result?.canceled) return;
+      setStatus((current) => ({ ...current, unlocked: true, hasDatabase: true, hasKey: true }));
+      setCatalogue(null);
+      setRefreshKey((key) => key + 1);
+      await loadCatalogue();
+      notify({ tone: 'ok', message: 'تمت استعادة النسخة الاحتياطية والتحقق من قاعدة البيانات. نسخة الأمان: ' + (result.safetyBackup ?? 'غير مطلوبة') });
+    } catch (cause) {
+      notify({ tone: 'bad', message: errText(cause) || 'تعذرت استعادة النسخة الاحتياطية؛ لم يُفترض فقد البيانات الحالية.' });
+      try {
+        const next = await window.localApp.status();
+        setStatus(next);
+        if (next.unlocked) await loadCatalogue();
+      } catch { /* keep the original restore error visible */ }
+    }
+  }, [loadCatalogue, notify]);
+
   const toggleProfile = useCallback(async () => {
     try {
       const currentProfile = status?.accessProfile ?? 'owner';
@@ -239,6 +261,7 @@ export default function App() {
         onToggleProfile={toggleProfile}
         onLock={lock}
         onBackup={backup}
+        onRestore={restore}
         onRefresh={refresh}
         refreshing={refreshing}
         generatedAt={generatedAt}
@@ -251,6 +274,8 @@ export default function App() {
 
   function renderPage() {
     switch (route) {
+      case 'projects':
+        return <Projects notify={notify} refreshKey={refreshKey} />;
       case 'import':
         return <ImportPage onNavigate={navigate} notify={notify} onApplied={refresh} />;
       case 'correction':
@@ -292,7 +317,9 @@ function UpdateBanner({ status, onDismiss }) {
 
   let tone = 'info';
   let message = 'يتوفر تحديث جديد.';
-  if (state === 'available') {
+  if (state === 'offline-only') {
+    message = 'يعمل النظام محليًا دون اتصال بالإنترنت. تُثبَّت التحديثات من حزمة محلية معتمدة.';
+  } else if (state === 'available') {
     message = version
       ? `يتوفر إصدار جديد (${version}) — جارٍ التنزيل تلقائيًا...`
       : 'يتوفر إصدار جديد — جارٍ التنزيل تلقائيًا...';

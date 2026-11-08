@@ -19,13 +19,30 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 
 const ROOT = path.join(__dirname, '..');
 const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'template-v3.3.xlsx');
 const EVIDENCE = path.join(ROOT, '..', 'نتائج-الفحص');
 const USER_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-e2e-'));
 const SAMPLE = path.join(USER_DATA, 'sample-20.xlsx');
+const { getOfflineNetworkAudit } = require(path.join(ROOT, 'src', 'main', 'offline-policy.cjs'));
+const interactionTrace = [];
+const rendererRuntimeErrors = [];
+
+app.on('browser-window-created', (_event, browserWindow) => {
+  browserWindow.webContents.on('console-message', (_consoleEvent, level, message, line, sourceId) => {
+    if (level >= 2) {
+      rendererRuntimeErrors.push({ type: 'console-error', level, message, line, sourceId });
+    }
+  });
+  browserWindow.webContents.on('render-process-gone', (_goneEvent, details) => {
+    rendererRuntimeErrors.push({ type: 'render-process-gone', ...details });
+  });
+  browserWindow.webContents.on('did-fail-load', (_loadEvent, errorCode, errorDescription, validatedURL) => {
+    rendererRuntimeErrors.push({ type: 'did-fail-load', errorCode, errorDescription, validatedURL });
+  });
+});
 
 app.setPath('userData', USER_DATA);
 require(path.join(ROOT, 'src', 'main', 'main.cjs'));
@@ -58,14 +75,88 @@ async function waitFor(window, expression, timeout = 25000) {
   throw new Error(`timeout waiting for: ${expression}`);
 }
 
-async function clickByText(window, selector, text) {
-  return window.webContents.executeJavaScript(`(() => {
+async function pointerClick(window, selector, text = null, label = '') {
+  const match = text === null
+    ? 'nodes[0]'
+    : `nodes.find((node) => (node.textContent || '').includes(${JSON.stringify(text)}))`;
+  const target = await window.webContents.executeJavaScript(`(() => {
     const nodes = [...document.querySelectorAll(${JSON.stringify(selector)})];
-    const target = nodes.find((node) => (node.textContent || '').includes(${JSON.stringify(text)}));
-    if (!target) return false;
-    target.click();
-    return true;
+    const target = ${match};
+    if (!target) return null;
+    const before = target.getBoundingClientRect();
+    const beforeRect = { left: before.left, top: before.top, right: before.right, bottom: before.bottom };
+    // A real operator can only click a control after scrolling its container
+    // into view. scrollIntoView moves the nearest scrollable ancestors (e.g. the
+    // wide RTL table viewport), then the actual pointer event is hit-tested.
+    target.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+    const rect = target.getBoundingClientRect();
+    const x = Math.round(rect.left + rect.width / 2);
+    const y = Math.round(rect.top + rect.height / 2);
+    const hit = document.elementFromPoint(x, y);
+    const viewportVisible = rect.right > 0 && rect.bottom > 0
+      && rect.left < window.innerWidth && rect.top < window.innerHeight;
+    return {
+      ok: rect.width > 0 && rect.height > 0 && viewportVisible && Boolean(hit && (hit === target || target.contains(hit))),
+      x, y, width: rect.width, height: rect.height,
+      beforeRect,
+      afterRect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+      scrolledIntoView: beforeRect.left !== rect.left || beforeRect.top !== rect.top,
+      tag: target.tagName,
+      accessibleName: target.getAttribute('aria-label') || target.getAttribute('title') || (target.innerText || target.textContent || '').trim().slice(0, 100),
+      hitTag: hit?.tagName ?? null,
+      hitText: (hit?.innerText || hit?.textContent || '').trim().slice(0, 100)
+    };
   })()`);
+
+  const trace = {
+    action: 'pointer-click',
+    selector,
+    label: label || text || selector,
+    ...(target ?? {}),
+    at: new Date().toISOString(),
+  };
+  if (!target?.ok) {
+    interactionTrace.push({ ...trace, ok: false, reason: 'target-not-visible-or-pointer-intercepted' });
+    return false;
+  }
+
+  const evidenceDir = path.join(EVIDENCE, 'click-traces');
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  const sequence = String(interactionTrace.length + 1).padStart(3, '0');
+  const beforeFile = path.join('click-traces', `${sequence}-before.png`);
+  const afterFile = path.join('click-traces', `${sequence}-after.png`);
+  const beforeText = await bodyText(window);
+  const beforeImage = await window.webContents.capturePage();
+  fs.writeFileSync(path.join(EVIDENCE, beforeFile), beforeImage.toPNG());
+
+  // Send actual mouse movement/down/up through Electron. Synthetic DOM event
+  // dispatch bypasses hit testing and cannot prove physical clickability.
+  window.webContents.sendInputEvent({ type: 'mouseMove', x: target.x, y: target.y });
+  window.webContents.sendInputEvent({ type: 'mouseDown', x: target.x, y: target.y, button: 'left', clickCount: 1 });
+  window.webContents.sendInputEvent({ type: 'mouseUp', x: target.x, y: target.y, button: 'left', clickCount: 1 });
+  await sleep(180);
+
+  const afterText = await bodyText(window);
+  const afterImage = await window.webContents.capturePage();
+  fs.writeFileSync(path.join(EVIDENCE, afterFile), afterImage.toPNG());
+  interactionTrace.push({
+    ...trace,
+    ok: true,
+    beforeFile,
+    afterFile,
+    beforeText: beforeText.slice(0, 240),
+    afterText: afterText.slice(0, 240),
+    changedText: beforeText !== afterText,
+  });
+  return true;
+}
+
+async function clickByText(window, selector, text) {
+  return pointerClick(window, selector, text, text);
+}
+
+async function clickBySelector(window, selector, label) {
+  return pointerClick(window, selector, null, label);
 }
 
 async function text(window, selector) {
@@ -126,6 +217,20 @@ async function buildSampleWorkbook(targetPath) {
     target.getCell(2).value = governorates[index % governorates.length];
   }
 
+  // Include a real non-directorate project table so the staged review + mapping +
+  // explicit promotion path is exercised through the operator-facing UI.
+  const projects = workbook.addWorksheet('مشاريع اختبار');
+  projects.getRow(1).values = [
+    'اسم المشروع', 'رمز المشروع', 'التكلفة التقديرية', 'رمز العملة',
+    'تاريخ البداية', 'تاريخ النهاية', 'جهة التمويل', 'مبلغ التمويل',
+    'المحافظة', 'المديرية', 'القطاع', 'عملة التمويل',
+  ];
+  projects.getRow(2).values = [
+    'مشروع اختبار E2E', 'E2E-001', '1000', 'YER',
+    '2026-01-01', '2026-12-31', 'UNDP', '100',
+    'صنعاء', 'مديرية اختبار 1', 'المياه', 'USD',
+  ];
+
   await workbook.xlsx.writeFile(targetPath);
   return { headerRow, rows: 20, dataStart: dataRows[0] };
 }
@@ -149,6 +254,7 @@ const SEVERITY = {
   nav: 'major',
   pages: 'major',
   security: 'major',
+  accessibility: 'major',
 };
 
 app.whenReady().then(async () => {
@@ -170,13 +276,23 @@ app.whenReady().then(async () => {
     })()`));
     await screenshot(window, '1-واجهة-الدخول.png');
 
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'TAB' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'TAB' });
+    await sleep(100);
+    const keyboardFocus = await window.webContents.executeJavaScript(`(() => ({
+      tag: document.activeElement?.tagName ?? null,
+      text: (document.activeElement?.innerText || document.activeElement?.textContent || '').trim().slice(0, 100),
+      focusVisible: Boolean(document.activeElement?.matches(':focus-visible'))
+    }))()`);
+    check('accessibility', 'زر الدخول يصل إليه التركيز عبر لوحة المفاتيح', keyboardFocus.tag === 'BUTTON' && keyboardFocus.focusVisible, JSON.stringify(keyboardFocus));
+
     const entered = await clickByText(window, '.welcome-card button', 'الدخول إلى مساحة العمل')
       || await clickByText(window, '.welcome-card button', 'إنشاء قاعدة البيانات والدخول');
     check('entry', 'زر الدخول يعمل', entered);
     await waitFor(window, `Boolean(document.querySelector('.app-shell'))`);
 
     const labels = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.side-nav .nav-item span')].map((node) => node.textContent)`);
-    const expectedNav = ['اللوحة التفاعلية', 'المؤشرات الـ 12', 'ترتيب الأولويات', 'الاستيراد الآلي', 'تصحيح البيانات', 'قاعدة البيانات الشاملة', 'بطاقة مديرية'];
+    const expectedNav = ['اللوحة التفاعلية', 'المؤشرات الـ 12', 'ترتيب الأولويات', 'الاستيراد الآلي', 'سجل المشاريع', 'تصحيح البيانات', 'قاعدة البيانات الشاملة', 'بطاقة مديرية'];
     check('nav', 'التنقل يعرض الشاشات السبع', expectedNav.every((label) => labels.includes(label)), labels.join(' · '));
     check('entry', 'قاعدة البيانات تُفتح وتصبح مشفّرة', await window.webContents.executeJavaScript(`window.localApp.status().then((s) => s.unlocked && s.hasKey)`));
 
@@ -205,15 +321,19 @@ app.whenReady().then(async () => {
     check('import', 'الخطة تعرض 20 صفًا وتُطبَّق في القاعدة المشفّرة', imported.planRows === 20 && imported.total === 20 && imported.created === 20, JSON.stringify(imported));
     check('import', 'لا صفوف مرفوضة أثناء التطبيق', imported.refused === 0, `refused=${imported.refused}`);
 
+    // Exercise backup + restore through the actual operator-facing control.
+    const restoreSource = await window.webContents.executeJavaScript('window.localApp.backupDatabase()');
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [restoreSource.filePath] });
+    await window.webContents.executeJavaScript('(() => { window.confirm = () => true; return true; })()');
+    const restoreClicked = await clickBySelector(window, '.topbar button[aria-label="استعادة نسخة احتياطية"]', 'استعادة النسخة الاحتياطية');
+    await waitFor(window, `document.body.innerText.includes('تمت استعادة النسخة الاحتياطية والتحقق من قاعدة البيانات')`, 30000);
+    check('security', 'استعادة النسخة الاحتياطية تعمل من واجهة المستخدم', restoreClicked && await window.webContents.executeJavaScript(`window.localApp.status().then((state) => state.unlocked && state.hasKey)`));
+    await screenshot(window, '9-بعد-استعادة-النسخة.png');
+
     // ---------- 3. Pages ----------
     await clickByText(window, '.side-nav .nav-item', 'اللوحة التفاعلية');
     await waitFor(window, `document.body.innerText.includes('نظرة شاملة')`, 30000);
-    const refreshed = await window.webContents.executeJavaScript(`(() => {
-      const button = [...document.querySelectorAll('.topbar .icon-button')].find((node) => (node.title || '').includes('تحديث'));
-      if (!button) return false;
-      button.click();
-      return true;
-    })()`);
+    const refreshed = await clickBySelector(window, '.topbar .icon-button[title*="تحديث"]', 'تحديث أرقام اللوحة');
     check('pages', 'زر التحديث يعيد قراءة الأرقام من القاعدة', refreshed);
     await waitFor(window, `document.body.innerText.includes('تغطية المؤشرات')`, 30000);
     await sleep(600);
@@ -252,12 +372,7 @@ app.whenReady().then(async () => {
     check('pages', 'قاعدة البيانات تعرض العشرين سجلًا', databaseText.includes('20 مديرية مخزّنة') && databaseRows === 20, `rows=${databaseRows}`);
     await screenshot(window, '5-قاعدة-البيانات.png');
 
-    const cardOpened = await window.webContents.executeJavaScript(`(() => {
-      const button = [...document.querySelectorAll('table.data tbody tr button')].find((node) => (node.textContent || '').includes('البطاقة'));
-      if (!button) return false;
-      button.click();
-      return true;
-    })()`);
+    const cardOpened = await clickByText(window, 'table.data tbody tr button', 'البطاقة');
     await waitFor(window, `Boolean(document.querySelector('.kv'))`, 30000);
     await sleep(400);
     const cardText = await bodyText(window);
@@ -273,27 +388,154 @@ app.whenReady().then(async () => {
     await screenshot(window, '7-تصحيح-البيانات.png');
 
     await clickByText(window, '.side-nav .nav-item', 'الاستيراد الآلي');
-    await waitFor(window, `document.body.innerText.includes('اختيار ملف القالب')`, 30000);
+    await waitFor(window, `document.body.innerText.includes('اختيار ملف Excel')`, 30000);
     await sleep(400);
     check('pages', 'شاشة الاستيراد تعرض الخطوات الثلاث', await window.webContents.executeJavaScript(`Boolean(document.querySelector('.stepper'))`));
     check('pages', 'شاشة الاستيراد تذكر الصيغ والقواعد', (await bodyText(window)).includes('xlsx'));
+
+    // Exercise the actual UI scan path. Native dialog is stubbed to a synthetic
+    // workbook so the operator-facing inventory is verified before any Apply.
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [SAMPLE] });
+    const scanClicked = await clickByText(window, '.btn.primary.sheen', 'اختيار ملف Excel');
+    await waitFor(window, `document.body.innerText.includes('فحص بنية ملف Excel')`, 60000);
+    await waitFor(window, `(() => {
+      const text = document.body.innerText;
+      return text.includes('فُحصت 9 ورقة') && !text.includes('جارٍ بناء خطة الاستيراد');
+    })()`, 30000);
+    const inventoryUi = await window.webContents.executeJavaScript(`(() => {
+      const card = [...document.querySelectorAll('.card')].find((item) =>
+        item.querySelector('.card-head h2')?.textContent.trim() === 'فحص بنية ملف Excel'
+      );
+      if (card) card.scrollIntoView({ behavior: 'instant', block: 'start' });
+      const rect = card?.getBoundingClientRect();
+      return {
+        present: Boolean(card),
+        rows: card?.querySelectorAll('table.data tbody tr').length ?? 0,
+        text: (card?.innerText || '').slice(0, 1400),
+        sheetNames: [...(card?.querySelectorAll('table.data tbody tr td:first-child') ?? [])].map((node) => node.textContent.trim()),
+        visible: Boolean(rect && rect.bottom > 0 && rect.top < window.innerHeight && rect.height > 0),
+        top: rect?.top ?? null,
+      };
+    })()`);
+    await sleep(250);
+    check(
+      'import',
+      'واجهة المراجعة تعرض فهرس الأوراق المرئي قبل اعتماد الاستيراد',
+      scanClicked && inventoryUi.present && inventoryUi.visible && inventoryUi.rows > 0 && inventoryUi.sheetNames.includes('قاعدة البيانات الشاملة'),
+      JSON.stringify(inventoryUi)
+    );
     await screenshot(window, '8-الاستيراد.png');
+    await screenshot(window, '14-فهرس-الأوراق.png');
+
+    // Exercise non-directorate review, explicit row selection and canonical
+    // project promotion with a real Electron pointer click.
+    const projectReviewDiagnostics = await window.webContents.executeJavaScript(`(async () => {
+      const batches = await window.localApp.importHistory({ limit: 5 });
+      const latest = batches[0];
+      if (!latest) return { batches: [], reason: 'no-import-batch' };
+      const inventory = await window.localApp.importRegions({ batchId: latest.id });
+      const projectRegions = (inventory.regions ?? []).filter(region => region.candidateType === 'project-candidate');
+      const previews = [];
+      for (const region of projectRegions) {
+        previews.push(await window.localApp.importRegionPreview({
+          batchId: latest.id, regionId: region.id, offset: 0, limit: 5,
+        }));
+      }
+      return {
+        latestBatchId: latest.id,
+        regions: (inventory.regions ?? []).map(region => ({
+          id: region.id, sheetName: region.sheetName, candidateType: region.candidateType,
+          headerRow: region.headerRow, totalRows: region.totalRows, headers: region.headers,
+        })),
+        projectRegionCount: projectRegions.length,
+        previewRows: previews.flatMap(preview => preview.rows ?? []).map(row => ({
+          rowNumber: row.rowNumber, cells: row.cells.map(cell => cell.text),
+        })),
+      };
+    })()`);
+    console.log('[E2E] Project review diagnostic: ' + JSON.stringify(projectReviewDiagnostics));
+    await waitFor(window, `document.body.innerText.includes('مناطق المشاريع المرشحة: 1') && document.body.innerText.includes('مشروع اختبار E2E')`, 30000)
+      .catch(error => { throw new Error(error.message + '; diagnostic=' + JSON.stringify(projectReviewDiagnostics)); });
+    const projectRowSelected = await clickByText(window, '[data-testid="project-row-label-2"] strong', 'صف 2');
+    const beforePromotion = await window.webContents.executeJavaScript(`(() => {
+      const card = [...document.querySelectorAll('.card')].find(item =>
+        item.innerText.includes('مراجعة الجداول الإضافية واعتماد المشاريع')
+      );
+      return {
+        checkboxChecked: document.querySelector('#project-row-2')?.checked ?? null,
+        selects: [...(card?.querySelectorAll('select') ?? [])].map(select => ({
+          value: select.value,
+          label: select.closest('label')?.innerText?.slice(0, 100) ?? '',
+        })),
+        buttons: [...(card?.querySelectorAll('button') ?? [])].map(button => ({
+          text: button.innerText.trim(),
+          disabled: button.disabled,
+        })),
+      };
+    })()`);
+    const promoteClicked = await clickBySelector(window, '#promote-projects', 'اعتماد المشاريع المحددة في قاعدة البيانات');
+    const promotionCompleted = await waitFor(
+      window,
+      `document.body.innerText.includes('نتيجة اعتماد المشاريع') && document.body.innerText.includes('أُضيفت: 1')`,
+      12000
+    ).then(() => true).catch(() => false);
+    const promotionBody = await bodyText(window);
+    check(
+      'import',
+      'جدول المشاريع يُربط ويُعتمد بعد اختيار الصف صراحةً',
+      projectRowSelected && beforePromotion.checkboxChecked && beforePromotion.selects.some(item => item.label.includes('اسم المشروع') && item.value === '1')
+        && promoteClicked && promotionCompleted,
+      JSON.stringify({
+        projectRowSelected,
+        rowClickTrace: interactionTrace.filter(item => item.label === 'صف 2').slice(-1)[0] ?? null,
+        beforePromotion,
+        promoteClicked,
+        promotionCompleted,
+        body: promotionBody.slice(-1800),
+      })
+    );
+    await screenshot(window, '15-اعتماد-المشاريع.png');
+
+    const projectListIpc = await window.webContents.executeJavaScript(
+      `window.localApp.canonicalProjects({ search: 'مشروع اختبار E2E', offset: 0, limit: 10 })`
+    );
+    console.log('[E2E] Project register IPC: ' + JSON.stringify(projectListIpc));
+    check(
+      'pages',
+      'استعلام سجل المشاريع يعيد المشروع المعتمد',
+      !projectListIpc.restricted && projectListIpc.rows?.some(row => row.code === 'E2E-001'),
+      JSON.stringify(projectListIpc).slice(0, 1200)
+    );
+    const projectNavClicked = await clickByText(window, '.side-nav .nav-item', 'سجل المشاريع');
+    const projectPageDiagnostics = await window.webContents.executeJavaScript(`(() => ({
+      activeNavigation: document.querySelector('.side-nav .nav-item.active')?.innerText ?? null,
+      projectTitlePresent: document.body.innerText.includes('سجل المشاريع المعتمدة'),
+      projectCodePresent: document.body.innerText.includes('E2E-001'),
+      pageText: document.body.innerText.slice(-1800),
+      rootHtml: document.querySelector('#root')?.innerHTML.slice(-2400) ?? null,
+      cards: [...document.querySelectorAll('.card')].map(card => card.innerText.slice(0, 100)),
+    }))()`);
+    console.log('[E2E] Project page navigation: ' + JSON.stringify({
+      projectNavClicked,
+      rendererRuntimeErrors: rendererRuntimeErrors.slice(-20),
+      ...projectPageDiagnostics,
+    }));
+    await waitFor(window, `document.body.innerText.includes('سجل المشاريع المعتمدة') && document.body.innerText.includes('مشروع اختبار E2E')`, 12000)
+      .catch(error => { throw new Error(error.message + '; projectPage=' + JSON.stringify(projectPageDiagnostics)); });
+    const projectList = await bodyText(window);
+    check('pages', 'سجل المشاريع يعرض المشروع المعتمد من ملف Excel', projectList.includes('مشروع اختبار E2E') && projectList.includes('E2E-001') && projectNavClicked);
+    const detailsOpened = await clickByText(window, 'table.data tbody tr button', 'التفاصيل');
+    await waitFor(window, `document.body.innerText.includes('مصدر البيانات') && document.body.innerText.includes('مشاريع اختبار')`, 30000);
+    check('pages', 'تفاصيل المشروع تعرض التمويل والمصدر وملاحظات الجودة', detailsOpened && (await bodyText(window)).includes('جهات التمويل'));
+    await screenshot(window, '16-سجل-المشاريع.png');
 
     // ---------- 4. Access profile ----------
-    const toggled = await window.webContents.executeJavaScript(`(() => {
-      const chip = document.querySelector('.topbar button.chip.clickable');
-      if (!chip) return false;
-      chip.click();
-      return true;
-    })()`);
+    const toggled = await clickBySelector(window, '.topbar button.chip.clickable', 'تبديل وضع الوصول');
     await sleep(700);
     const profile = await window.webContents.executeJavaScript(`window.localApp.status().then((s) => s.accessProfile)`);
     check('security', 'تبديل وضع الوصول يعمل ويُحفظ', toggled && profile === 'shared', `profile=${profile}`);
-    await window.webContents.executeJavaScript(`(() => {
-      const chip = document.querySelector('.topbar button.chip.clickable');
-      if (chip) chip.click();
-      return true;
-    })()`);
+    const restoredClick = await clickBySelector(window, '.topbar button.chip.clickable', 'العودة لوضع المالك');
+    check('security', 'زر العودة لوضع المالك استقبل نقرة فعلية', restoredClick);
     await sleep(500);
     const restored = await window.webContents.executeJavaScript(`window.localApp.status().then((s) => s.accessProfile)`);
     check('security', 'العودة إلى وضع المالك تعمل', restored === 'owner', `profile=${restored}`);
@@ -383,6 +625,24 @@ app.whenReady().then(async () => {
       writeGroup('5-فحص-الشاشات.json', 'pages');
       writeGroup('6-فحص-وضع-الوصول.json', 'security');
       writeGroup('7-فحص-التصدير.json', 'export');
+      writeGroup('13-فحص-الوصولية.json', 'accessibility');
+      const networkAudit = getOfflineNetworkAudit();
+      const networkAttemptCount = networkAudit.nodeAttempts.length
+        + networkAudit.electronAttempts.length
+        + networkAudit.rendererAttempts.length;
+      check(
+        'security',
+        'لا توجد محاولات اتصال شبكي من Node أو Electron أو Chromium',
+        networkAttemptCount === 0,
+        JSON.stringify(networkAudit)
+      );
+      fs.writeFileSync(path.join(EVIDENCE, '12-تتبع-التفاعلات.json'), JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        method: 'scrollIntoView on nearest scroll container, then Electron webContents.sendInputEvent with elementFromPoint hit-testing',
+        interactionCount: interactionTrace.length,
+        networkAudit,
+        interactions: interactionTrace,
+      }, null, 2), 'utf8');
 
       const failed = results.filter((item) => !item.ok);
       const defects = failed.map((item) => ({

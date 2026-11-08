@@ -1,0 +1,56 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const test = require('node:test');
+
+const root = path.join(__dirname, '..');
+const harness = fs.readFileSync(path.join(root, 'scripts/e2e-analysis.cjs'), 'utf8');
+const main = fs.readFileSync(path.join(root, 'src/main/main.cjs'), 'utf8');
+const offlinePolicy = fs.readFileSync(path.join(root, 'src/main/offline-policy.cjs'), 'utf8');
+
+test('Electron E2E drives real pointer input and checks the true hit target', () => {
+  assert.match(harness, /sendInputEvent\(\{ type: 'mouseMove'/);
+  assert.match(harness, /sendInputEvent\(\{ type: 'mouseDown'/);
+  assert.match(harness, /sendInputEvent\(\{ type: 'mouseUp'/);
+  assert.match(harness, /document\.elementFromPoint/);
+  assert.match(harness, /target\.contains\(hit\)/);
+  assert.doesNotMatch(harness, /\.click\(\)/);
+});
+
+test('Electron E2E records before/after screenshots and per-action traces', () => {
+  assert.match(harness, /click-traces/);
+  assert.match(harness, /beforeFile/);
+  assert.match(harness, /afterFile/);
+  assert.match(harness, /12-تتبع-التفاعلات\.json/);
+});
+
+test('Electron E2E validates centralized Node, Electron and Chromium offline guards', () => {
+  assert.match(main, /installOfflineNetworkGuards\(\{ electronNet: net \}\)/);
+  assert.match(main, /installOfflineSessionGuard\(session\.defaultSession\)/);
+  assert.match(offlinePolicy, /webRequest\.onBeforeRequest/);
+  assert.match(offlinePolicy, /http:\/\/\*\/\*/);
+  assert.match(offlinePolicy, /https:\/\/\*\/\*/);
+  assert.match(offlinePolicy, /ws:\/\/\*\/\*/);
+  assert.match(offlinePolicy, /wss:\/\/\*\/\*/);
+  assert.match(offlinePolicy, /callback\(\{ cancel: true \}\)/);
+  assert.match(offlinePolicy, /recordBlockedAttempt\('renderer'/);
+  assert.match(harness, /getOfflineNetworkAudit/);
+  assert.match(harness, /networkAttemptCount === 0/);
+});
+
+test('Electron E2E opens the native file dialog path and verifies the workbook inventory UI', () => {
+  assert.match(harness, /dialog\.showOpenDialog = async/);
+  assert.match(harness, /اختيار ملف Excel/);
+  assert.match(harness, /فحص بنية ملف Excel/);
+  assert.match(harness, /inventoryUi\.sheetNames/);
+  assert.match(harness, /inventoryUi\.visible/);
+  assert.match(harness, /14-فهرس-الأوراق\.png/);
+  assert.match(harness, /scrollIntoView\(\{ behavior: 'instant', block: 'start' \}\)/);
+});
+
+test('Electron E2E checks keyboard focus visibility', () => {
+  assert.match(harness, /keyCode: 'TAB'/);
+  assert.match(harness, /:focus-visible/);
+});

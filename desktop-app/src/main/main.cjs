@@ -1,4 +1,6 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu, net, session } = require('electron');
+const { installOfflineNetworkGuards, installOfflineSessionGuard } = require('./offline-policy.cjs');
+installOfflineNetworkGuards({ electronNet: net });
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -9,11 +11,14 @@ const {
   findLegacyBackups,
   quarantineLegacyDatabase,
   backupStore,
+  copyStoreKey,
+  restoreBackupBundle,
   listBackups,
 } = require('./store.cjs');
 const security = require('./security.cjs');
 const { analyze } = require('./analysis/engine.cjs');
 const { readDirectorateWorkbook } = require('./analysis/template-reader.cjs');
+const canonicalData = require('./analysis/canonical-data.cjs');
 const { mappingTable } = require('./analysis/mapping.cjs');
 const { defaultWeights, validateWeights } = require('./analysis/composite.cjs');
 const persist = require('./analysis/persist.cjs');
@@ -23,11 +28,7 @@ const { exportAnalysisPdf } = require('./analysis/pdf.cjs');
 const { DIRECTORATE_COLUMNS } = require('./analysis/store-schema.cjs');
 const { buildImportPlan, summarizePlan, applyImportPlan } = require('./analysis/import-plan.cjs');
 const { buildSheets, buildRanking } = require('./analysis/sheets.cjs');
-
-// electron-updater is optional at load time: a source checkout without publish
-// configuration must still boot rather than crash on import.
-let autoUpdater = null;
-try { ({ autoUpdater } = require('electron-updater')); } catch { autoUpdater = null; }
+const { inspectXlsxPackage } = require('./analysis/xlsx-preflight.cjs');
 
 let mainWindow;
 let database;
@@ -126,6 +127,10 @@ function assertTemplatePath(filePath) {
   const stat = fs.statSync(filePath);
   if (!stat.isFile() || stat.size === 0) throw new Error('ملف القالب فارغ أو ليس ملفًا صالحًا.');
   if (stat.size > TEMPLATE_MAX_BYTES) throw new Error('حجم ملف القالب يتجاوز الحد الآمن (200 ميجابايت).');
+  // Inspect ZIP central-directory metadata before ExcelJS loads any workbook
+  // XML or inflates entries. This rejects corrupt and decompression-bomb-like
+  // packages while keeping extraction entirely in memory/local parsing.
+  inspectXlsxPackage(filePath);
   return filePath;
 }
 
@@ -197,44 +202,10 @@ function validateCalibration(kThreshold, deprivationLine) {
   }
 }
 
-// ---- Automatic updates ------------------------------------------------------
-
-/** Latest update state; every push is a merge of this object. */
-let lastUpdateStatus = { state: 'idle' };
-/** First check waits for the window to settle, then repeats every six hours. */
-const UPDATE_CHECK_DELAY_MS = 8000;
-const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
-
-/** Merge a status patch and forward it when the window can still receive it. */
-function pushUpdateStatus(next) {
-  lastUpdateStatus = { ...lastUpdateStatus, ...next };
-  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
-    mainWindow.webContents.send('update:status', lastUpdateStatus);
-  }
-}
-
-/**
- * Wire electron-updater once. A dev run (or a build without publish metadata)
- * stays inert on purpose: `app.isPackaged` is false and nothing is queried.
- */
-function setupAutoUpdate() {
-  if (!app.isPackaged || !autoUpdater) return;
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-
-  autoUpdater.on('checking-for-update', () => pushUpdateStatus({ state: 'checking' }));
-  autoUpdater.on('update-available', (info) => pushUpdateStatus({ state: 'available', version: info?.version }));
-  autoUpdater.on('update-not-available', () => pushUpdateStatus({ state: 'not-available' }));
-  autoUpdater.on('download-progress', (progress) => pushUpdateStatus({ state: 'downloading', percent: Math.round(progress?.percent ?? 0) }));
-  autoUpdater.on('update-downloaded', (info) => pushUpdateStatus({ state: 'downloaded', version: info?.version }));
-  autoUpdater.on('error', (error) => pushUpdateStatus({ state: 'error', message: String(error?.message ?? error) }));
-
-  // Every check keeps a catch: an offline machine must not surface an
-  // unhandled rejection, and a failed check is already reported by the error event.
-  const check = () => { autoUpdater.checkForUpdates().catch(() => {}); };
-  setTimeout(check, UPDATE_CHECK_DELAY_MS);
-  setInterval(check, UPDATE_CHECK_INTERVAL_MS);
-}
+// ---- Offline runtime policy -------------------------------------------------
+// The installed application must remain usable without network access.
+// Updates are distributed as administrator-provided local installer packages.
+const { offlineUpdateStatus } = require('./offline-policy.cjs');
 
 /**
  * The application window.
@@ -337,7 +308,7 @@ function registerHandlers() {
       if (verdict.reason === 'foreign') {
         // Keep a byte-for-byte copy before touching anything: the "foreign"
         // verdict usually means a different key, not a worthless file.
-        try { backup = backupStore(filePath); } catch { /* the move below still protects the user */ }
+        try { backup = backupStore(filePath, { keyPath }); } catch { /* the move below still protects the user */ }
         let stagedPath = `${filePath}.staged-${Date.now()}`;
         try {
           const staged = openEncryptedStore(stagedPath, key);
@@ -373,16 +344,88 @@ function registerHandlers() {
     return { success: true };
   });
 
+  function createConsistentBackup(db) {
+    // SQLCipher's backup API rejects a plain target database created by the
+    // default backup helper. Flush WAL first, then copy the encrypted database,
+    // any remaining sidecars and its companion key as a single bundle. The
+    // synchronous copy runs on the main-process event loop, so no IPC write can
+    // interleave between checkpoint and file copies.
+    const checkpointRows = db.pragma('wal_checkpoint(TRUNCATE)');
+    const checkpoint = Array.isArray(checkpointRows) ? checkpointRows[0] : checkpointRows;
+    if (checkpoint && Number(checkpoint.busy ?? 0) > 0) {
+      throw new Error('تعذّر أخذ لقطة متسقة لقاعدة البيانات؛ توجد عملية قراءة تمنع إتمام WAL checkpoint. أعد المحاولة بعد انتهاء القراءة.');
+    }
+
+    const target = backupStore(getDatabasePath(), { keyPath: getStoreKeyPath() });
+    if (!target) throw new Error('تعذّر إنشاء النسخة الاحتياطية لأن ملف قاعدة البيانات غير موجود.');
+
+    const key = fs.readFileSync(target + '.key', 'utf8').trim();
+    const verdict = classifyStore(target, key);
+    if (!verdict.ok) {
+      for (const suffix of ['', '.key', '-wal', '-shm', '-journal']) {
+        try { fs.rmSync(target + suffix, { force: true }); } catch { /* best effort cleanup */ }
+      }
+      throw new Error('أُنشئت ملفات النسخة لكن فشل التحقق من قابليتها للفتح؛ أزيلت النسخة غير الموثوقة. السبب: ' + verdict.reason);
+    }
+    return target;
+  }
+
   ipcMain.handle('db:backup', async () => {
     const db = requireDatabase();
-    const directory = path.join(app.getPath('userData'), 'backups');
-    fs.mkdirSync(directory, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const target = path.join(directory, `development-data.db.${stamp}.bak`);
-    await db.backup(target);
+    if (currentProfile() !== 'owner') throw new Error('إنشاء نسخة كاملة من قاعدة البيانات يتطلب وضع المالك؛ فقد تتضمن النسخة حقولًا مقيّدة.');
+    const target = await createConsistentBackup(db);
     persist.logAccess(db, { action: 'store-backup', entity: 'store', entityId: target });
     auditRead('db:backup', { entity: 'store', entityId: target });
     return { filePath: target, backups: listBackups(getDatabasePath()).length };
+  });
+
+  ipcMain.handle('db:restore', async () => {
+    requireDatabase();
+    if (currentProfile() !== 'owner') throw new Error('استعادة قاعدة البيانات تتطلب وضع المالك.');
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'اختر النسخة الاحتياطية المراد استعادتها',
+      properties: ['openFile'],
+      filters: [{ name: 'نسخ قاعدة البيانات الاحتياطية', extensions: ['bak'] }],
+    });
+    if (canceled || !filePaths.length) return { canceled: true };
+
+    // Keep the selected path itself so restoreBackupBundle can reject a symlink
+    // with lstat instead of silently following it to another file.
+    const selected = path.resolve(filePaths[0]);
+    const databasePath = getDatabasePath();
+    const keyPath = getStoreKeyPath();
+    let safetyBackup = null;
+
+    if (database) safetyBackup = await createConsistentBackup(database);
+    else if (fs.existsSync(databasePath)) safetyBackup = backupStore(databasePath, { keyPath });
+
+    if (database) database.close();
+    database = undefined;
+    pendingPlan = null;
+    invalidateSheets();
+
+    try {
+      const restored = restoreBackupBundle(selected, databasePath, keyPath);
+      database = openDatabase();
+      sessionId = crypto.randomUUID();
+      auditRead('db:restore', { entity: 'store', entityId: selected, result: 'ok', detail: 'safetyBackup=' + Boolean(safetyBackup) });
+      return { canceled: false, restored: true, safetyBackup, filePath: restored.restoredPath };
+    } catch (error) {
+      // Restore the safety snapshot even if the file swap succeeded but opening
+      // the replacement store failed during schema migration or initialization.
+      try {
+        if (!database && safetyBackup && fs.existsSync(safetyBackup) && fs.existsSync(safetyBackup + '.key')) {
+          restoreBackupBundle(safetyBackup, databasePath, keyPath);
+        }
+        if (!database && fs.existsSync(databasePath) && fs.existsSync(keyPath)) {
+          database = openDatabase();
+          sessionId = crypto.randomUUID();
+        }
+      } catch (recoveryError) {
+        throw new Error(error.message + ' تعذّر فتح النسخة المستعادة؛ كما تعذّر إكمال الاسترجاع التلقائي لنسخة الأمان: ' + recoveryError.message);
+      }
+      throw error;
+    }
   });
 
   ipcMain.handle('db:backups', () => ({ backups: listBackups(getDatabasePath()) }));
@@ -422,7 +465,7 @@ function registerHandlers() {
     if (!filePath) {
       sendImportProgress(event.sender, { phase: 'dialog', message: 'جارٍ فتح نافذة اختيار الملف...' });
       const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-        title: 'اختر ملف «القالب المحدث» (قاعدة البيانات الشاملة)',
+        title: 'اختر ملف Excel المراد فحصه وحفظه للمراجعة',
         properties: ['openFile'],
         filters: [{ name: 'ملفات Excel', extensions: ['xlsx', 'xlsm'] }],
       });
@@ -435,25 +478,134 @@ function registerHandlers() {
     filePath = assertAllowedTemplatePath(assertTemplatePath(filePath));
     sendImportProgress(event.sender, { phase: 'reading', message: 'جارٍ قراءة الملف...' });
     const db = requireDatabase();
-    const read = await readDirectorateWorkbook(filePath);
-    sendImportProgress(event.sender, { phase: 'plan', message: `قُرئ الملف (${read.rows?.length ?? 0} صفًا) — جارٍ بناء خطة الاستيراد...` });
+    let read;
+    let directorateReadError = null;
+    try {
+      read = await readDirectorateWorkbook(filePath);
+    } catch (error) {
+      // A workbook can contain projects, sector datasets or source registers
+      // without a directorate table. It still belongs in the durable review
+      // inbox; it simply must not be coerced into a directorate record.
+      directorateReadError = String(error?.message ?? 'لم يُكتشف جدول مديريات.');
+      read = {
+        fileName: path.basename(filePath),
+        sheetName: null,
+        rows: [],
+        warnings: [{ row: null, code: 'no-directorate-table', message: directorateReadError }],
+      };
+    }
+    sendImportProgress(event.sender, { phase: 'staging', message: 'جارٍ حفظ الملف الأصلي وجميع الأوراق والخلايا والصور القابلة للاستخراج في منطقة مراجعة محلية مشفّرة...' });
+    const staging = await canonicalData.stageWorkbook(db, filePath, read.workbook ?? null);
+    if (Object.prototype.hasOwnProperty.call(read, 'workbook')) delete read.workbook;
+    sendImportProgress(event.sender, { phase: 'plan', message: `حُفظت ${staging.sheetCount} ورقة في منطقة الاستقبال؛ جارٍ إعداد خطة المديريات إن وُجدت...` });
     const plan = buildImportPlan(db, read, { fileName: read.fileName, sheetName: read.sheetName });
-    pendingPlan = { filePath, read, plan };
+    pendingPlan = { filePath, read, plan, staging };
     persist.logAccess(db, {
       action: 'excel-scan',
       entity: 'workbook',
       entityId: filePath,
-      detail: `rows=${plan.totalRows};created=${plan.scope.create};updated=${plan.scope.update};blocked=${plan.scope.blocked}`,
+      detail: `batch=${staging.batchId};sheets=${staging.sheetCount};rows=${staging.rowCount};cells=${staging.cellCount};directorateRows=${plan.totalRows}`,
     });
-    auditRead('import:scan', { entity: 'workbook', entityId: filePath, rowCount: plan.totalRows });
-    sendImportProgress(event.sender, { phase: 'done', message: `الخطة جاهزة: ${plan.totalRows} صفًا.` });
-    return { canceled: false, filePath, ...security.redactPlanSummary(summarizePlan(plan), currentProfile()) };
+    auditRead('import:scan', { entity: 'workbook', entityId: filePath, rowCount: staging.rowCount, detail: `batch=${staging.batchId}` });
+    sendImportProgress(event.sender, { phase: 'done', message: directorateReadError
+      ? 'حُفظ الملف للمراجعة؛ لم يُكتشف جدول مديريات قابل للاستيراد المباشر.'
+      : `الخطة جاهزة: ${plan.totalRows} صف مديريات، وحُفظت بنية الملف كاملةً في المراجعة.` });
+    return {
+      canceled: false,
+      filePath,
+      ...security.redactPlanSummary(summarizePlan(plan), currentProfile()),
+      staging,
+      stagingOnly: Boolean(directorateReadError),
+      stagingMessage: directorateReadError,
+    };
   });
 
   ipcMain.handle('import:plan', () => {
     if (!pendingPlan) throw new Error('لم يُقرأ أي ملف بعد. اختر ملف القالب أولًا.');
     auditRead('import:plan', { entity: 'workbook', entityId: pendingPlan.filePath, rowCount: pendingPlan.plan.totalRows });
     return security.redactPlanSummary(summarizePlan(pendingPlan.plan, 5000), currentProfile());
+  });
+
+  ipcMain.handle('import:history', (_event, request = {}) => {
+    const db = requireDatabase();
+    const history = canonicalData.listWorkbookImports(db, request.limit ?? 30);
+    auditRead('import:history', { entity: 'workbook_import_batches', rowCount: history.length });
+    return history;
+  });
+
+  ipcMain.handle('import:sheet-preview', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') {
+      return { restricted: true, message: 'عرض القيم الخام متاح في وضع المالك فقط؛ وضع المشاركة لا يكشف بيانات ملفات غير مصنفة.' };
+    }
+    const db = requireDatabase();
+    const preview = canonicalData.readWorkbookSheetPreview(db, request.batchId, request.sheetId, request.limit ?? 20);
+    auditRead('import:sheet-preview', { entity: 'workbook_import_sheet', entityId: preview.sheet.id, rowCount: preview.rows.length });
+    return preview;
+  });
+
+  ipcMain.handle('projects:list', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') {
+      return { restricted: true, message: 'سجل المشاريع والتكاليف والمصادر متاح في وضع المالك فقط.' };
+    }
+    const db = requireDatabase();
+    const result = canonicalData.listCanonicalProjects(db, request);
+    auditRead('projects:list', {
+      entity: 'projects',
+      rowCount: result.rows.length,
+      detail: 'offset=' + result.offset + ';limit=' + result.limit + ';search=' + String(request.search ?? '').slice(0, 80),
+    });
+    return result;
+  });
+
+  ipcMain.handle('projects:get', (_event, projectId) => {
+    if (currentProfile() !== 'owner') throw new Error('تفاصيل المشروع المالية والمصدرية متاحة في وضع المالك فقط.');
+    const db = requireDatabase();
+    const result = canonicalData.getCanonicalProject(db, projectId);
+    auditRead('projects:get', {
+      entity: 'projects',
+      entityId: result.project.id,
+      rowCount: result.funding.length,
+      detail: 'funding=' + result.funding.length + ';issues=' + result.issues.length,
+    });
+    return result;
+  });
+
+  ipcMain.handle('import:regions', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') {
+      return { restricted: true, message: 'مراجعة وربط الجداول غير المصنفة متاحان في وضع المالك فقط.' };
+    }
+    const db = requireDatabase();
+    const result = canonicalData.listWorkbookImportRegions(db, request.batchId);
+    auditRead('import:regions', { entity: 'workbook_import_regions', rowCount: result.regions.length, detail: 'batch=' + result.batch.id });
+    return result;
+  });
+
+  ipcMain.handle('import:region-preview', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') {
+      return { restricted: true, message: 'عرض الصفوف الخام متاح في وضع المالك فقط.' };
+    }
+    const db = requireDatabase();
+    const result = canonicalData.readWorkbookImportRegion(
+      db, request.batchId, request.regionId, request.offset ?? 0, request.limit ?? 30
+    );
+    auditRead('import:region-preview', {
+      entity: 'workbook_import_region', entityId: result.regionId,
+      rowCount: result.rows.length, detail: 'batch=' + result.batchId + ';offset=' + result.offset,
+    });
+    return result;
+  });
+
+  ipcMain.handle('import:promote-projects', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('اعتماد المشاريع يتطلب وضع المالك.');
+    const db = requireDatabase();
+    const result = canonicalData.promoteProjectRegion(db, request);
+    invalidateSheets();
+    auditRead('import:promote-projects', {
+      entity: 'projects', rowCount: result.applied.length,
+      result: result.refused.length ? 'partial' : 'ok',
+      detail: 'batch=' + request.batchId + ';region=' + request.regionId + ';refused=' + result.refused.length,
+    });
+    return result;
   });
 
   ipcMain.handle('import:apply', (event, request = {}) => {
@@ -465,7 +617,10 @@ function registerHandlers() {
     // marks the start and end of that transaction instead of faking per-row
     // ticks that would only be delivered after it finished anyway.
     sendImportProgress(event.sender, { phase: 'apply', current: 0, total, message: `جارٍ تطبيق الخطة على ${total} صفًا...` });
-    const result = applyImportPlan(db, pendingPlan.plan, { decisions: request.decisions, force: request.force });
+    const result = pendingPlan.plan.rows?.length
+      ? applyImportPlan(db, pendingPlan.plan, { decisions: request.decisions, force: request.force })
+      : { applied: 0, created: 0, updated: 0, refused: [], skipped: [], total: 0 };
+    const stagingCompletion = canonicalData.completeWorkbookImport(db, pendingPlan.staging.batchId, result);
     invalidateSheets();
     auditRead('import:apply', {
       entity: 'directorates',
@@ -480,7 +635,12 @@ function registerHandlers() {
       total,
       message: `اكتمل الاستيراد: ${result.created} إضافة، ${result.updated} تحديث، ${result.refused.length} محجوب.`,
     });
-    return { ...result, fileName: pendingPlan.plan.fileName, sheetName: pendingPlan.plan.sheetName };
+    return {
+      ...result,
+      fileName: pendingPlan.plan.fileName,
+      sheetName: pendingPlan.plan.sheetName,
+      stagingStatus: stagingCompletion.status,
+    };
   });
 
   // ---- The five workbook sheets, rendered from stored data ------------------
@@ -776,28 +936,12 @@ function registerHandlers() {
     return { canceled: false, ...result };
   });
 
-  // ---- Automatic updates --------------------------------------------------
-  ipcMain.handle('update:status', () => ({ ...lastUpdateStatus, currentVersion: app.getVersion() }));
-
-  ipcMain.handle('update:check', async () => {
-    // A dev run has no publish target, so answer from the cached state instead.
-    if (!app.isPackaged || !autoUpdater) return { ...lastUpdateStatus, currentVersion: app.getVersion() };
-    try {
-      await autoUpdater.checkForUpdates();
-    } catch (error) {
-      pushUpdateStatus({ state: 'error', message: String(error?.message ?? error) });
-    }
-    return { ...lastUpdateStatus, currentVersion: app.getVersion() };
-  });
-
-  ipcMain.handle('update:install', () => {
-    if (autoUpdater && lastUpdateStatus.state === 'downloaded') {
-      // Defer the quit so this reply reaches the renderer before the window closes.
-      setImmediate(() => autoUpdater.quitAndInstall());
-      return true;
-    }
-    return false;
-  });
+  // ---- Offline update policy ----------------------------------------------
+  // These compatibility channels never access the network or install software.
+  // Administrators distribute signed/verified installer packages separately.
+  ipcMain.handle('update:status', () => offlineUpdateStatus(app.getVersion()));
+  ipcMain.handle('update:check', async () => offlineUpdateStatus(app.getVersion()));
+  ipcMain.handle('update:install', () => false);
 
 }
 
@@ -831,12 +975,12 @@ if (!gotSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
+    installOfflineSessionGuard(session.defaultSession);
     // A packaged build has no menu: the default menu exposes DevTools and file
     // dialogs that bypass the field policy.
     if (app.isPackaged) Menu.setApplicationMenu(null);
     registerHandlers();
     createWindow();
-    setupAutoUpdate();
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   });
 }

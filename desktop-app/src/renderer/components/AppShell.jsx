@@ -1,7 +1,7 @@
 import React from 'react';
 import {
-  Activity, DatabaseZap, FileSpreadsheet, LayoutDashboard, ListOrdered,
-  LockKeyhole, LogOut, PenLine, RefreshCw, ShieldCheck, Users,
+  Activity, Briefcase, DatabaseZap, FileSpreadsheet, LayoutDashboard, ListOrdered,
+  LockKeyhole, LogOut, PenLine, RefreshCw, RotateCcw, ShieldCheck, Users,
 } from 'lucide-react';
 import { cx, fmtDate } from '../lib/format.js';
 import logoBadge from '../assets/logo-badge.png';
@@ -27,6 +27,7 @@ export const NAV_GROUPS = [
     caption: 'البيانات',
     items: [
       { id: 'import', label: 'الاستيراد الآلي', icon: FileSpreadsheet },
+      { id: 'projects', label: 'سجل المشاريع', icon: Briefcase },
       { id: 'correction', label: 'تصحيح البيانات', icon: PenLine },
       { id: 'database', label: 'قاعدة البيانات الشاملة', icon: DatabaseZap },
     ],
@@ -43,7 +44,7 @@ export const NAV_LABELS = Object.fromEntries(NAV_GROUPS.flatMap((group) => group
 
 export default function AppShell({
   route, phase, onNavigate, children, profile, profileLabel, onToggleProfile,
-  onLock, onBackup, onRefresh, refreshing, generatedAt, counts = {},
+  onLock, onBackup, onRestore, onRefresh, refreshing, generatedAt, counts = {},
 }) {
   return (
     <div className="app-shell">
@@ -112,9 +113,16 @@ export default function AppShell({
               <ShieldCheck size={14} />
               {profileLabel ?? profile}
             </button>
-            <button className="icon-button" onClick={onBackup} title="إنشاء نسخة احتياطية الآن">
-              <DatabaseZap size={17} />
-            </button>
+            {profile !== 'shared' && (
+              <>
+                <button className="icon-button" onClick={onBackup} title="إنشاء نسخة احتياطية الآن" aria-label="إنشاء نسخة احتياطية الآن">
+                  <DatabaseZap size={17} />
+                </button>
+                <button className="icon-button" onClick={onRestore} title="استعادة نسخة احتياطية" aria-label="استعادة نسخة احتياطية">
+                  <RotateCcw size={17} />
+                </button>
+              </>
+            )}
             <button
               className={cx('icon-button', refreshing && 'spin')}
               onClick={onRefresh}

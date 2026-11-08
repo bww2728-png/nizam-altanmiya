@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('localApp', {
   open: () => ipcRenderer.invoke('db:open'),
   lock: () => ipcRenderer.invoke('db:lock'),
   backupDatabase: () => ipcRenderer.invoke('db:backup'),
+  restoreDatabase: () => ipcRenderer.invoke('db:restore'),
   backups: () => ipcRenderer.invoke('db:backups'),
 
   // Access policy
@@ -23,6 +24,13 @@ contextBridge.exposeInMainWorld('localApp', {
   // Excel import: scan -> plan -> apply
   scanWorkbook: (request) => ipcRenderer.invoke('import:scan', request),
   importPlan: () => ipcRenderer.invoke('import:plan'),
+  canonicalProjects: (request) => ipcRenderer.invoke('projects:list', request),
+  canonicalProject: (projectId) => ipcRenderer.invoke('projects:get', projectId),
+  importHistory: (request) => ipcRenderer.invoke('import:history', request),
+  importSheetPreview: (request) => ipcRenderer.invoke('import:sheet-preview', request),
+  importRegions: (request) => ipcRenderer.invoke('import:regions', request),
+  importRegionPreview: (request) => ipcRenderer.invoke('import:region-preview', request),
+  promoteProjects: (request) => ipcRenderer.invoke('import:promote-projects', request),
   applyImport: (request) => ipcRenderer.invoke('import:apply', request),
   // Push channel from the scan (reading -> plan -> done). Returns an unsubscribe
   // function so unmounting a page cannot leak listeners.

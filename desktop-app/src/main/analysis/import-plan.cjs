@@ -22,6 +22,7 @@
  * "what was proposed" and "what was written" separable.
  */
 
+const crypto = require('node:crypto');
 const { INPUT_FIELDS, FIELD_BY_KEY, MANDATORY_FIELDS } = require('./schema.cjs');
 const { DIRECTORATE_COLUMNS } = require('./store-schema.cjs');
 
@@ -49,10 +50,34 @@ const CURRENCY_KEYS = new Set(['revenue', 'projectCost']);
 /** Codes that mean "this cell could not be understood": the row is quarantined. */
 const BLOCKING_CODES = new Set(['invalid-number', 'invalid-boolean', 'ratio-out-of-range', 'missing-identity']);
 /** Codes that leave the row writable but incomplete or annotated. */
-const WARNING_CODES = new Set(['missing-mandatory', 'percent-converted', 'placeholder', 'had-percent', 'anomaly', 'duplicate-in-file']);
+const WARNING_CODES = new Set(['missing-mandatory', 'percent-converted', 'placeholder', 'had-percent', 'anomaly', 'duplicate-in-file', 'hidden-row', 'formula-cell']);
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+/**
+ * Fingerprint the exact persisted data that an import plan may overwrite.
+ * Include field provenance as well as directorate values: a manual correction,
+ * source reassignment, insert or delete invalidates every pending plan.
+ */
+function databaseFingerprint(database) {
+  const directorates = database.prepare('SELECT * FROM directorates ORDER BY id').all();
+  const sources = database.prepare(
+    'SELECT * FROM directorate_sources ORDER BY directorate_id, field_key'
+  ).all();
+  return crypto.createHash('sha256')
+    .update(JSON.stringify({ directorates, sources }), 'utf8')
+    .digest('hex');
+}
+
+function captureDatabaseState(database) {
+  return database.transaction(() => ({
+    directorates: database.prepare('SELECT * FROM directorates ORDER BY id').all(),
+    sources: database.prepare(
+      'SELECT * FROM directorate_sources ORDER BY directorate_id, field_key'
+    ).all(),
+  }))();
 }
 
 function identityKey(governorate, district) {
@@ -71,6 +96,8 @@ const CODE_LABELS = {
   placeholder: 'خلية تحمل «لا يوجد/—» فتُعامل كفراغ',
   'had-percent': 'الخلية تحمل علامة % صريحة',
   'duplicate-in-file': 'مفتاح مكرر داخل الملف',
+  'hidden-row': 'الصف مخفي في ورقة Excel — يتطلب مراجعة واعتمادًا يدويًا',
+  'formula-cell': 'قيمة حُسبت بصيغة Excel — تُراجع القيمة المحفوظة ولا تُنفّذ الصيغة',
 };
 
 function labelFor(code) {
@@ -185,10 +212,16 @@ function completenessOf(values) {
  * @param {{fileName?:string, sheetName?:string}} [meta]
  */
 function buildImportPlan(database, read, meta = {}) {
+  // Capture directorates and their provenance within one SQLite read transaction
+  // so the review plan and its concurrency token describe the same DB snapshot.
+  const databaseState = captureDatabaseState(database);
   const stored = new Map();
-  for (const record of database.prepare('SELECT * FROM directorates').all()) {
+  for (const record of databaseState.directorates) {
     stored.set(identityKey(record.governorate, record.district), record);
   }
+  const planDatabaseFingerprint = crypto.createHash('sha256')
+    .update(JSON.stringify(databaseState), 'utf8')
+    .digest('hex');
 
   const rows = [];
   const seen = new Map();
@@ -326,6 +359,9 @@ function buildImportPlan(database, read, meta = {}) {
     totalRows: rows.length,
     scope,
     rows,
+    workbookInventory: read.workbookInventory ?? null,
+    // Kept in the main-process plan only; summarizePlan intentionally omits it.
+    databaseFingerprint: planDatabaseFingerprint,
     createdAt: nowIso(),
   };
 }
@@ -345,6 +381,7 @@ function summarizePlan(plan, limit = 300) {
     totalRows: plan.totalRows,
     scope: plan.scope,
     createdAt: plan.createdAt,
+    workbookInventory: plan.workbookInventory ?? null,
     changedFields: [...new Set(plan.rows.flatMap((row) => row.changes.map((change) => change.key)))],
     preview: plan.rows.slice(0, limit).map((row) => ({
       rowNumber: row.rowNumber,
@@ -376,11 +413,12 @@ function summarizePlan(plan, limit = 300) {
 /**
  * Apply the plan.
  *
- * `decisions` maps a row number to `'apply'` or `'skip'`; an unlisted row
- * follows the plan. A blocked row needs both `force` and an explicit per-row
- * `apply` — the default decision can never write it. `unchanged` rows and
- * intra-file duplicates are never written. Data and the audit entry share one
- * transaction: a failure leaves the database untouched.
+ * `decisions` maps a row number to `'apply'` or `'skip'`. For create/update
+ * rows, absence of an explicit `'apply'` is always a skip: the backend never
+ * assumes that a row was reviewed just because it appeared in a preview.
+ * A blocked row needs both `force` and an explicit per-row `'apply'`.
+ * `unchanged` rows and intra-file duplicates are never written. Data and the
+ * audit entry share one transaction: a failure leaves the database untouched.
  */
 function applyImportPlan(database, plan, request = {}) {
   const decisions = request.decisions ?? {};
@@ -394,6 +432,12 @@ function applyImportPlan(database, plan, request = {}) {
   let unchanged = 0;
 
   const run = database.transaction((rows) => {
+    // A plan is valid only for the exact DB snapshot the operator reviewed.
+    // Check inside the write transaction before the first insert/update.
+    if (!plan.databaseFingerprint || databaseFingerprint(database) !== plan.databaseFingerprint) {
+      throw new Error('تغيرت البيانات المعتمدة بعد فحص الملف. أعد فحص ملف Excel وراجع الخطة الجديدة قبل التطبيق.');
+    }
+
     for (const row of rows) {
       const requested = decisions[row.rowNumber] ?? decisions[String(row.rowNumber)];
 
@@ -423,9 +467,8 @@ function applyImportPlan(database, plan, request = {}) {
       }
 
       if (row.status === 'blocked') {
-        // `force` is necessary but no longer sufficient: a blocked row still
-        // needs an explicit `apply` decision, and a row without an identity can
-        // never be written at all.
+        // A blocked row needs two independent acts: explicit per-row approval
+        // and the separate force switch. Identity-blocked rows are never writable.
         const writable = force && requested === 'apply' && row.action !== 'blocked';
         if (!writable) {
           if (force) {
@@ -446,6 +489,13 @@ function applyImportPlan(database, plan, request = {}) {
           }
           continue;
         }
+      } else if (requested !== 'apply') {
+        skipped.push({
+          rowNumber: row.rowNumber,
+          districtName: row.districtName,
+          reason: requested === 'skip' ? 'تخطٍّ بطلب المستخدم' : 'لم يصدر اعتماد صريح لهذا الصف',
+        });
+        continue;
       }
 
       const result = persist.upsertDirectorate(database, {
