@@ -232,10 +232,44 @@ async function stageWorkbook(database, filePath, workbookOption = null) {
     return { batchId, mediaStored };
   });
   const saved = write();
-  return { batchId: saved.batchId, fileName: path.basename(filePath), fileSize: stat.size, sha256: sha,
-    sheetCount: sheets.length, rowCount: totalRows, cellCount: totalCells, formulaCount, hiddenRowCount,
-    mediaCount: mediaAll.length, mediaStoredCount: saved.mediaStored, mediaUnanchoredCount: mediaAll.filter(item => !(anchorIndex.get(item.index)?.length)).length,
-    truncated, status: 'staged', limits: LIMITS };
+  return {
+    batchId: saved.batchId,
+    fileName: path.basename(filePath),
+    fileSize: stat.size,
+    sha256: sha,
+    sheetCount: sheets.length,
+    rowCount: totalRows,
+    cellCount: totalCells,
+    formulaCount,
+    hiddenRowCount,
+    mediaCount: mediaAll.length,
+    mediaStoredCount: saved.mediaStored,
+    mediaUnanchoredCount: mediaAll.filter(item => !(anchorIndex.get(item.index)?.length)).length,
+    truncated,
+    status: 'staged',
+    limits: LIMITS,
+    sheets: inventory.map(item => ({
+      name: item.sheet.name,
+      state: item.sheet.state ?? 'visible',
+      rowCount: item.maxRow,
+      columnCount: item.maxColumn,
+      scannedRows: item.rowLimit,
+      nonemptyRows: item.rows.length,
+      cellCount: item.cellsInSheet,
+      formulaCount: item.formulas,
+      hiddenRowCount: item.hidden,
+      imageCount: item.anchors.length,
+      tableCount: item.tables.length,
+      mergedRangeCount: item.merged.length,
+      truncated: item.truncated,
+      regions: item.regions.map(region => ({
+        headerRow: region.headerRow,
+        candidateType: region.candidateType,
+        matchedCount: region.matched.length,
+        confidence: region.confidence,
+      })),
+    })),
+  };
 }
 
 function completeWorkbookImport(database, batchId, result = {}) {
