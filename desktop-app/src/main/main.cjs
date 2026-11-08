@@ -1,4 +1,6 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu, net, session } = require('electron');
+const { installOfflineNetworkGuards, installOfflineSessionGuard, isAllowedUpdateRequest } = require('./offline-policy.cjs');
+installOfflineNetworkGuards({ electronNet: net, allowedNetworkRequest: isAllowedUpdateRequest });
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -1432,6 +1434,7 @@ if (!gotSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
+    installOfflineSessionGuard(session.defaultSession);
     // A packaged build has no menu: the default menu exposes DevTools and file
     // dialogs that bypass the field policy.
     if (app.isPackaged) Menu.setApplicationMenu(null);
