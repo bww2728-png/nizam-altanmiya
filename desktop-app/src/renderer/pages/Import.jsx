@@ -726,8 +726,23 @@ function ProjectRegionReview({ staging }) {
       setRegionData(result);
       if (result?.restricted) return;
       const projectRegions = (result.regions ?? []).filter(region => region.candidateType === 'project-candidate');
-      setSelectedRegionId(current => current && projectRegions.some(region => String(region.id) === String(current))
-        ? current : String(projectRegions[0]?.id ?? ''));
+      setSelectedRegionId(current => {
+        const selected = current && projectRegions.some(region => String(region.id) === String(current))
+          ? current : String(projectRegions[0]?.id ?? '');
+        const candidate = projectRegions.find(region => String(region.id) === String(selected));
+        if (candidate) {
+          setColumnMap(previous => {
+            if (Object.keys(previous).length) return previous;
+            const guesses = {};
+            for (const header of candidate.headers ?? []) {
+              const key = suggestedProjectField(header.label);
+              if (key && guesses[key] === undefined) guesses[key] = header.column;
+            }
+            return guesses;
+          });
+        }
+        return selected;
+      });
     } catch (error) {
       setRegionError(errText(error) || 'تعذر تحميل مناطق البيانات المرشحة.');
     }
