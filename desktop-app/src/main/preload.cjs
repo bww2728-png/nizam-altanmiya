@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld('localApp', {
   // Excel import: scan -> plan -> apply
   scanWorkbook: (request) => ipcRenderer.invoke('import:scan', request),
   importPlan: () => ipcRenderer.invoke('import:plan'),
+  canonicalProjects: (request) => ipcRenderer.invoke('projects:list', request),
+  canonicalProject: (projectId) => ipcRenderer.invoke('projects:get', projectId),
   importHistory: (request) => ipcRenderer.invoke('import:history', request),
   importSheetPreview: (request) => ipcRenderer.invoke('import:sheet-preview', request),
   importRegions: (request) => ipcRenderer.invoke('import:regions', request),
