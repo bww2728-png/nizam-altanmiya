@@ -107,6 +107,13 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
     assert.equal(storedSheets[2].state, 'hidden');
 
     const directorateSheet = storedSheets[0];
+    assert.equal(staged.sheets[0].id, directorateSheet.id);
+    const sheetPreview = canonical.readWorkbookSheetPreview(db, staged.batchId, directorateSheet.id, 1);
+    assert.equal(sheetPreview.sheet.name, 'المديريات');
+    assert.equal(sheetPreview.rows.length, 1);
+    assert.equal(sheetPreview.truncated, true);
+    assert.ok(sheetPreview.rows[0].cells.length <= 24);
+    assert.throws(() => canonical.readWorkbookSheetPreview(db, staged.batchId, 999999), /لا تنتمي/);
     assert.ok(JSON.parse(directorateSheet.merged_ranges_json).includes('A1:C1'));
     assert.ok(directorateSheet.formula_count >= 1);
     assert.equal(directorateSheet.hidden_row_count, 1);
