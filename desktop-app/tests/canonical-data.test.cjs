@@ -120,7 +120,7 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
 
     const regions = db.prepare('SELECT * FROM workbook_import_regions WHERE batch_id = ?').all(staged.batchId);
     assert.ok(regions.some(region => region.candidate_type === 'directorate-candidate'));
-    assert.ok(regions.some(region => region.candidate_type === 'unclassified'));
+    assert.ok(regions.some(region => region.candidate_type === 'project-candidate'));
 
     const storedRows = db.prepare('SELECT * FROM workbook_import_rows WHERE batch_id = ? ORDER BY sheet_id, row_number').all(staged.batchId);
     assert.ok(storedRows.length >= 7);
@@ -151,6 +151,127 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
     canonical.completeWorkbookImport(db, staged.batchId, { applied: 0, created: 0, updated: 0, refused: [], skipped: [] });
     assert.equal(db.prepare('SELECT status FROM workbook_import_batches WHERE id = ?').get(staged.batchId).status, 'reviewed-without-directorate-write');
     assert.equal(canonical.listWorkbookImports(db, 10)[0].id, staged.batchId);
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('project regions require explicit row approval and preserve project/funding provenance', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-project-promotion-'));
+  const filePath = path.join(directory, 'projects.xlsx');
+  const db = openDatabase();
+  try {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('المشاريع');
+    sheet.getRow(1).values = [
+      'اسم المشروع', 'رمز المشروع', 'التكلفة التقديرية', 'رمز العملة',
+      'تاريخ البداية', 'تاريخ النهاية', 'جهة التمويل', 'مبلغ التمويل',
+      'المحافظة', 'المديرية', 'القطاع',
+    ];
+    sheet.getRow(2).values = [
+      'تأهيل شبكة مياه', 'PRJ-001', '١٬٢٥٠', 'YER',
+      '2026-01-01', '2026-12-31', 'UNDP', '250',
+      'تعز', 'المعافر', 'المياه',
+    ];
+    sheet.getRow(3).values = [
+      'إنشاء مدرسة', 'PRJ-002', 'تكلفة غير واضحة', 'YER',
+      '2026-02-01', '2026-11-30', '', '',
+      'تعز', 'المعافر', 'التعليم',
+    ];
+    sheet.getRow(4).values = [
+      'مشروع مخفي', 'PRJ-003', '500', 'YER',
+      '2026-03-01', '2026-10-30', '', '',
+      'تعز', 'المعافر', 'المياه',
+    ];
+    sheet.getRow(4).hidden = true;
+    sheet.getRow(5).values = [
+      'مشروع بصيغة', 'PRJ-004', null, 'YER',
+      '2026-04-01', '2026-10-30', '', '',
+      'تعز', 'المعافر', 'المياه',
+    ];
+    sheet.getCell('C5').value = { formula: '100+200', result: 300 };
+    sheet.getRow(6).values = [
+      'مشروع برمز مكرر', 'PRJ-001', '900', 'YER',
+      '2026-05-01', '2026-10-30', '', '',
+      'تعز', 'المعافر', 'المياه',
+    ];
+    await workbook.xlsx.writeFile(filePath);
+
+    const staged = await canonical.stageWorkbook(db, filePath);
+    const catalog = canonical.listWorkbookImportRegions(db, staged.batchId);
+    const [region] = catalog.regions.filter(item => item.candidateType === 'project-candidate');
+    assert.ok(region, 'a project-like table with directorate columns must be classified as a project region');
+    assert.equal(region.sheetName, 'المشاريع');
+    assert.equal(region.totalRows, 5);
+
+    const preview = canonical.readWorkbookImportRegion(db, staged.batchId, region.id, 0, 30);
+    assert.equal(preview.rows.length, 5);
+    assert.equal(preview.rows.find(row => row.rowNumber === 4).hidden, true);
+    assert.equal(preview.rows.find(row => row.rowNumber === 5).hasFormula, true);
+
+    const columnMap = {
+      project_name: 1, project_code: 2, estimated_cost: 3, currency_code: 4,
+      start_date: 5, end_date: 6, funding_partner: 7, funding_amount: 8,
+      governorate: 9, district: 10, sector: 11,
+    };
+    const approvedRows = [2, 3, 4, 5, 6];
+    const result = canonical.promoteProjectRegion(db, {
+      batchId: staged.batchId, regionId: region.id, columnMap, approvedRows,
+    });
+
+    assert.equal(result.applied.length, 1);
+    assert.equal(result.refused.length, 4);
+    assert.equal(result.applied[0].rowNumber, 2);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM projects').get().n, 1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM project_funding').get().n, 1);
+    const project = db.prepare('SELECT * FROM projects').get();
+    assert.equal(project.code, 'PRJ-001');
+    assert.equal(project.estimated_cost, 1250);
+    assert.equal(project.currency_code, 'YER');
+    const funding = db.prepare('SELECT * FROM project_funding').get();
+    assert.equal(funding.partner_name, 'UNDP');
+    assert.equal(funding.amount, 250);
+
+    const promotion = db.prepare('SELECT * FROM workbook_import_promotions').get();
+    assert.equal(promotion.entity_type, 'project');
+    assert.match(promotion.source_location, /المشاريع!row-2/);
+    assert.deepEqual(JSON.parse(promotion.mapping_json), columnMap);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM data_quality_issues WHERE issue_code LIKE 'unmatched-project-%'").get().n, 2);
+    assert.equal(canonical.readWorkbookImportRegion(db, staged.batchId, region.id).rows.find(row => row.rowNumber === 2).promoted, true);
+
+    assert.throws(() => canonical.promoteProjectRegion(db, {
+      batchId: staged.batchId, regionId: region.id, columnMap, approvedRows: [2],
+    }), /سبق اعتماده/);
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('project promotion rejects ambiguous mappings and foreign batch/region pairs', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-project-guards-'));
+  const filePath = path.join(directory, 'projects.xlsx');
+  const db = openDatabase();
+  try {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('المشاريع');
+    sheet.getRow(1).values = ['اسم المشروع', 'رمز المشروع', 'التكلفة التقديرية'];
+    sheet.getRow(2).values = ['تأهيل طريق', 'P-1', '1000'];
+    await workbook.xlsx.writeFile(filePath);
+    const staged = await canonical.stageWorkbook(db, filePath);
+    const region = canonical.listWorkbookImportRegions(db, staged.batchId).regions.find(item => item.candidateType === 'project-candidate');
+    assert.ok(region);
+    assert.throws(() => canonical.promoteProjectRegion(db, {
+      batchId: staged.batchId, regionId: region.id,
+      columnMap: { project_name: 1, project_code: 1 }, approvedRows: [2],
+    }), /العمود نفسه/);
+    assert.throws(() => canonical.promoteProjectRegion(db, {
+      batchId: staged.batchId + 1, regionId: region.id,
+      columnMap: { project_name: 1 }, approvedRows: [2],
+    }), /لا تنتمي/);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM projects').get().n, 0);
   } finally {
     db.close();
     fs.rmSync(directory, { recursive: true, force: true });
