@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   Activity, Briefcase, ClipboardCheck, DatabaseZap, FileSpreadsheet, LayoutDashboard, ListOrdered,
-  LockKeyhole, LogOut, PenLine, RefreshCw, RotateCcw, ShieldCheck, Users,
+  LockKeyhole, LogOut, PenLine, RefreshCw, RotateCcw, ShieldCheck, Users, Files,
 } from 'lucide-react';
 import { cx, fmtDate } from '../lib/format.js';
 import ThemeToggle from './ThemeToggle.jsx';
@@ -28,9 +28,11 @@ export const NAV_GROUPS = [
     caption: 'البيانات',
     items: [
       { id: 'import', label: 'الاستيراد الآلي', icon: FileSpreadsheet },
+      { id: 'data-entry', label: 'الإدخال اليدوي المركزي', icon: PenLine },
       { id: 'projects', label: 'سجل المشاريع', icon: Briefcase },
       { id: 'observations', label: 'سجل قياسات المؤشرات', icon: Activity },
       { id: 'quality', label: 'جودة البيانات', icon: ClipboardCheck },
+      { id: 'sources', label: 'مصادر البيانات', icon: Files },
       { id: 'correction', label: 'تصحيح البيانات', icon: PenLine },
       { id: 'database', label: 'قاعدة البيانات الشاملة', icon: DatabaseZap },
     ],

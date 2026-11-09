@@ -10,7 +10,10 @@ const ExcelJS = require('exceljs');
 const Database = require('better-sqlite3-multiple-ciphers');
 
 const { migrate } = require('../src/main/analysis/store-schema.cjs');
+const { openEncryptedStore } = require('../src/main/store.cjs');
 const canonical = require('../src/main/analysis/canonical-data.cjs');
+const dataArchitecture = require('../src/main/database/architecture.cjs');
+const recordService = require('../src/main/database/record-service.cjs');
 
 const ONE_PIXEL_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/pXcAAAAASUVORK5CYII=',
@@ -46,6 +49,65 @@ test('canonical model migrations are additive and idempotent', () => {
     assert.ok(db.prepare("SELECT 1 FROM data_field_aliases WHERE field_definition_id=? AND normalized_alias=?").get(populationFieldId, 'اجمالي السكان'));
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM indicator_definitions').get().n, 12);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM directorates').get().n, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test('workbook mirroring supports the original encrypted-store table layout', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-normalized-workbook-'));
+  const filePath = path.join(directory,'legacy-layout.xlsx');
+  const database = openEncryptedStore(path.join(directory,'store.db'),'local-test-key');
+  try {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('بيانات المديريات');
+    sheet.addRow(['اسم المديرية','المحافظة','عدد السكان']);
+    sheet.addRow(['المعافر','تعز',125000]);
+    await workbook.xlsx.writeFile(filePath);
+    const parsed = new ExcelJS.Workbook();
+    await parsed.xlsx.readFile(filePath);
+    const staged = await canonical.stageWorkbook(database,filePath,parsed);
+    const normalized = dataArchitecture.mirrorWorkbookImport(database,staged.batchId);
+    const batch = database.prepare('SELECT * FROM import_batches WHERE batch_id=?').get(normalized.batchId);
+    assert.equal(batch.file_name,'legacy-layout.xlsx');
+    assert.equal(batch.batch_status,'ready_for_review');
+    assert.equal(database.prepare('SELECT COUNT(*) AS n FROM import_rows row JOIN import_regions region USING(import_region_id) JOIN import_sheets sheet USING(import_sheet_id) WHERE sheet.batch_id=?').get(normalized.batchId).n,staged.rowCount);
+    assert.equal(database.prepare('SELECT COUNT(*) AS n FROM import_cells cell JOIN import_rows row USING(import_row_id) JOIN import_regions region USING(import_region_id) JOIN import_sheets sheet USING(import_sheet_id) WHERE sheet.batch_id=?').get(normalized.batchId).n,staged.cellCount);
+  } finally {
+    database.close();
+    fs.rmSync(directory,{ recursive:true,force:true });
+  }
+});
+
+test('central record writes validate values and keep revisions, provenance and review history', () => {
+  const db = openDatabase();
+  try {
+    dataArchitecture.migrate(db);
+    const form = recordService.listForms(db).find(item => item.form_code === 'legacy_directorate_v1');
+    assert.ok(form?.form_version_id);
+    const values = {
+      'directorate.districtName': { value:'المعافر' },
+      'directorate.governorate': { value:'تعز' },
+      'directorate.population': { value:'٥٬٠٠٠' },
+    };
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,values:{ ...values,'directorate.population':{ value:'-2' } } }),/الحد الأدنى/);
+    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,periodYear:'2025',values,actor:'tester' });
+    const firstObservation = db.prepare("SELECT value_integer,value_real FROM observations WHERE form_record_id=? AND form_field_id=(SELECT form_field_id FROM form_fields WHERE field_code='directorate.population')").get(created.formRecordId);
+    assert.equal(firstObservation.value_integer,5000);
+    recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,periodYear:'2025',values:{
+      'directorate.districtName':{ value:'المعافر' },
+      'directorate.governorate':{ value:'تعز' },
+      'directorate.population':{ value:'6500' },
+    },changeReason:'تحديث يدوي',actor:'tester' });
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM observations WHERE form_record_id=?').get(created.formRecordId).n,1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM value_provenance WHERE observation_id IN (SELECT observation_id FROM observations WHERE form_record_id=?)').get(created.formRecordId).n,2);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM record_revisions WHERE form_record_id=?').get(created.formRecordId).n,2);
+    assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].value,'6500');
+    assert.equal(recordService.submitForReview(db,created.formRecordId,'reviewer').status,'pending_review');
+    assert.equal(recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' }).status,'approved');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM record_reviews WHERE form_record_id=?').get(created.formRecordId).n,2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE resource_type='form_record' AND resource_id=?").get(String(created.formRecordId)).n,4);
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,values,changeReason:'محاولة تعديل' }),/قيد المراجعة أو معتمد/);
   } finally {
     db.close();
   }
@@ -153,6 +215,25 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
     const invalidDateCell = JSON.parse(invalidDateRow.cells_json).find(cell => cell.address === 'D4');
     assert.equal(invalidDateCell.rawValue.type, 'invalid-date');
 
+    const mirrored = dataArchitecture.mirrorWorkbookImport(db, staged.batchId);
+    const normalizedBatch = db.prepare('SELECT * FROM import_batches WHERE idempotency_key=?').get('workbook-import:' + staged.batchId);
+    assert.ok(normalizedBatch);
+    assert.equal(mirrored.batchId, normalizedBatch.batch_id);
+    assert.equal(normalizedBatch.batch_status, 'ready_for_review');
+    assert.equal(normalizedBatch.total_sheets, 3);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM import_sheets WHERE batch_id=?').get(normalizedBatch.batch_id).n, 3);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM import_rows row JOIN import_regions region USING(import_region_id) JOIN import_sheets sheet USING(import_sheet_id) WHERE sheet.batch_id=?').get(normalizedBatch.batch_id).n, staged.rowCount);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM import_cells cell JOIN import_rows row USING(import_row_id) JOIN import_regions region USING(import_region_id) JOIN import_sheets sheet USING(import_sheet_id) WHERE sheet.batch_id=?').get(normalizedBatch.batch_id).n, staged.cellCount);
+    const normalizedFormula = db.prepare(`SELECT cell.formula_text,cell.cached_value_text FROM import_cells cell
+      JOIN import_rows row USING(import_row_id) JOIN import_regions region USING(import_region_id)
+      JOIN import_sheets sheet USING(import_sheet_id) WHERE sheet.batch_id=? AND sheet.sheet_name='المديريات' AND row.source_row_number=3 AND cell.cell_address='D3'`)
+      .get(normalizedBatch.batch_id);
+    assert.deepEqual(normalizedFormula,{ formula_text:'C3*2',cached_value_text:'300000' });
+    assert.ok(db.prepare("SELECT 1 FROM import_field_mappings mapping JOIN import_regions region USING(import_region_id) JOIN import_sheets sheet USING(import_sheet_id) WHERE sheet.batch_id=? AND sheet.sheet_name='المديريات' AND mapping.mapping_status='suggested' AND mapping.form_field_id IS NOT NULL").get(normalizedBatch.batch_id));
+    dataArchitecture.mirrorWorkbookImport(db, staged.batchId);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM import_batches WHERE idempotency_key=?').get('workbook-import:' + staged.batchId).n, 1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM import_rows row JOIN import_regions region USING(import_region_id) JOIN import_sheets sheet USING(import_sheet_id) WHERE sheet.batch_id=?').get(normalizedBatch.batch_id).n, staged.rowCount);
+
     const media = db.prepare('SELECT * FROM workbook_import_media WHERE batch_id = ?').all(staged.batchId);
     assert.equal(media.length, 1);
     assert.equal(media[0].extraction_status, 'stored');
@@ -166,6 +247,9 @@ test('workbook staging preserves every scanned sheet, cell provenance, hidden ro
 
     canonical.completeWorkbookImport(db, staged.batchId, { applied: 0, created: 0, updated: 0, refused: [], skipped: [] });
     assert.equal(db.prepare('SELECT status FROM workbook_import_batches WHERE id = ?').get(staged.batchId).status, 'reviewed-without-directorate-write');
+    const normalizedStatus = dataArchitecture.syncWorkbookImportStatus(db,staged.batchId);
+    assert.equal(normalizedStatus.status,'ready_for_review');
+    assert.equal(db.prepare('SELECT batch_status FROM import_batches WHERE batch_id=?').get(normalizedBatch.batch_id).batch_status,'ready_for_review');
     assert.equal(canonical.listWorkbookImports(db, 10)[0].id, staged.batchId);
   } finally {
     db.close();

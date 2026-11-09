@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Database = require('better-sqlite3-multiple-ciphers');
 const { migrate } = require('./analysis/store-schema.cjs');
+const dataArchitecture = require('./database/architecture.cjs');
 
 /** Sidecar files SQLite writes next to a database file. */
 const SIDECAR_SUFFIXES = ['-journal', '-wal', '-shm'];
@@ -251,7 +252,8 @@ function restoreBackupBundle(backupPath, databasePath, keyPath) {
   }
 }
 
-function openEncryptedStore(filePath, passphrase) {
+function openEncryptedStore(filePath, passphrase, options = {}) {
+  const existedBeforeOpen = fs.existsSync(filePath);
   const database = new Database(filePath, { timeout: 5000 });
   try {
     database.pragma("cipher = 'sqlcipher'");
@@ -259,6 +261,13 @@ function openEncryptedStore(filePath, passphrase) {
     database.pragma('foreign_keys = ON');
     database.pragma('busy_timeout = 5000');
     database.prepare('SELECT count(*) AS count FROM sqlite_master').get();
+    const migrationTable = database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get();
+    const architectureMigration = migrationTable
+      ? database.prepare('SELECT success FROM schema_migrations WHERE version=? AND migration_code=?').get(dataArchitecture.VERSION,dataArchitecture.CODE)
+      : null;
+    if (existedBeforeOpen && options.keyPath && architectureMigration?.success !== 1) {
+      backupStore(filePath, { keyPath: options.keyPath });
+    }
     database.exec(`
       CREATE TABLE IF NOT EXISTS import_batches (
         id INTEGER PRIMARY KEY,
