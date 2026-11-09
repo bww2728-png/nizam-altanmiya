@@ -5,9 +5,11 @@ import ThemeToggle from './components/ThemeToggle.jsx';
 import { ErrorBanner, Loading, ToastStack } from './components/ui.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import ImportPage from './pages/Import.jsx';
+import DataEntry from './pages/DataEntry.jsx';
 import Projects from './pages/Projects.jsx';
 import IndicatorObservations from './pages/IndicatorObservations.jsx';
 import DataQuality from './pages/DataQuality.jsx';
+import DataSources from './pages/DataSources.jsx';
 import Correction from './pages/Correction.jsx';
 import Indicators from './pages/Indicators.jsx';
 import Ranking from './pages/Ranking.jsx';
@@ -306,8 +308,12 @@ export default function App() {
         return <IndicatorObservations notify={notify} />;
       case 'quality':
         return <DataQuality notify={notify} />;
+      case 'sources':
+        return <DataSources refreshKey={refreshKey} />;
       case 'import':
         return <ImportPage onNavigate={navigate} notify={notify} onApplied={refresh} />;
+      case 'data-entry':
+        return <DataEntry notify={notify} refreshKey={refreshKey} />;
       case 'correction':
         return <Correction catalogue={catalogue ?? []} notify={notify} refreshKey={refreshKey} focusId={params.focusId ?? null} />;
       case 'indicators':

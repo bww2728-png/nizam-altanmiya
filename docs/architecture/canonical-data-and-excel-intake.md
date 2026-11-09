@@ -44,6 +44,8 @@ The import IPC path now:
 
 Staging is transactional: if the file exceeds a scan cap before the write transaction begins, no partial staging batch is committed. The original source file is retained in the encrypted database so the source package can be re-examined without relying on the original path.
 
+The normalized import mirror carries mapping suggestions separately from the legacy staging record. Migration v3 adds target entity/field codes and persists explicit project- and indicator-column decisions with actor, timestamp and audit event when rows are promoted. Unselected columns remain unmapped; suggestions alone never authorize promotion. Approved directorate import plans likewise record accepted form-field mappings. This mirror is additive and idempotent, and can locate regions created by the earlier normalized region-code format.
+
 ## Project-region review and promotion
 
 Project-like regions are now discovered from a conservative combination of recognizable project headers and non-empty tabular rows. Discovery is only a suggestion; it does not write into the canonical project tables.
@@ -60,9 +62,9 @@ This remains a bounded entity-specific implementation, not a universal import en
 
 ## Automatic update channel
 
-The runtime keeps all application data on the device: the SQLite store is encrypted locally and no telemetry, analytics or cloud AI service is called. The single outbound connection the application initiates is the automatic updater, which queries the public GitHub Releases feed (`bww2728-png/nizam-altanmiya`) for a version strictly higher than the installed one and, once downloaded, installs it on quit. `setupAutoUpdate()` in `src/main/main.cjs` performs the first check shortly after launch and repeats every six hours; the state is pushed to the renderer over `update:status`.
+The runtime keeps application data on the device: the SQLite store is encrypted locally and no telemetry, analytics or cloud AI service is called. Application-level guards deny Node, Electron and renderer network requests except HTTPS GET requests to the configured GitHub Releases pages and GitHub release-asset hosts. The automatic updater checks `bww2728-png/nizam-altanmiya` for a version strictly higher than the installed one and installs a downloaded update on quit. `setupAutoUpdate()` in `src/main/main.cjs` performs the first check shortly after launch and repeats every six hours; the state is pushed to the renderer over `update:status`.
 
-There is no application-layer network allow-list: the earlier `offline-policy.cjs` guards were removed by owner decision, so the process can reach the network like any desktop application. The data itself never leaves the device; a machine that requires a strict egress guarantee must enforce it at the OS level (endpoint firewall or equivalent) and verify it on the target Windows image.
+These guards cover the standard APIs patched in `offline-policy.cjs`, but cannot guarantee that native add-ons, operating-system services or future unguarded APIs have no network access. A strict zero-egress environment must also enforce and verify an operating-system firewall rule; that policy will intentionally block automatic updates.
 
 ## Encrypted backup and restore
 
@@ -88,7 +90,7 @@ Manual indicator observations are available in a separate owner-only, paged regi
 4. Connect approved indicator observations to user-facing analysis and exports only after an explicit methodology and compatibility review; do not silently change legacy calculations.
 5. Add in-app preview and classification for project attachments; workbook media must require explicit review before linking to a project or geographic record.
 6. Reconcile legacy-to-canonical migrations for stable IDs, old field semantics and unspecified temporal periods, and extend analysis regression coverage.
-7. Add OS-level egress restrictions and verify them on the target Windows image; runtime guards alone do not prevent native or operating-system networking.
+7. Validate the existing application-layer network allow-list and add OS-level egress restrictions where strict zero-egress is required; runtime guards do not prevent native or operating-system networking.
 8. Finish accessibility, large-workbook performance, Windows backup/restore and signed-package validation.
 
 ## Test coverage added

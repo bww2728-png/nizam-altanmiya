@@ -17,6 +17,16 @@ contextBridge.exposeInMainWorld('localApp', {
   restoreDatabase: () => ipcRenderer.invoke('db:restore'),
   backups: () => ipcRenderer.invoke('db:backups'),
 
+  // Database-driven forms and the shared record/review write path
+  dataForms: () => ipcRenderer.invoke('data:forms'),
+  dataFormDefinition: (formVersionId) => ipcRenderer.invoke('data:form-definition', formVersionId),
+  dataRecords: (request) => ipcRenderer.invoke('data:records:list', request),
+  dataRecord: (recordId) => ipcRenderer.invoke('data:record:get', recordId),
+  saveDataRecord: (request) => ipcRenderer.invoke('data:record:save', request),
+  reviewDataRecord: (request) => ipcRenderer.invoke('data:record:review', request),
+  dataGeography: (search) => ipcRenderer.invoke('data:geography:list', search),
+  dataPeriods: () => ipcRenderer.invoke('data:periods:list'),
+
   // Access policy
   accessProfile: () => ipcRenderer.invoke('security:profile:get'),
   setAccessProfile: (request) => ipcRenderer.invoke('security:profile:set', request),
@@ -30,6 +40,7 @@ contextBridge.exposeInMainWorld('localApp', {
   indicatorObservations: (request) => ipcRenderer.invoke('observations:list', request),
   saveIndicatorObservation: (request) => ipcRenderer.invoke('observations:save', request),
   dataQualityIssues: (request) => ipcRenderer.invoke('quality:list', request),
+  dataSources: (request) => ipcRenderer.invoke('sources:list', request),
   resolveDataQualityIssue: (request) => ipcRenderer.invoke('quality:resolve', request),
   saveCanonicalProject: (request) => ipcRenderer.invoke('projects:save', request),
   addProjectFunding: (request) => ipcRenderer.invoke('projects:add-funding', request),

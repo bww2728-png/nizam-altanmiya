@@ -19,6 +19,8 @@ const security = require('./security.cjs');
 const { analyze } = require('./analysis/engine.cjs');
 const { readDirectorateWorkbook } = require('./analysis/template-reader.cjs');
 const canonicalData = require('./analysis/canonical-data.cjs');
+const dataArchitecture = require('./database/architecture.cjs');
+const recordService = require('./database/record-service.cjs');
 const { mappingTable } = require('./analysis/mapping.cjs');
 const { defaultWeights, validateWeights } = require('./analysis/composite.cjs');
 const persist = require('./analysis/persist.cjs');
@@ -69,7 +71,9 @@ function hasUsableDatabase() {
 function openDatabase() {
   const filePath = getDatabasePath();
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  return openEncryptedStore(filePath, loadOrCreateStoreKey(getStoreKeyPath(), { databaseExists: hasUsableDatabase() }));
+  const keyPath = getStoreKeyPath();
+  const key = loadOrCreateStoreKey(keyPath, { databaseExists: hasUsableDatabase() });
+  return openEncryptedStore(filePath, key, { keyPath });
 }
 
 function requireDatabase() {
@@ -226,10 +230,10 @@ function assertTemplatePath(filePath) {
   if (extension !== '.xlsx' && extension !== '.xlsm') {
     throw new Error('صيغة الملف غير مدعومة. اختر ملف Excel بصيغة xlsx أو xlsm.');
   }
-  if (!fs.existsSync(filePath)) throw new Error('ملف القالب غير موجود في المسار المحدد.');
+  if (!fs.existsSync(filePath)) throw new Error('ملف Excel غير موجود في المسار المحدد.');
   const stat = fs.statSync(filePath);
-  if (!stat.isFile() || stat.size === 0) throw new Error('ملف القالب فارغ أو ليس ملفًا صالحًا.');
-  if (stat.size > TEMPLATE_MAX_BYTES) throw new Error('حجم ملف القالب يتجاوز الحد الآمن (200 ميجابايت).');
+  if (!stat.isFile() || stat.size === 0) throw new Error('ملف Excel فارغ أو ليس ملفًا صالحًا.');
+  if (stat.size > TEMPLATE_MAX_BYTES) throw new Error('حجم ملف Excel يتجاوز الحد الآمن (200 ميجابايت).');
   // Inspect ZIP central-directory metadata before ExcelJS loads any workbook
   // XML or inflates entries. This rejects corrupt and decompression-bomb-like
   // packages while keeping extraction entirely in memory/local parsing.
@@ -279,12 +283,12 @@ function isInsideRoot(candidate, root) {
  */
 function assertAllowedTemplatePath(filePath) {
   const resolved = safeRealpath(filePath);
-  if (!resolved) throw new Error('تعذّر الوصول إلى ملف القالب في المسار المحدد.');
+  if (!resolved) throw new Error('تعذّر الوصول إلى ملف Excel في المسار المحدد.');
   const userDataRoot = safeRealpath(app.getPath('userData')) ?? path.resolve(app.getPath('userData'));
   const allowed = isInsideRoot(resolved, userDataRoot)
     || (dialogSelectedPath ? comparePath(resolved) === comparePath(dialogSelectedPath) : false);
   if (!allowed) {
-    throw new Error('مسار الملف غير مسموح. اختر ملف القالب من نافذة الاختيار التي يفتحها التطبيق.');
+    throw new Error('مسار الملف غير مسموح. اختر ملف Excel من نافذة الاختيار التي يفتحها التطبيق.');
   }
   return resolved;
 }
@@ -653,6 +657,7 @@ function registerHandlers() {
     }
     sendImportProgress(event.sender, { phase: 'staging', message: 'جارٍ حفظ الملف الأصلي وجميع الأوراق والخلايا والصور القابلة للاستخراج في منطقة مراجعة محلية مشفّرة...' });
     const staging = await canonicalData.stageWorkbook(db, filePath, read.workbook ?? null);
+    const normalizedImport = dataArchitecture.mirrorWorkbookImport(db, staging.batchId);
     if (Object.prototype.hasOwnProperty.call(read, 'workbook')) delete read.workbook;
     sendImportProgress(event.sender, { phase: 'plan', message: `حُفظت ${staging.sheetCount} ورقة في منطقة الاستقبال؛ جارٍ إعداد خطة المديريات إن وُجدت...` });
     const plan = buildImportPlan(db, read, { fileName: read.fileName, sheetName: read.sheetName });
@@ -672,13 +677,14 @@ function registerHandlers() {
       filePath,
       ...security.redactPlanSummary(summarizePlan(plan), currentProfile()),
       staging,
+      normalizedImport,
       stagingOnly: Boolean(directorateReadError),
       stagingMessage: directorateReadError,
     };
   });
 
   ipcMain.handle('import:plan', () => {
-    if (!pendingPlan) throw new Error('لم يُقرأ أي ملف بعد. اختر ملف القالب أولًا.');
+    if (!pendingPlan) throw new Error('لم يُقرأ أي ملف بعد. اختر ملفًا لبناء خطة الاستيراد.');
     auditRead('import:plan', { entity: 'workbook', entityId: pendingPlan.filePath, rowCount: pendingPlan.plan.totalRows });
     return security.redactPlanSummary(summarizePlan(pendingPlan.plan, 5000), currentProfile());
   });
@@ -698,6 +704,55 @@ function registerHandlers() {
     const preview = canonicalData.readWorkbookSheetPreview(db, request.batchId, request.sheetId, request.limit ?? 20);
     auditRead('import:sheet-preview', { entity: 'workbook_import_sheet', entityId: preview.sheet.id, rowCount: preview.rows.length });
     return preview;
+  });
+
+  ipcMain.handle('data:forms', () => {
+    if (currentProfile() !== 'owner') throw new Error('كتالوج النماذج متاح في وضع المالك فقط.');
+    const rows = recordService.listForms(requireDatabase());
+    auditRead('data:forms', { entity: 'form_definitions', rowCount: rows.length });
+    return rows;
+  });
+
+  ipcMain.handle('data:form-definition', (_event, formVersionId) => {
+    if (currentProfile() !== 'owner') throw new Error('تعريفات النماذج متاحة في وضع المالك فقط.');
+    return recordService.getFormDefinition(requireDatabase(), formVersionId);
+  });
+
+  ipcMain.handle('data:record:get', (_event, recordId) => {
+    if (currentProfile() !== 'owner') throw new Error('عرض السجل يتطلب وضع المالك.');
+    return recordService.getRecord(requireDatabase(),recordId);
+  });
+
+  ipcMain.handle('data:records:list', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') return { restricted: true, rows: [], total: 0 };
+    const result = recordService.listRecords(requireDatabase(), request);
+    auditRead('data:records:list', { entity: 'form_records', rowCount: result.rows.length, detail: 'offset=' + result.offset + ';limit=' + result.limit });
+    return result;
+  });
+
+  ipcMain.handle('data:record:save', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('إدخال البيانات يتطلب وضع المالك.');
+    const result = recordService.saveRecord(requireDatabase(), { ...request, actor: sessionId });
+    invalidateSheets();
+    return result;
+  });
+
+  ipcMain.handle('data:record:review', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('مراجعة البيانات واعتمادها يتطلبان وضع المالك.');
+    const result = request.decision === 'submit'
+      ? recordService.submitForReview(requireDatabase(), request.formRecordId, sessionId)
+      : recordService.decideRecord(requireDatabase(), request.formRecordId, { ...request, actor: sessionId });
+    return result;
+  });
+
+  ipcMain.handle('data:geography:list', (_event, search = '') => {
+    if (currentProfile() !== 'owner') return { restricted: true, rows: [] };
+    return { rows: recordService.listGeoUnits(requireDatabase(), search) };
+  });
+
+  ipcMain.handle('data:periods:list', () => {
+    if (currentProfile() !== 'owner') return { restricted: true, rows: [] };
+    return { rows: recordService.listPeriods(requireDatabase()) };
   });
 
   ipcMain.handle('projects:list', (_event, request = {}) => {
@@ -743,6 +798,13 @@ function registerHandlers() {
     if (currentProfile() !== 'owner') throw new Error('إدخال قياسات المؤشرات يتطلب وضع المالك.');
     const result = canonicalData.saveIndicatorObservation(requireDatabase(),request);
     auditRead('observations:save',{ entity:'indicator_observations',entityId:result.id,result:result.action });
+    return result;
+  });
+
+  ipcMain.handle('sources:list', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') return { restricted: true, rows: [], total: 0 };
+    const result = canonicalData.listDataSources(requireDatabase(),request);
+    auditRead('sources:list',{ entity:'data_sources',rowCount:result.rows.length,detail:'offset='+result.offset+';limit='+result.limit });
     return result;
   });
 
@@ -856,6 +918,7 @@ function registerHandlers() {
     if (currentProfile() !== 'owner') throw new Error('اعتماد المشاريع يتطلب وضع المالك.');
     const db = requireDatabase();
     const result = canonicalData.promoteProjectRegion(db, request);
+    dataArchitecture.syncWorkbookImportStatus(db, request.batchId);
     invalidateSheets();
     auditRead('import:promote-projects', {
       entity: 'projects', rowCount: result.applied.length,
@@ -869,6 +932,7 @@ function registerHandlers() {
     if (currentProfile() !== 'owner') throw new Error('اعتماد المؤشرات يتطلب وضع المالك.');
     const db = requireDatabase();
     const result = canonicalData.promoteIndicatorRegion(db, request);
+    dataArchitecture.syncWorkbookImportStatus(db, request.batchId);
     invalidateSheets();
     auditRead('import:promote-indicators', {
       entity: 'indicator_observations', rowCount: result.applied.length,
@@ -880,7 +944,7 @@ function registerHandlers() {
 
   ipcMain.handle('import:apply', (event, request = {}) => {
     const db = requireDatabase();
-    if (!pendingPlan) throw new Error('لا توجد خطة استيراد جاهزة. اختر ملف القالب أولًا.');
+    if (!pendingPlan) throw new Error('لا توجد خطة استيراد جاهزة. اختر ملفًا وأعد فحصه.');
     const total = pendingPlan.plan.rows?.length ?? 0;
     // The whole apply is a single database transaction, so the main process
     // cannot interleave messages between individual rows; the progress line
@@ -891,6 +955,7 @@ function registerHandlers() {
       ? applyImportPlan(db, pendingPlan.plan, { decisions: request.decisions, force: request.force })
       : { applied: 0, created: 0, updated: 0, refused: [], skipped: [], total: 0 };
     const stagingCompletion = canonicalData.completeWorkbookImport(db, pendingPlan.staging.batchId, result);
+    dataArchitecture.syncWorkbookImportStatus(db, pendingPlan.staging.batchId);
     invalidateSheets();
     auditRead('import:apply', {
       entity: 'directorates',
@@ -992,7 +1057,7 @@ function registerHandlers() {
     const db = requireDatabase();
     validateCalibration(request.kThreshold, request.deprivationLine);
     const rows = persist.loadAnalysisRows(db, request.filter ?? {});
-    if (!rows.length) throw new Error('لا توجد مديريات في قاعدة البيانات. استورد ملف «القالب المحدث» أولًا.');
+    if (!rows.length) throw new Error('لا توجد مديريات في قاعدة البيانات. أدخل البيانات يدويًا أو استورد ملفًا صالحًا.');
     if (request.weights) {
       const check = validateWeights(request.weights);
       if (!check.valid) throw new Error(`أوزان غير صالحة: ${check.errors.join(' ')}`);
@@ -1407,7 +1472,7 @@ function registerHandlers() {
 /** Re-run the analysis from the database when nothing is cached in memory. */
 function rebuildAnalysis(database) {
   const rows = persist.loadAnalysisRows(database, {});
-  if (!rows.length) throw new Error('لا توجد مديريات في قاعدة البيانات. استورد ملف القالب أولًا.');
+  if (!rows.length) throw new Error('لا توجد مديريات في قاعدة البيانات. أدخل البيانات يدويًا أو استورد ملفًا صالحًا.');
   // Reproduce the calibration that produced the last persisted run instead of
   // silently falling back to defaults after a restart.
   const calibration = persist.getLastCalibration(database) ?? {};

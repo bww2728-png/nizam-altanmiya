@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const ExcelJS = require('exceljs');
 const { INPUT_FIELDS, DECISION_FIELD, INDICATORS, DIRECTORATE_FIELD_CLASS_BY_KEY } = require('./schema.cjs');
+const dataArchitecture = require('../database/architecture.cjs');
 
 const LIMITS = Object.freeze({
   sheets: 200, rowsPerSheet: 5000, columnsPerSheet: 400,
@@ -716,6 +717,7 @@ function promoteProjectRegion(database, request = {}) {
 
   const now = new Date().toISOString();
   return database.transaction(() => {
+    dataArchitecture.recordImportMappingDecisions(database,batchId,regionId,'project',columnMap,'local-user',now);
     const currentMapping = safeJsonParse(region.mapping_json, {});
     database.prepare('UPDATE workbook_import_regions SET mapping_json = ?, review_status = ? WHERE id = ?')
       .run(json({ ...currentMapping, approvedMapping: { entityType: 'project', columns: columnMap, approvedAt: now } }), 'mapped', regionId);
@@ -870,6 +872,7 @@ function promoteIndicatorRegion(database, request = {}) {
   }
   const now = new Date().toISOString();
   return database.transaction(() => {
+    dataArchitecture.recordImportMappingDecisions(database,batchId,regionId,'indicator_observation',columnMap,'local-user',now);
     const insert = database.prepare('INSERT INTO indicator_observations (indicator_id,geographic_unit_id,period_key,value_number,value_state,source_id,source_location,created_at) VALUES (?,?,?,? ,\'known\',?,?,?)');
     const promotion = database.prepare("INSERT INTO workbook_import_promotions (batch_id,region_id,row_id,entity_type,target_id,source_location,mapping_json,mapped_values_json,created_at) VALUES (?,?,?,'indicator_observation',?,?,?,?,?)");
     const applied = [];
@@ -899,7 +902,7 @@ function promoteIndicatorRegion(database, request = {}) {
 function listCanonicalReferences(database) {
   return {
     geographicUnits: database.prepare('SELECT id,unit_type,name,parent_id FROM geographic_units ORDER BY unit_type,name').all(),
-    sectors: database.prepare('SELECT id,code,name_ar FROM sectors WHERE active=1 ORDER BY name_ar').all(),
+    sectors: database.prepare("SELECT id,code,name_ar FROM sectors WHERE active=1 AND code NOT LIKE 'form-range-%' ORDER BY name_ar").all(),
     indicators: database.prepare('SELECT id,code,label_ar,unit,direction FROM indicator_definitions WHERE active=1 ORDER BY label_ar').all(),
   };
 }
@@ -1307,9 +1310,41 @@ function completeWorkbookImport(database, batchId, result = {}) {
   return { batchId: id, status };
 }
 
+function listDataSources(database, request = {}) {
+  const limit = Math.min(100,Math.max(1,Number(request.limit)||30));
+  const offset = Math.max(0,Math.min(1000000,Number(request.offset)||0));
+  const search = String(request.search ?? '').trim().slice(0,120);
+  const sourceColumns = new Set(database.prepare('PRAGMA table_info(data_sources)').all().map(column => column.name));
+  const expression = names => {
+    const present = names.filter(name => sourceColumns.has(name)).map(name => `source.${name}`);
+    return present.length > 1 ? `coalesce(${present.join(',')})` : present[0] ?? 'NULL';
+  };
+  const sourceCode = expression(['source_code']);
+  const organization = expression(['organization','organization_name']);
+  const fileName = expression(['file_name']);
+  const documentTitle = expression(['document_title']);
+  const referencePeriod = expression(['reference_period']);
+  const receivedAt = expression(['received_at']);
+  const collectedAt = expression(['collected_at']);
+  const notes = expression(['notes']);
+  const sha256 = expression(['content_sha256']);
+  const fileSize = expression(['file_size','file_size_bytes']);
+  const params = [];
+  const where = search ? `WHERE (instr(lower(coalesce(${sourceCode},'')),lower(?))>0 OR instr(lower(coalesce(${organization},'')),lower(?))>0
+    OR instr(lower(coalesce(${fileName},'')),lower(?))>0 OR instr(lower(coalesce(${documentTitle},'')),lower(?))>0
+    OR instr(lower(coalesce(${referencePeriod},'')),lower(?))>0 OR instr(lower(coalesce(${notes},'')),lower(?))>0)` : '';
+  if (search) params.push(search,search,search,search,search,search);
+  const total = database.prepare(`SELECT COUNT(*) AS count FROM data_sources source ${where}`).get(...params).count;
+  const rows = database.prepare(`SELECT source.id,${sourceCode} AS source_code,source.source_type,${organization} AS organization,
+    ${documentTitle} AS document_title,${fileName} AS file_name,${referencePeriod} AS reference_period,${receivedAt} AS received_at,
+    ${collectedAt} AS collected_at,${notes} AS notes,${sha256} AS content_sha256,${fileSize} AS file_size
+    FROM data_sources source ${where} ORDER BY source.id DESC LIMIT ? OFFSET ?`).all(...params,limit,offset);
+  return { rows,total,limit,offset,hasPrevious:offset>0,hasNext:offset+rows.length<total };
+}
+
 function listWorkbookImports(database, limit = 30) {
   const bounded = Math.min(100, Math.max(1, Number(limit) || 30));
   return database.prepare("SELECT b.id,b.file_name,b.file_size,b.sha256,b.sheet_count,b.row_count,b.cell_count,b.media_count,b.media_stored_count,b.truncated,b.status,b.created_at,b.updated_at,(SELECT COUNT(*) FROM workbook_import_regions r WHERE r.batch_id=b.id) AS region_count,(SELECT COUNT(*) FROM workbook_import_rows w WHERE w.batch_id=b.id) AS stored_row_count FROM workbook_import_batches b ORDER BY b.id DESC LIMIT ?").all(bounded);
 }
 
-module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, migrateCanonicalData, syncLegacyDirectorate, retireLegacyDirectorate, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, promoteIndicatorRegion, listCanonicalReferences, listIndicatorObservations, saveIndicatorObservation, listDataQualityIssues, resolveDataQualityIssue, saveCanonicalProject, resolveProjectQualityIssue, addProjectFunding, addProjectAttachment, getProjectAttachment, listCanonicalProjects, getCanonicalProject, completeWorkbookImport, listWorkbookImports };
+module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, migrateCanonicalData, syncLegacyDirectorate, retireLegacyDirectorate, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, promoteIndicatorRegion, listCanonicalReferences, listIndicatorObservations, saveIndicatorObservation, listDataQualityIssues, listDataSources, resolveDataQualityIssue, saveCanonicalProject, resolveProjectQualityIssue, addProjectFunding, addProjectAttachment, getProjectAttachment, listCanonicalProjects, getCanonicalProject, completeWorkbookImport, listWorkbookImports };
