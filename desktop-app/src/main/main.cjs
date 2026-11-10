@@ -53,6 +53,12 @@ let autoUpdater = null;
 let lastUpdateStatus = { state: 'idle' };
 const UPDATE_CHECK_DELAY_MS = 8_000;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+/**
+ * A failed check retries on its own, without an attempt counter. A failed
+ * transfer waits longer because every attempt starts the installer again.
+ */
+const UPDATE_RETRY_DELAY_MS = 15 * 60 * 1_000;
+const UPDATE_DOWNLOAD_RETRY_DELAY_MS = 60 * 60 * 1_000;
 try { ({ autoUpdater } = require('electron-updater')); } catch { autoUpdater = null; }
 
 const COLUMN_BY_KEY = DIRECTORATE_COLUMNS;
@@ -356,7 +362,9 @@ function validateCalibration(kThreshold, deprivationLine) {
 }
 
 /** Timers owned by the updater so they can be cleared on quit. */
-const updateTimers = { initial: null, interval: null };
+const updateTimers = { initial: null, interval: null, retry: null };
+/** Set on quit so a late error event cannot arm a new retry. */
+let updateStopped = false;
 
 /**
  * Merge a status patch and forward it when the window can still receive it.
@@ -384,21 +392,78 @@ function setupAutoUpdate() {
   // NSIS update is allowed, and an older version may never replace a newer one.
   autoUpdater.disableWebInstaller = true;
   autoUpdater.allowDowngrade = false;
+  // The release asset must arrive as one continuous stream. A differential update
+  // asks for every changed block in its own ranged request (electron-updater
+  // disables multi-range for GitHub, DifferentialDownloader.js:182), and on a
+  // high-latency link each request costs seconds, so the transfer never finishes.
+  autoUpdater.disableDifferentialDownload = true;
 
   autoUpdater.on('checking-for-update', () => pushUpdateStatus({ state: 'checking' }));
-  autoUpdater.on('update-available', info => pushUpdateStatus({ state: 'available', version: info?.version }));
-  autoUpdater.on('update-not-available', () => pushUpdateStatus({ state: 'not-available' }));
+  autoUpdater.on('update-available', info => {
+    clearUpdateRetry();
+    pushUpdateStatus({ state: 'available', version: info?.version });
+  });
+  autoUpdater.on('update-not-available', () => {
+    clearUpdateRetry();
+    pushUpdateStatus({ state: 'not-available' });
+  });
   autoUpdater.on('download-progress', progress => pushUpdateStatus({ state: 'downloading', percent: Math.round(progress?.percent ?? 0) }));
-  autoUpdater.on('update-downloaded', info => pushUpdateStatus({ state: 'downloaded', version: info?.version }));
-  autoUpdater.on('error', error => pushUpdateStatus({ state: 'error', message: String(error?.message ?? error).slice(0, 300) }));
+  autoUpdater.on('update-downloaded', info => {
+    clearUpdateRetry();
+    pushUpdateStatus({ state: 'downloaded', version: info?.version });
+  });
+  autoUpdater.on('error', error => {
+    // Read the phase before recording the failure: the message alone does not say
+    // whether the check, the transfer or the install is what failed.
+    const failedPhase = lastUpdateStatus.state;
+    const failedWhileChecking = !['available', 'downloading', 'downloaded'].includes(failedPhase);
+    // A failure in the ready phase means the install itself failed. Keeping the
+    // sticky 'downloaded' state would swallow the message, keep offering a restart
+    // that cannot succeed and block every later check, so the ready state is
+    // dropped before the error is published and the retry is armed.
+    if (failedPhase === 'downloaded') lastUpdateStatus = { state: 'error' };
+    pushUpdateStatus({ state: 'error', phase: failedPhase, message: String(error?.message ?? error).slice(0, 300) });
+    // The phase alone decides the delay; there is no attempt counter, so a machine
+    // that cannot reach the channel keeps retrying on its own until it succeeds.
+    scheduleUpdateRetry(failedWhileChecking ? UPDATE_RETRY_DELAY_MS : UPDATE_DOWNLOAD_RETRY_DELAY_MS);
+  });
 
   // Every check keeps a catch: a machine with no connection must not surface an
   // unhandled rejection, and a failed check is already reported by the error event.
+  // The transfer runs as its own promise inside that result, so it needs the same
+  // guard: a rejection nobody awaits would reach the process-level handler.
   // Once a build is downloaded the poll stops so the ready state stays put.
   const checkForUpdates = () => {
     if (lastUpdateStatus.state === 'downloaded') return;
-    autoUpdater.checkForUpdates().catch(() => {});
+    autoUpdater.checkForUpdates().then(
+      result => { result?.downloadPromise?.catch?.(() => {}); },
+      () => {},
+    );
   };
+
+  // Automatic retry: armed by a failure, cleared by any success. Do not wait for
+  // the six-hour poll to notice that a flaky link recovered.
+  function scheduleUpdateRetry(delay) {
+    if (updateStopped || updateTimers.retry) return;
+    updateTimers.retry = setTimeout(() => {
+      updateTimers.retry = null;
+      if (updateStopped) return;
+      // A manual check may have recovered meanwhile. Only a live transfer or an
+      // installer already waiting for a restart makes a re-check pointless; any
+      // other state is safe to retry, so a failure can never stall the updater.
+      const state = lastUpdateStatus.state;
+      if (state === 'downloading' || state === 'downloaded') return;
+      checkForUpdates();
+    }, delay);
+    if (updateTimers.retry.unref) updateTimers.retry.unref();
+  }
+
+  function clearUpdateRetry() {
+    if (!updateTimers.retry) return;
+    clearTimeout(updateTimers.retry);
+    updateTimers.retry = null;
+  }
+
   updateTimers.initial = setTimeout(checkForUpdates, UPDATE_CHECK_DELAY_MS);
   updateTimers.interval = setInterval(checkForUpdates, UPDATE_CHECK_INTERVAL_MS);
   // Never keep the process alive just for the update poll.
@@ -408,10 +473,13 @@ function setupAutoUpdate() {
 
 /** Clear the updater timers on quit so nothing fires during teardown. */
 function stopAutoUpdate() {
+  updateStopped = true;
   if (updateTimers.initial) clearTimeout(updateTimers.initial);
   if (updateTimers.interval) clearInterval(updateTimers.interval);
+  if (updateTimers.retry) clearTimeout(updateTimers.retry);
   updateTimers.initial = null;
   updateTimers.interval = null;
+  updateTimers.retry = null;
 }
 
 /**
@@ -1607,10 +1675,18 @@ function registerHandlers() {
   ipcMain.handle('update:status', () => ({ ...lastUpdateStatus, currentVersion: app.getVersion() }));
   ipcMain.handle('update:check', async () => {
     if (!app.isPackaged || process.platform !== 'win32' || !autoUpdater) return { ...lastUpdateStatus, currentVersion: app.getVersion() };
+    // A downloaded build is already waiting for a restart; a manual check must not
+    // replace that state with a fresh cycle.
+    if (lastUpdateStatus.state === 'downloaded') return { ...lastUpdateStatus, currentVersion: app.getVersion() };
     try {
-      await autoUpdater.checkForUpdates();
+      const result = await autoUpdater.checkForUpdates();
+      // The download runs as its own promise; a rejection nobody awaits would
+      // reach the process-level handler, while the error event reports it anyway.
+      result?.downloadPromise?.catch?.(() => {});
     } catch (error) {
-      pushUpdateStatus({ state: 'error', message: String(error?.message ?? error).slice(0, 300) });
+      // Set the phase explicitly: the merge in pushUpdateStatus would otherwise
+      // keep a stale phase and the banner would name the wrong operation.
+      pushUpdateStatus({ state: 'error', phase: lastUpdateStatus.state, message: String(error?.message ?? error).slice(0, 300) });
     }
     return { ...lastUpdateStatus, currentVersion: app.getVersion() };
   });

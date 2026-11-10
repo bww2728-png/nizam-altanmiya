@@ -371,7 +371,12 @@ function UpdateBanner({ status, onDismiss }) {
       : 'اكتمل تنزيل التحديث —';
   } else if (state === 'error') {
     tone = 'bad';
-    message = `تعذّر التحقق من التحديث: ${status?.message ?? 'خطأ غير معروف'}`;
+    const cause = status?.message ?? 'خطأ غير معروف';
+    // The same state also reports a failed install, where the build is already on
+    // disk and nothing needs to be fetched again.
+    message = status?.phase === 'downloaded'
+      ? `تعذّر تشغيل مثبّت التحديث: ${cause}`
+      : `تعذّر التحقق من التحديث: ${cause}`;
   }
 
   const install = () => {
