@@ -17,6 +17,28 @@ const OFFLINE_RUNTIME_POLICY = Object.freeze({
   updateDistribution: 'github-releases',
 });
 
+function isAllowedRagflowRequest(input, init = {}) {
+  try {
+    const options = typeof input === 'string' || input instanceof URL ? { url: input } : (input ?? {});
+    const rawUrl = options.url ?? input?.url;
+    const url = rawUrl instanceof URL ? rawUrl : new URL(String(rawUrl));
+    const method = String(init.method ?? options.method ?? input?.method ?? 'GET').toUpperCase();
+    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.port !== '9380' || url.username || url.password) return false;
+    if (method === 'GET') {
+      if (url.pathname === '/api/v1/system/healthz' && !url.search && !url.hash) return true;
+      const documentsPath = /^\/api\/v1\/datasets\/[a-f0-9]{32}\/documents$/i.test(url.pathname);
+      return documentsPath && [...url.searchParams.keys()].every((key) => ['id', 'page', 'page_size'].includes(key))
+        && /^[a-f0-9]{32}$/i.test(url.searchParams.get('id') ?? '');
+    }
+    if (method !== 'POST' || url.search || url.hash) return false;
+    return url.pathname === '/api/v1/retrieval'
+      || /^\/api\/v1\/datasets\/[a-f0-9]{32}\/documents$/i.test(url.pathname)
+      || /^\/api\/v1\/datasets\/[a-f0-9]{32}\/chunks$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function updateStatus(currentVersion = '') {
   return {
     state: 'idle',
@@ -150,7 +172,7 @@ function installOfflineNetworkGuards(options = {}) {
     throw recordBlockedAttempt('electron', 'electron.net.request');
   });
   patch(electronNet, 'fetch', function restrictedElectronFetch(input, ...args) {
-    if (allowedNetworkRequest(input)) return Reflect.apply(originalElectronFetch, electronNet, [input, ...args]);
+    if (allowedNetworkRequest(input, args[0] ?? {})) return Reflect.apply(originalElectronFetch, electronNet, [input, ...args]);
     const error = recordBlockedAttempt('electron', 'electron.net.fetch');
     return Promise.reject(error);
   });
@@ -191,4 +213,4 @@ function clearOfflineNetworkAudit() {
   OFFLINE_NETWORK_AUDIT.rendererAttempts.length = 0;
 }
 
-module.exports = { OFFLINE_RUNTIME_POLICY, updateStatus, isAllowedUpdateRequest, installOfflineNetworkGuards, installOfflineSessionGuard, getOfflineNetworkAudit, clearOfflineNetworkAudit };
+module.exports = { OFFLINE_RUNTIME_POLICY, updateStatus, isAllowedUpdateRequest, isAllowedRagflowRequest, installOfflineNetworkGuards, installOfflineSessionGuard, getOfflineNetworkAudit, clearOfflineNetworkAudit };

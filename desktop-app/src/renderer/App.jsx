@@ -5,6 +5,7 @@ import ThemeToggle from './components/ThemeToggle.jsx';
 import { ErrorBanner, Loading, ToastStack } from './components/ui.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import ImportPage from './pages/Import.jsx';
+import DocumentCenter from './pages/DocumentCenter.jsx';
 import DataEntry from './pages/DataEntry.jsx';
 import Projects from './pages/Projects.jsx';
 import IndicatorObservations from './pages/IndicatorObservations.jsx';
@@ -312,6 +313,8 @@ export default function App() {
         return <DataSources refreshKey={refreshKey} />;
       case 'import':
         return <ImportPage onNavigate={navigate} notify={notify} onApplied={refresh} />;
+      case 'documents':
+        return <DocumentCenter notify={notify} accessProfile={status?.accessProfile ?? 'owner'} />;
       case 'data-entry':
         return <DataEntry notify={notify} refreshKey={refreshKey} />;
       case 'correction':

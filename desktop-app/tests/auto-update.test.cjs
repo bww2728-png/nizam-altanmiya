@@ -24,7 +24,7 @@ test('update channels are real handlers rather than offline stubs', () => {
   assert.match(mainSource, /ipcMain\.handle\('update:check', async \(\) =>/);
   assert.match(mainSource, /ipcMain\.handle\('update:install', \(\) =>/);
   assert.match(mainSource, /quitAndInstall\(\)/);
-  assert.match(mainSource, /installOfflineNetworkGuards\(\{ electronNet: net, allowedNetworkRequest: isAllowedUpdateRequest \}\)/);
+  assert.match(mainSource, /installOfflineNetworkGuards\(\{ electronNet: net, allowedNetworkRequest: \(request, init\) => isAllowedUpdateRequest\(request\) \|\| isAllowedRagflowRequest\(request, init\) \}\)/);
   assert.match(mainSource, /installOfflineSessionGuard\(session\.defaultSession\)/);
   assert.doesNotMatch(mainSource, /offline-only/);
 });

@@ -23,6 +23,7 @@
     "better-sqlite3-multiple-ciphers": "13.0.3",
     "electron-updater": "^6.8.11",
     "exceljs": "4.4.0",
+    "unzipper": "0.12.5",
     "lucide-react": "^0.468.0",
     "react": "19.3.1",
     "react-dom": "19.3.1"
@@ -34,6 +35,11 @@
     "electron-builder": "26.18.0",
     "vite": "8.3.6",
     "wait-on": "^8.0.0"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
   },
   "build": {
     "appId": "org.local.development-intelligence",
@@ -58,6 +64,13 @@
       "dist/**",
       "src/main/**",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "services/document_worker",
+        "to": "document-worker",
+        "filter": ["worker.py"]
+      }
     ],
     "win": {
       "target": [

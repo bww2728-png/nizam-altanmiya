@@ -1,6 +1,6 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, net, session } = require('electron');
-const { installOfflineNetworkGuards, installOfflineSessionGuard, isAllowedUpdateRequest } = require('./offline-policy.cjs');
-installOfflineNetworkGuards({ electronNet: net, allowedNetworkRequest: isAllowedUpdateRequest });
+const { app, BrowserWindow, dialog, ipcMain, Menu, net, safeStorage, session } = require('electron');
+const { installOfflineNetworkGuards, installOfflineSessionGuard, isAllowedUpdateRequest, isAllowedRagflowRequest } = require('./offline-policy.cjs');
+installOfflineNetworkGuards({ electronNet: net, allowedNetworkRequest: (request, init) => isAllowedUpdateRequest(request) || isAllowedRagflowRequest(request, init) });
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -20,6 +20,8 @@ const { analyze } = require('./analysis/engine.cjs');
 const { readDirectorateWorkbook } = require('./analysis/template-reader.cjs');
 const canonicalData = require('./analysis/canonical-data.cjs');
 const dataArchitecture = require('./database/architecture.cjs');
+const documentService = require('./documents/document-service.cjs');
+const { RagflowAdapter } = require('./documents/ragflow-adapter.cjs');
 const recordService = require('./database/record-service.cjs');
 const { mappingTable } = require('./analysis/mapping.cjs');
 const { defaultWeights, validateWeights } = require('./analysis/composite.cjs');
@@ -61,6 +63,50 @@ function getDatabasePath() {
 
 function getStoreKeyPath() {
   return path.join(app.getPath('userData'), 'store.key');
+}
+
+function getRagflowConfigPath() {
+  return path.join(app.getPath('userData'), 'ragflow-credentials.bin');
+}
+
+function readRagflowConfig() {
+  const configPath = getRagflowConfigPath();
+  if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(configPath)) return { apiKey: '', datasetIds: [] };
+  try {
+    const stat = fs.lstatSync(configPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024) return { apiKey: '', datasetIds: [] };
+    const payload = JSON.parse(safeStorage.decryptString(fs.readFileSync(configPath)));
+    return {
+      apiKey: typeof payload.apiKey === 'string' ? payload.apiKey.slice(0, 1000) : '',
+      datasetIds: Array.isArray(payload.datasetIds) ? payload.datasetIds.filter((value) => /^[a-f0-9]{32}$/i.test(value)).slice(0, 20) : [],
+    };
+  } catch {
+    return { apiKey: '', datasetIds: [] };
+  }
+}
+
+function saveRagflowConfig(request = {}) {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('التخزين المشفر لمفتاح RAGFlow غير متاح في نظام التشغيل.');
+  const apiKey = String(request.apiKey ?? '').trim();
+  const datasetIds = [...new Set((Array.isArray(request.datasetIds) ? request.datasetIds : [])
+    .map((value) => String(value).trim()).filter((value) => /^[a-f0-9]{32}$/i.test(value)))].slice(0, 20);
+  if (apiKey.length < 8 || apiKey.length > 1000 || datasetIds.length === 0) throw new Error('أدخل مفتاح API محليًا ومعرّف مجموعة واحدة على الأقل (32 خانة hex).');
+  const configPath = getRagflowConfigPath();
+  const temporaryPath = `${configPath}.${crypto.randomUUID()}.tmp`;
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  try {
+    fs.writeFileSync(temporaryPath, safeStorage.encryptString(JSON.stringify({ apiKey, datasetIds })), { flag: 'wx', mode: 0o600 });
+    fs.renameSync(temporaryPath, configPath);
+    if (process.platform !== 'win32') fs.chmodSync(configPath, 0o600);
+  } finally {
+    try { fs.rmSync(temporaryPath, { force: true }); } catch {}
+  }
+  return { configured: true, datasetIds };
+}
+
+function getRagflowAdapter() {
+  const config = readRagflowConfig();
+  return new RagflowAdapter({ apiKey: config.apiKey, datasetIds: config.datasetIds, fetch: (url, init) => net.fetch(url, init) });
 }
 
 function hasUsableDatabase() {
@@ -437,6 +483,113 @@ function registerHandlers() {
       // A pre-open count so the welcome screen can warn before the user clicks.
       backups: hasUsableDatabase() ? listBackups(getDatabasePath()).length : 0,
     };
+  });
+
+  ipcMain.handle('documents:stage', async () => {
+    if (currentProfile() !== 'owner') throw new Error('إدارة الوثائق تتطلب وضع المالك.');
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'إضافة وثيقة إلى المكتبة المحلية',
+      properties: ['openFile'],
+      filters: [{ name: 'PDF وWord وصور', extensions: ['pdf', 'docx', 'png', 'jpg', 'jpeg', 'tif', 'tiff'] }],
+    });
+    if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
+    const staged = await documentService.stageFile(requireDatabase(), result.filePaths[0]);
+    auditRead('documents:stage', { entity: 'document_records', entityId: staged.id, result: staged.duplicate ? 'duplicate' : 'staged' });
+    return staged;
+  });
+
+  ipcMain.handle('documents:list', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') return { restricted: true, rows: [], total: 0 };
+    const result = documentService.listDocuments(requireDatabase(), request);
+    auditRead('documents:list', { entity: 'document_records', rowCount: result.rows.length, detail: `offset=${result.offset};limit=${result.limit}` });
+    return result;
+  });
+
+  ipcMain.handle('documents:get', (_event, documentId) => {
+    if (currentProfile() !== 'owner') throw new Error('استعراض محتوى الوثائق يتطلب وضع المالك.');
+    const result = documentService.getDocument(requireDatabase(), documentId);
+    auditRead('documents:get', { entity: 'document_records', entityId: result.document.id, rowCount: result.elements.length });
+    return result;
+  });
+
+  ipcMain.handle('documents:extract', async (_event, documentId) => {
+    if (currentProfile() !== 'owner') throw new Error('استخراج الوثائق يتطلب وضع المالك.');
+    const db = requireDatabase();
+    const original = documentService.readOriginal(db, documentId);
+    const temporaryDirectory = fs.mkdtempSync(path.join(app.getPath('temp'), 'ldi-document-'));
+    const temporaryFile = path.join(temporaryDirectory, `${crypto.randomUUID()}${path.extname(original.file_name).toLowerCase()}`);
+    try {
+      if (process.platform !== 'win32') fs.chmodSync(temporaryDirectory, 0o700);
+      fs.writeFileSync(temporaryFile, original.content, { flag: 'wx', mode: 0o600 });
+      const payload = await documentService.runWorker(temporaryFile, app.isPackaged ? { resourcesPath: process.resourcesPath } : {});
+      const result = documentService.persistExtraction(db, original.id, payload);
+      auditRead('documents:extract', { entity: 'document_records', entityId: original.id, result: result.status, detail: `engine=${result.engine.name};elements=${result.elementCount}` });
+      return result;
+    } catch (error) {
+      const message = String(error?.message ?? error).slice(0, 2000);
+      documentService.markProcessingFailure(db, original.id, 'document-worker', message, /not found|not installed|غير موجود|غير مثبت|غير متاح/i.test(message) ? 'unavailable' : 'failed');
+      auditRead('documents:extract', { entity: 'document_records', entityId: original.id, result: 'failed' });
+      throw new Error(message);
+    } finally {
+      try { fs.rmSync(temporaryDirectory, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  ipcMain.handle('documents:search-local', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') return { restricted: true, rows: [] };
+    const result = documentService.searchDocuments(requireDatabase(), request);
+    auditRead('documents:search-local', { entity: 'document_elements', rowCount: result.rows.length, detail: `queryLength=${result.query.length}` });
+    return result;
+  });
+
+  ipcMain.handle('documents:index-ragflow', async (_event, documentId) => {
+    if (currentProfile() !== 'owner') throw new Error('فهرسة الوثائق تتطلب وضع المالك.');
+    const db = requireDatabase();
+    const adapter = getRagflowAdapter();
+    const health = await adapter.health();
+    if (!health.configured || !health.available) throw new Error(health.error || 'خدمة RAGFlow المحلية غير جاهزة أو غير مهيأة.');
+    const document = documentService.readOriginal(db, documentId);
+    const references = documentService.listRagflowReferences(db, documentId);
+    const result = await adapter.indexDocument(document, {
+      references,
+      onReference: (reference) => documentService.saveRagflowReference(db, document.id, reference.dataset_id, reference.ragflow_document_id, reference.status),
+    });
+    auditRead('documents:index-ragflow', { entity: 'document_records', entityId: document.id, result: 'queued', detail: `datasets=${result.results.length}` });
+    return result;
+  });
+
+  ipcMain.handle('documents:sync-index-status', async (_event, documentId) => {
+    if (currentProfile() !== 'owner') throw new Error('فحص الفهرسة يتطلب وضع المالك.');
+    const db = requireDatabase();
+    const adapter = getRagflowAdapter();
+    const references = documentService.listRagflowReferences(db, documentId);
+    const results = [];
+    for (const reference of references) {
+      try {
+        const status = await adapter.documentStatus(reference.dataset_id, reference.ragflow_document_id);
+        results.push(documentService.saveRagflowReference(db, documentId, status.datasetId, status.documentId, status.status));
+      } catch (error) {
+        results.push({ dataset_id: reference.dataset_id, status: reference.status, error: String(error?.message ?? error).slice(0, 300) });
+      }
+    }
+    return { results };
+  });
+
+  ipcMain.handle('ragflow:status', async () => {
+    if (currentProfile() !== 'owner') return { restricted: true };
+    return getRagflowAdapter().health();
+  });
+
+  ipcMain.handle('ragflow:save-config', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('تهيئة البحث المعرفي تتطلب وضع المالك.');
+    return saveRagflowConfig(request);
+  });
+
+  ipcMain.handle('ragflow:search', async (_event, request = {}) => {
+    if (currentProfile() !== 'owner') return { restricted: true, rows: [] };
+    const result = await getRagflowAdapter().retrieve(request);
+    auditRead('ragflow:search', { entity: 'ragflow_chunks', rowCount: result.rows.length, detail: `queryLength=${result.question.length}` });
+    return result;
   });
 
   ipcMain.handle('db:open', () => {
