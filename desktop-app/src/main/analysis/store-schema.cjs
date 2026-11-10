@@ -2,6 +2,7 @@
 
 const canonicalData = require('./canonical-data.cjs');
 const dataArchitecture = require('../database/architecture.cjs');
+const documentService = require('../documents/document-service.cjs');
 
 /**
  * Database schema for the analysis layer.
@@ -335,6 +336,7 @@ function migrate(database) {
   // Additive normalized model + raw workbook staging; never drops legacy tables.
   canonicalData.migrateCanonicalData(database);
   dataArchitecture.migrate(database);
+  documentService.migrate(database);
   for (const index of EXTRA_INDEXES) {
     if (!tableExists(database, index.table)) continue;
     database.exec(index.ddl);

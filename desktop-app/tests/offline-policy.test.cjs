@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
-const { OFFLINE_RUNTIME_POLICY, updateStatus, isAllowedUpdateRequest, installOfflineNetworkGuards, installOfflineSessionGuard, getOfflineNetworkAudit, clearOfflineNetworkAudit } = require('../src/main/offline-policy.cjs');
+const { OFFLINE_RUNTIME_POLICY, updateStatus, isAllowedUpdateRequest, isAllowedRagflowRequest, installOfflineNetworkGuards, installOfflineSessionGuard, getOfflineNetworkAudit, clearOfflineNetworkAudit } = require('../src/main/offline-policy.cjs');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -47,12 +47,33 @@ test('update allowlist accepts official release metadata and assets only', () =>
   ]) assert.equal(isAllowedUpdateRequest(request), false);
 });
 
+test('RAGFlow allowlist is limited to documented loopback endpoints and methods', () => {
+  const datasetId = 'a'.repeat(32);
+  const documentId = 'b'.repeat(32);
+  for (const request of [
+    { url: 'http://127.0.0.1:9380/api/v1/system/healthz' },
+    { url: `http://127.0.0.1:9380/api/v1/datasets/${datasetId}/documents?id=${documentId}&page=1&page_size=1` },
+    { url: 'http://127.0.0.1:9380/api/v1/retrieval', method: 'POST' },
+    { url: `http://127.0.0.1:9380/api/v1/datasets/${datasetId}/documents`, method: 'POST' },
+    { url: `http://127.0.0.1:9380/api/v1/datasets/${datasetId}/chunks`, method: 'POST' },
+  ]) assert.equal(isAllowedRagflowRequest(request), true);
+  for (const request of [
+    { url: 'http://127.0.0.1:9380/api/v1/system/healthz?redirect=1' },
+    { url: `http://127.0.0.1:9380/api/v1/datasets/${datasetId}/documents?id=${documentId}&admin=true` },
+    { url: `http://127.0.0.1:9380/api/v1/datasets/${datasetId}/documents?id=invalid` },
+    { url: `http://127.0.0.1:9380/api/v1/datasets/${datasetId}/chunks`, method: 'DELETE' },
+    { url: 'http://localhost:9380/api/v1/retrieval', method: 'POST' },
+    { url: 'http://127.0.0.1:9381/api/v1/retrieval', method: 'POST' },
+    { url: 'https://example.invalid/api/v1/retrieval', method: 'POST' },
+  ]) assert.equal(isAllowedRagflowRequest(request), false);
+});
+
 test('packaged main process initializes the restricted automatic updater', () => {
   const source = fs.readFileSync(path.join(ROOT, 'src/main/main.cjs'), 'utf8');
   assert.match(source, /require\(['"]electron-updater['"]\)/);
   assert.match(source, /autoUpdater\.checkForUpdates\(\)/);
   assert.match(source, /setupAutoUpdate\(\)/);
-  assert.match(source, /installOfflineNetworkGuards\(\{ electronNet: net, allowedNetworkRequest: isAllowedUpdateRequest \}\)/);
+  assert.match(source, /installOfflineNetworkGuards\(\{ electronNet: net, allowedNetworkRequest: \(request, init\) => isAllowedUpdateRequest\(request\) \|\| isAllowedRagflowRequest\(request, init\) \}\)/);
   assert.match(source, /installOfflineSessionGuard\(session\.defaultSession\)/);
 });
 
@@ -78,7 +99,7 @@ test('Node and Electron network APIs are blocked and recorded by the runtime gua
     modules,
     globalObject,
     electronNet,
-    allowedNetworkRequest: isAllowedUpdateRequest,
+    allowedNetworkRequest: (request, init) => isAllowedUpdateRequest(request) || isAllowedRagflowRequest(request, init),
   });
   try {
     for (const [api, call] of [
@@ -99,6 +120,7 @@ test('Node and Electron network APIs are blocked and recorded by the runtime gua
     assert.equal(electronNet.request({ protocol: 'https:', hostname: 'github.com', path: '/bww2728-png/nizam-altanmiya/releases.atom' }), 'request');
     assert.equal(electronNet.request({ protocol: 'https:', hostname: 'github.com', path: '/bww2728-png/nizam-altanmiya/releases/tag/v0.6.8', method: 'GET', session: {} }), 'request');
     assert.deepEqual(await electronNet.fetch('https://release-assets.githubusercontent.com/download/update.exe'), { ok: true });
+    assert.deepEqual(await electronNet.fetch('http://127.0.0.1:9380/api/v1/retrieval', { method: 'POST' }), { ok: true });
 
     const audit = getOfflineNetworkAudit();
     assert.equal(audit.nodeAttempts.length, 9);
