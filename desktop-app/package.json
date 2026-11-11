@@ -43,6 +43,7 @@
   },
   "build": {
     "appId": "org.local.development-intelligence",
+    "compression": "maximum",
     "productName": "نظام التنمية المحلية",
     "directories": {
       "output": "release"

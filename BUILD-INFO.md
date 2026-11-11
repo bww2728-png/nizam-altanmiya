@@ -160,8 +160,9 @@
 | --- | --- |
 | المحرّك | `electron-updater@6.8.11` (تبعيته في `dependencies`). |
 | المصدر | `build.publish` → مزوّد `github` للمالك `bww2728-png` والمستودع `nizam-altanmiya`، مع `releaseType: "release"` (المحدّث يتجاهل المسودات). |
-| في التطبيق | `desktop-app/src/main/main.cjs`: يفحص `autoUpdater` عند الإقلاع بعد 8 ثوانٍ ثم كل 6 ساعات، ويحمل التحديث تلقائيًا ويثبّته عند الخروج، مع اقتصار التشغيل على إصدار Windows المثبّت. |
-| الشبكة | لا حرّاس اتصال ولا allowlist: أُزيل `offline-policy.cjs` بقرار المالك (2026-11-08). الشبكة مفتوحة كما في 0.5.2، والبيانات تبقى محلية. |
+| في التطبيق | `desktop-app/src/main/main.cjs`: يفحص `autoUpdater` عند الإقلاع بعد 8 ثوانٍ ثم كل 6 ساعات، ويحمل التحديث تلقائيًا ويثبّته عند الخروج، مع اقتصار التشغيل على إصدار Windows المثبّت. عند أي فشل تُعاد المحاولة تلقائيًا بلا عدّاد محاولات: كل 15 دقيقة لفشل الفحص، وكل 60 دقيقة لفشل التنزيل، وتُلغى عند أول نجاح. |
+| الشبكة | الحرّاس الشبكية مبقاة بقرار المالك (2026-11-10): `offline-policy.cjs` يسمح فقط بنطاق التحديث الرسمي (`releases.atom`, `releases/latest`, `releases/tag/<ver>`, `releases/download/<ver>/<file>` و`objects/release-assets.githubusercontent.com`) وبمنافذ RAGFlow المحلية (`127.0.0.1:9380`) لخدمة الذكاء الوثائقي، ويمنع ما عداها. |
+| النقل | `autoUpdater.disableDifferentialDownload = true` (2026-11-10): موفّر GitHub يعطّل الطلبات المتعددة (`GitHubProvider.js:16`) فيطلب التنزيل التفاضلي كل كتلة بطلب مدى منفصل (`DifferentialDownloader.js:182`)؛ على وصلة زمن أول بايت فيها ~7 ثوانٍ يتوقف النقل عمليًا. البث الواحد المتصل يتقدّم دائمًا. |
 | الجسر | `desktop-app/src/main/preload.cjs`: `updateStatus`, `checkForUpdates`, `installUpdate`, `onUpdateStatus`. |
 | الواجهة | `desktop-app/src/renderer/App.jsx`: مكوّن `UpdateBanner` يعرض التوفر والتنزيل والاكتمال والخطأ. |
 | CI | `.github/workflows/release.yml` على **كل دفع إلى `main`** (windows-latest): `npm ci` → `npm test` (بوابة) → `scripts/ci-version.cjs` (إصدار تلقائي) → بناء → نشر إصدار GitHub واحد بأصول المثبّت و`blockmap` و`latest.yml`. |
@@ -214,3 +215,22 @@
 
 التحقق المحلي: `node --test` → 170 (169 نجاح، 1 متخطّى، 0 فشل)؛ `npx vite build` ناجح؛ `npx electron scripts/e2e-analysis.cjs` → 50/50.
 
+## تحديث 2026-11-10 — تشخيص عدم وصول التحديثات وإصلاح النقل
+
+المشكلة: النسخة المثبّتة 0.6.10 لم تصلها الإصدارات 0.6.11 و0.6.12 رغم نشرها.
+
+الأدلة المقيسة على الجهاز:
+
+1. القناة سليمة: المحدّث في 0.6.10 اكتشف 0.6.12 وأنشأ `pending\temp-Local-Development-Intelligence-0.6.12-x64.exe`، و`latest.yml` يعلن الإصدار 0.6.12 بحجم 139,991,314 وبصمة `sha512` معلنة.
+2. الحرّاس ليست السبب: `offline-policy.cjs` على `main` يسمح بإعادة التوجيه إلى `/releases/tag/<ver>` (PR #7)، وقد نجحت مرحلة الكشف.
+3. السبب الفعلي هو التنزيل التفاضلي: موفّر GitHub يعطّل `isUseMultipleRangeRequest` (`GitHubProvider.js:16`)، فيصدر `DifferentialDownloader` طلب مدى منفصلًا لكل كتلة (`DifferentialDownloader.js:182`). زمن أول بايت من CDN جيت هاب من هذه الشبكة ~7 ثوانٍ والإنتاجية المتصلة ~60KB/s، فتوقف النقل عند 0 بايت لدقائق ثم تقدّم إلى 26MB ثم 61MB.
+4. لا استكمال بين التشغيلات: `DownloadedUpdateHelper.createTempUpdateFile` يحذف الملف المؤقت قبل كل محاولة، فإغلاق التطبيق يلغي التقدّم.
+
+| الملف | التغيير |
+| --- | --- |
+| `desktop-app/src/main/main.cjs` | `autoUpdater.disableDifferentialDownload = true` (بث واحد متصل بدل طلبات المدى)؛ إعادة محاولة تلقائية بلا عدّاد محاولات: كل 15 دقيقة لفشل الفحص وكل 60 دقيقة لفشل النقل أو التثبيت، تُلغى عند أول نجاح وتُعطَّل عند الإغلاق (`updateStopped`). فشل التثبيت بعد `downloaded` يُسقط الحالة اللاصقة قبل نشر الخطأ، فلا يبقى زر إعادة تشغيل لا يعمل ولا تتعطّل الفحوص اللاحقة. |
+| `desktop-app/package.json` | `build.compression = "maximum"` لتقليل حجم المثبّت المنشور. |
+| `desktop-app/tests/auto-update.test.cjs` | يثبّت الخيارين وإعادة المحاولة التلقائية وغياب العدّاد. |
+| `BUILD-INFO.md` | تحديث جدول التحديث الذاتي وصيانة وصف الشبكة بعد إعادة الحرّاس. |
+
+ملاحظة تشغيلية: حجم المثبّت ~140MB، فعلى وصلة ~60KB/s يحتاج التنزيل المتصل نحو 40 دقيقة من بقاء التطبيق مفتوحًا، وإغلاق التطبيق أثناء التنزيل يلغي التقدّم ويعيده من الصفر.
