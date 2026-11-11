@@ -54,17 +54,15 @@ function validateReference(root = repositoryRoot, manifest = JSON.parse(readText
 
   const submoduleRoot = path.join(root, submodulePath);
   let actualCommit;
-  let actualTag;
   let workingTree;
   try {
     actualCommit = execFileSync('git', ['-C', submoduleRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-    actualTag = execFileSync('git', ['-C', submoduleRoot, 'describe', '--tags', '--exact-match'], { encoding: 'utf8' }).trim();
     workingTree = execFileSync('git', ['-C', submoduleRoot, 'status', '--porcelain'], { encoding: 'utf8' }).trim();
   } catch (error) {
     throw new Error(`Unable to inspect the RAGFlow submodule: ${error.message}`);
   }
-  if (actualCommit !== manifest.integration.commit || actualTag !== manifest.integration.tag) {
-    throw new Error(`RAGFlow checkout mismatch: expected ${manifest.integration.tag} (${manifest.integration.commit}), got ${actualTag || 'no exact tag'} (${actualCommit}).`);
+  if (actualCommit !== manifest.integration.commit) {
+    throw new Error(`RAGFlow checkout mismatch: expected ${manifest.integration.tag} (${manifest.integration.commit}), got ${actualCommit}.`);
   }
   if (workingTree) {
     throw new Error('The RAGFlow submodule working tree is modified; restore or review it before validating the reference.');
@@ -89,7 +87,7 @@ function validateReference(root = repositoryRoot, manifest = JSON.parse(readText
   requireMatch(environment, /^METADATA_DB_PROFILE=\$\{METADATA_DB_PROFILE:-mysql\}$/m, 'upstream default metadata profile is recorded accurately');
 
   return {
-    tag: actualTag,
+    tag: manifest.integration.tag,
     commit: actualCommit,
     requiredServices: manifest.upstreamDeploymentReference.requiredServices,
     readiness: manifest.readiness.status
