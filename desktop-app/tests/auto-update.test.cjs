@@ -95,7 +95,7 @@ test('quitting disarms the retry and the poll', () => {
   assert.match(stop.slice(0, 600), /updateStopped = true;/);
   assert.match(stop.slice(0, 600), /clearTimeout\(updateTimers\.retry\)/);
   assert.match(stop.slice(0, 600), /clearInterval\(updateTimers\.interval\)/);
-  assert.match(mainSource, /app\.on\('before-quit', \(\) => \{\s*stopAutoUpdate\(\);/);
+  assert.match(mainSource, /app\.on\('before-quit', \((?:event)?\) => \{\s*stopAutoUpdate\(\);/);
 });
 
 test('a rejected download promise is handled instead of reaching the process', () => {
