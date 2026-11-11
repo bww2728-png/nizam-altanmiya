@@ -13,6 +13,7 @@ const { migrate } = require('../src/main/analysis/store-schema.cjs');
 const { openEncryptedStore } = require('../src/main/store.cjs');
 const canonical = require('../src/main/analysis/canonical-data.cjs');
 const dataArchitecture = require('../src/main/database/architecture.cjs');
+const unifiedDevelopmentModel = require('../src/main/database/unified-development-model.cjs');
 const recordService = require('../src/main/database/record-service.cjs');
 
 const ONE_PIXEL_PNG = Buffer.from(
@@ -596,5 +597,74 @@ test('staging rejects empty files before creating a batch', async () => {
   } finally {
     db.close();
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('unified development model seeds the 18-domain field hierarchy and typed dimensions', () => {
+  const db = openDatabase();
+  try {
+    const expectedTables = [
+      'development_model_migrations','field_groups','field_group_fields','field_definition_aliases','field_dimension_rules',
+      'facility_services','staffing_observations','natural_resource_sites','land_use_records',
+      'agricultural_production_records','livestock_production_records','fisheries_production_records',
+      'economic_establishments','tourism_site_profiles','cultural_heritage_profiles',
+      'education_enrollment_records','health_service_records','household_welfare_records','social_protection_records',
+      'financial_accounts','budget_headers','budget_lines','revenue_transactions','expenditure_transactions',
+      'swot_pestle_analyses','development_issue_factors','development_issue_evidence','priority_criteria','issue_priority_assessments',
+      'strategic_objectives','development_programs','program_projects','project_activities','project_milestones',
+      'project_geographic_units','project_beneficiary_targets','indicator_definition_versions','indicator_components',
+      'indicator_weight_profiles','indicator_weights','indicator_targets','indicator_benchmarks',
+      'indicator_calculation_runs','indicator_calculation_results','indicator_result_inputs'
+    ];
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
+    for (const table of expectedTables) assert.ok(tables.has(table), 'missing unified model table: ' + table);
+
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM field_groups WHERE group_level='domain'").get().n, 18);
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM field_groups WHERE group_level=\'subdomain\'').get().n >= 45);
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM field_group_fields').get().n >= 150);
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM field_definition_aliases').get().n >= 150);
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM priority_criteria').get().n >= 6);
+
+    const requiredCodes = [
+      'directorate.population',
+      'directorate.waterCoverage',
+      'directorate.schools',
+      'finance.revenue.assessed',
+      'agriculture.crop.type',
+      'analysis.issue.root_causes',
+      'planning.objective.strategic',
+      'metadata.source_locator'
+    ];
+    for (const code of requiredCodes) {
+      assert.ok(db.prepare('SELECT 1 FROM field_definitions WHERE field_code=?').get(code), 'missing field definition: ' + code);
+      assert.ok(db.prepare('SELECT 1 FROM field_group_fields link JOIN field_definitions field USING(field_definition_id) WHERE field.field_code=?').get(code), 'field is not grouped: ' + code);
+    }
+
+    assert.ok(db.prepare("SELECT 1 FROM dimension_definitions WHERE dimension_code='sex'").get());
+    assert.ok(db.prepare("SELECT 1 FROM dimension_definitions WHERE dimension_code='age_group'").get());
+    assert.ok(db.prepare("SELECT 1 FROM reference_sets WHERE set_code='water_source'").get());
+    assert.ok(db.prepare("SELECT 1 FROM reference_sets WHERE set_code='priority_criterion'").get());
+
+    const migration = db.prepare('SELECT * FROM development_model_migrations WHERE version=1').get();
+    assert.equal(migration.migration_code, unifiedDevelopmentModel.CODE);
+    assert.equal(migration.success, 1);
+    const before = {
+      groups: db.prepare('SELECT COUNT(*) AS n FROM field_groups').get().n,
+      links: db.prepare('SELECT COUNT(*) AS n FROM field_group_fields').get().n,
+      fields: db.prepare('SELECT COUNT(*) AS n FROM field_definitions').get().n
+    };
+    const result = unifiedDevelopmentModel.migrate(db);
+    assert.equal(result.alreadyApplied, true);
+    assert.deepEqual({
+      groups: db.prepare('SELECT COUNT(*) AS n FROM field_groups').get().n,
+      links: db.prepare('SELECT COUNT(*) AS n FROM field_group_fields').get().n,
+      fields: db.prepare('SELECT COUNT(*) AS n FROM field_definitions').get().n
+    }, before);
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.ok(tables.has('directorates'));
+    assert.ok(tables.has('analysis_runs'));
+  } finally {
+    db.close();
   }
 });
