@@ -42,6 +42,7 @@ jobs:
         with:
           # The build never pushes over git; gh uses the explicit token below.
           persist-credentials: false
+          submodules: recursive
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
