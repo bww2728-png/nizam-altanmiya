@@ -1376,6 +1376,7 @@ function registerHandlers() {
       templateFile: pendingPlan?.plan?.fileName ?? analysis.meta?.template?.fileName ?? null,
       templateSheet: pendingPlan?.plan?.sheetName ?? analysis.meta?.template?.sheet ?? null,
       mode: 'both',
+      filter: request.filter ?? {},
     });
     // A new run makes every cached sheet number stale. Invalidated before the
     // fresh analysis is stored in memory, because the cache reset also drops
@@ -1435,6 +1436,20 @@ function registerHandlers() {
   });
 
   ipcMain.handle('analysis:runs', () => persist.listRuns(requireDatabase(), 50));
+
+  ipcMain.handle('analysis:calculation-detail', (_event, request = {}) => {
+    const db = requireDatabase();
+    if (currentProfile() !== 'owner') throw new Error('تفاصيل مدخلات الحساب متاحة لمالك الجهاز فقط.');
+    const detail = persist.getCalculationDetail(db, request.runId, request.directorateId, request.mode);
+    if (!detail) return null;
+    auditRead('analysis:calculation-detail', {
+      entity: 'indicator_calculation_results',
+      entityId: detail.calculation.calculationRunId,
+      fields: 'raw_value,normalized_value,weighted_value,inputs,source_locator',
+      rowCount: Object.keys(detail.calculation.indicators).length,
+    });
+    return detail;
+  });
 
   ipcMain.handle('analysis:weights:get', () => {
     const db = requireDatabase();

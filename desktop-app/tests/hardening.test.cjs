@@ -17,7 +17,7 @@ const path = require('node:path');
 const test = require('node:test');
 const Database = require('better-sqlite3-multiple-ciphers');
 
-const { migrate, DIRECTORATE_COLUMN_MIGRATIONS } = require('../src/main/analysis/store-schema.cjs');
+const { migrate, MIGRATION_VERSION, DIRECTORATE_COLUMN_MIGRATIONS } = require('../src/main/analysis/store-schema.cjs');
 const { openEncryptedStore, backupStore, copyStoreKey, restoreBackupBundle, classifyStore, listBackups } = require('../src/main/store.cjs');
 const persist = require('../src/main/analysis/persist.cjs');
 const security = require('../src/main/security.cjs');
@@ -195,7 +195,7 @@ test('an existing encrypted store is backed up before its first unified migratio
 
     const upgraded = openEncryptedStore(filePath, key, { keyPath });
     assert.equal(upgraded.prepare('SELECT value FROM migration_payload').get().value, 'preserve-this');
-    assert.equal(upgraded.prepare('SELECT success FROM store_schema_migrations WHERE version=2').get().success, 1);
+    assert.equal(upgraded.prepare('SELECT success FROM store_schema_migrations WHERE version=?').get(MIGRATION_VERSION).success, 1);
     upgraded.close();
 
     const [backupPath] = listBackups(filePath);
@@ -257,7 +257,7 @@ test('a failed unified migration rolls back DDL and records its failure', () => 
     database.exec('CREATE TABLE field_definitions (field_definition_id INTEGER PRIMARY KEY)');
     assert.throws(() => migrate(database));
     assert.equal(database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='directorates'").get(), undefined);
-    assert.equal(database.prepare('SELECT success FROM store_schema_migrations WHERE version=2').get().success, 0);
+    assert.equal(database.prepare('SELECT success FROM store_schema_migrations WHERE version=?').get(MIGRATION_VERSION).success, 0);
     assert.equal(database.prepare('SELECT COUNT(*) AS count FROM field_definitions').get().count, 0);
   } finally {
     database.close();

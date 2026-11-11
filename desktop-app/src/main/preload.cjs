@@ -94,6 +94,7 @@ contextBridge.exposeInMainWorld('localApp', {
   runAnalysis: (request) => ipcRenderer.invoke('analysis:run', request),
   latestAnalysis: () => ipcRenderer.invoke('analysis:latest'),
   analysisRuns: () => ipcRenderer.invoke('analysis:runs'),
+  analysisCalculationDetail: (request) => ipcRenderer.invoke('analysis:calculation-detail', request),
   rowDetail: (request) => ipcRenderer.invoke('analysis:row-detail', request),
   getWeights: () => ipcRenderer.invoke('analysis:weights:get'),
   setWeights: (request) => ipcRenderer.invoke('analysis:weights:set', request),
