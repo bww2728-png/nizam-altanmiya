@@ -282,6 +282,14 @@ function persistExtraction(database, documentId, payload) {
   return { runId, status: 'review', engine: { name: extraction.engine_name, version: extraction.engine_version }, elementCount: extraction.elements.length, warnings: extraction.warnings };
 }
 
+function markProcessingStarted(database, documentId) {
+  const now = new Date().toISOString();
+  const result = database.prepare(`UPDATE document_records SET status='processing',processing_error=NULL,updated_at=? WHERE id=?`)
+    .run(now,String(documentId));
+  if (result.changes !== 1) throw new Error('الوثيقة غير موجودة لبدء معالجتها.');
+  return { documentId: String(documentId), status: 'processing', updatedAt: now };
+}
+
 function markProcessingUnavailable(database, documentId, engineName, message) {
   return markProcessingFailure(database, documentId, engineName, message, 'unavailable');
 }
@@ -358,6 +366,6 @@ function runWorker(filePath, options = {}) {
 
 module.exports = {
   MAX_FILE_BYTES, MIME_TYPES, SCHEMA, inspectFile, migrate, stageFile, listDocuments, getDocument, readOriginal,
-  saveRagflowReference, listRagflowReferences, searchDocuments, normalizeExtraction, persistExtraction,
-  markProcessingUnavailable, markProcessingFailure, workerEnvironment, workerScriptPath, runWorker,
+  saveRagflowReference, listRagflowReferences, searchDocuments, normalizeSearchText, normalizeExtraction, persistExtraction,
+  markProcessingStarted, markProcessingUnavailable, markProcessingFailure, workerEnvironment, workerScriptPath, runWorker,
 };

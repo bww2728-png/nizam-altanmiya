@@ -80,7 +80,7 @@ function renderDatabaseReportHtml({ rows = [], columns = [], filters = {}, summa
       <table><thead><tr><th style="width:4%">#</th>${fields.map((column) => `<th>${escapeHtml(column.header)}</th>`).join('')}</tr></thead>
       <tbody>${rows.length ? rows.map((row, rowIndex) => `<tr><td>${rowIndex + 1}</td>${fields.map((column) => `<td>${escapeHtml(reportValue(row[column.dbColumn], column.type))}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${fields.length + 1}">لا توجد سجلات مطابقة للفلاتر الحالية.</td></tr>`}</tbody></table>`;
   }).join('');
-  const labels = { search: 'البحث', governorates: 'المحافظات', logic: 'منطق الشروط', criteria: 'الشروط الإضافية', allColumns: 'الأعمدة المعروضة' };
+  const labels = { search: 'البحث', governorates: 'المحافظات', periodKey: 'الفترة المرجعية', logic: 'منطق الشروط', criteria: 'الشروط الإضافية', allColumns: 'الأعمدة المعروضة' };
   const filterValues = { ...filters, allColumns: filters.allColumns ? 'كل الحقول' : 'الأعمدة المختارة' };
   const governorateBars = (summary.governorates ?? []).map((item) => {
     const width = summary.governorates?.[0]?.count ? Math.max(3, Math.round(item.count / summary.governorates[0].count * 100)) : 0;

@@ -11,25 +11,30 @@ const SOURCE_COLUMN = {
   __createdAt: 'created_at',
 };
 
-function presentSql(alias) {
-  return `COALESCE(${alias}.value_state,'unknown')<>'unknown' AND CASE ${alias}.data_type WHEN 'number' THEN ${alias}.value_number IS NOT NULL WHEN 'boolean' THEN ${alias}.value_boolean IS NOT NULL ELSE TRIM(COALESCE(${alias}.value_text,''))<>'' END`;
+function presentSql(alias, definitionAlias) {
+  return `COALESCE(${alias}.value_state,'unknown')<>'unknown' AND CASE
+    WHEN ${definitionAlias}.data_type IN ('number','numeric','integer','decimal','ratio','percentage','percent') THEN ${alias}.value_number IS NOT NULL
+    WHEN ${definitionAlias}.data_type IN ('boolean','bool') THEN ${alias}.value_boolean IS NOT NULL
+    WHEN ${definitionAlias}.data_type IN ('date','datetime') THEN COALESCE(${alias}.value_date,${alias}.value_text) IS NOT NULL
+    ELSE TRIM(COALESCE(${alias}.value_text,''))<>'' END`;
 }
 
-function fieldCondition(condition, allowedKeys) {
+function fieldCondition(condition, allowedKeys, dynamicFields = new Map(), periodKey = '') {
   const key = String(condition?.key ?? '');
-  const field = FILTER_FIELDS.get(key);
+  const field = FILTER_FIELDS.get(key) ?? dynamicFields.get(key);
   if (!field || !allowedKeys.has(key)) return null;
   const operator = String(condition.operator ?? '');
+  const periodClause = periodKey ? 'AND fv.period_key=?' : "AND fv.period_key=''";
   const valueSql = (predicate, predicateParams = []) => ({
-    sql: `EXISTS (SELECT 1 FROM entity_field_values fv JOIN data_field_definitions fd ON fd.id=fv.field_definition_id WHERE fv.record_id=er.id AND fv.period_key='' AND fd.entity_type='directorate' AND fd.field_key=? AND ${predicate})`,
-    params: [key, ...predicateParams],
+    sql: `EXISTS (SELECT 1 FROM entity_field_values fv JOIN data_field_definitions fd ON fd.id=fv.field_definition_id WHERE fv.record_id=er.id ${periodClause} AND fd.entity_type='directorate' AND fd.field_key=? AND ${predicate})`,
+    params: [...(periodKey ? [periodKey] : []), key, ...predicateParams],
   });
   let result;
   if (operator === 'empty') {
-    const present = valueSql(presentSql('fv'));
+    const present = valueSql(presentSql('fv','fd'));
     result = { sql: `NOT (${present.sql})`, params: present.params };
   } else if (operator === 'present') {
-    result = valueSql(presentSql('fv'));
+    result = valueSql(presentSql('fv','fd'));
   } else if (field.type === 'number' || field.type === 'ratio') {
     const predicates = [];
     const params = [];
@@ -42,24 +47,31 @@ function fieldCondition(condition, allowedKeys) {
       if (Number.isFinite(max)) { predicates.push('fv.value_number<=?'); params.push(max); }
     }
     if (!predicates.length) return null;
-    const present = valueSql(`fv.data_type='number' AND fv.value_number IS NOT NULL AND COALESCE(fv.value_state,'unknown')<>'unknown' AND ${predicates.join(' AND ')}`, params);
+    const present = valueSql(`fd.data_type IN ('number','numeric','integer','decimal','ratio','percentage','percent') AND fv.value_number IS NOT NULL AND COALESCE(fv.value_state,'unknown')<>'unknown' AND ${predicates.join(' AND ')}`, params);
     if (condition.missing === 'include') {
-      const missing = valueSql(presentSql('fv'));
+      const missing = valueSql(presentSql('fv','fd'));
       result = { sql: `(${present.sql} OR NOT (${missing.sql}))`, params: [...present.params, ...missing.params] };
     } else result = present;
+  } else if (field.type === 'date') {
+    const predicates = [];
+    const params = [];
+    if (condition.min) { predicates.push('COALESCE(fv.value_date,fv.value_text)>=?'); params.push(String(condition.min).slice(0, 10)); }
+    if (condition.max) { predicates.push('COALESCE(fv.value_date,fv.value_text)<=?'); params.push(`${String(condition.max).slice(0, 10)}T23:59:59.999Z`); }
+    if (!predicates.length) return null;
+    result = valueSql(`fd.data_type IN ('date','datetime') AND COALESCE(fv.value_date,fv.value_text) IS NOT NULL AND ${predicates.join(' AND ')} AND COALESCE(fv.value_state,'unknown')<>'unknown'`, params);
   } else if (field.type === 'boolean') {
     if (condition.value !== '0' && condition.value !== '1' && condition.value !== 0 && condition.value !== 1) return null;
-    result = valueSql("fv.data_type='boolean' AND fv.value_boolean=? AND COALESCE(fv.value_state,'unknown')<>'unknown'", [Number(condition.value)]);
+    result = valueSql("fd.data_type IN ('boolean','bool') AND fv.value_boolean=? AND COALESCE(fv.value_state,'unknown')<>'unknown'", [Number(condition.value)]);
   } else if (operator === 'in' || operator === 'not-in') {
     const options = [...new Set((Array.isArray(condition.values) ? condition.values : []).map((item) => String(item).trim()).filter(Boolean))].slice(0, 100);
     if (!options.length) return null;
     const placeholders = options.map(() => '?').join(',');
-    result = valueSql(`fv.data_type='text' AND fv.value_text IN (${placeholders}) AND COALESCE(fv.value_state,'unknown')<>'unknown'`, options);
+    result = valueSql(`fd.data_type IN ('text','long_text','reference','entity_reference') AND fv.value_text IN (${placeholders}) AND COALESCE(fv.value_state,'unknown')<>'unknown'`, options);
     if (operator === 'not-in') result.sql = `NOT (${result.sql})`;
   } else if (operator === 'contains' && field.type === 'text') {
     const query = typeof condition.value === 'string' ? condition.value.trim().slice(0, 120) : '';
     if (!query) return null;
-    result = valueSql("fv.data_type='text' AND instr(fv.value_text,?)>0 AND COALESCE(fv.value_state,'unknown')<>'unknown'", [query]);
+    result = valueSql("fd.data_type IN ('text','long_text','reference','entity_reference') AND instr(fv.value_text,?)>0 AND COALESCE(fv.value_state,'unknown')<>'unknown'", [query]);
   } else {
     return null;
   }
@@ -114,26 +126,29 @@ function metadataCondition(condition) {
   return { sql: condition.exclude === true ? `NOT (${expression})` : `(${expression})`, params: values };
 }
 
-function completenessCondition(condition, allowedMandatoryKeys) {
+function completenessCondition(condition, allowedMandatoryKeys, periodKey = '') {
   const keys = MANDATORY_FIELDS.map((field) => field.key).filter((key) => allowedMandatoryKeys.has(key));
   if (!keys.length) return null;
   const placeholders = keys.map(() => '?').join(',');
-  const ratio = `(SELECT COUNT(*) * 1.0 / ${keys.length} FROM entity_field_values qv JOIN data_field_definitions qf ON qf.id=qv.field_definition_id WHERE qv.record_id=er.id AND qv.period_key='' AND qf.entity_type='directorate' AND qf.field_key IN (${placeholders}) AND ${presentSql('qv')})`;
+  const periodClause = periodKey ? 'AND qv.period_key=?' : "AND qv.period_key=''";
+  const ratio = `(SELECT COUNT(*) * 1.0 / ${keys.length} FROM entity_field_values qv JOIN data_field_definitions qf ON qf.id=qv.field_definition_id WHERE qv.record_id=er.id ${periodClause} AND qf.entity_type='directorate' AND qf.field_key IN (${placeholders}) AND ${presentSql('qv','qf')})`;
   const clauses = [];
-  const params = [...keys];
-  if (condition.min !== '' && Number.isFinite(Number(condition.min))) { clauses.push(`${ratio}>=?`); params.push(Number(condition.min) / 100); }
-  if (condition.max !== '' && Number.isFinite(Number(condition.max))) { clauses.push(`${ratio}<=?`); params.push(Number(condition.max) / 100); }
+  const params = [];
+  if (condition.min !== '' && Number.isFinite(Number(condition.min))) { clauses.push(`${ratio}>=?`); params.push(...(periodKey ? [periodKey] : []),...keys,Number(condition.min) / 100); }
+  if (condition.max !== '' && Number.isFinite(Number(condition.max))) { clauses.push(`${ratio}<=?`); params.push(...(periodKey ? [periodKey] : []),...keys,Number(condition.max) / 100); }
   if (!clauses.length) return null;
   return { sql: condition.exclude === true ? `NOT (${clauses.join(' AND ')})` : clauses.join(' AND '), params };
 }
 
-function missingFieldCondition(condition, allowedKeys) {
+function missingFieldCondition(condition, allowedKeys, dynamicFields = new Map(), periodKey = '') {
   const keys = [...new Set((Array.isArray(condition.values) ? condition.values : []).map(String))]
-    .filter((key) => allowedKeys.has(key) && FILTER_FIELDS.has(key)).slice(0, 40);
+    .filter((key) => allowedKeys.has(key) && (FILTER_FIELDS.has(key) || dynamicFields.has(key))).slice(0, 40);
   if (!keys.length) return null;
-  const missing = keys.map((key) => `NOT EXISTS (SELECT 1 FROM entity_field_values mv JOIN data_field_definitions mf ON mf.id=mv.field_definition_id WHERE mv.record_id=er.id AND mv.period_key='' AND mf.entity_type='directorate' AND mf.field_key=? AND ${presentSql('mv')})`);
+  const periodClause = periodKey ? 'AND mv.period_key=?' : "AND mv.period_key=''";
+  const missing = keys.map(() => `NOT EXISTS (SELECT 1 FROM entity_field_values mv JOIN data_field_definitions mf ON mf.id=mv.field_definition_id WHERE mv.record_id=er.id ${periodClause} AND mf.entity_type='directorate' AND mf.field_key=? AND ${presentSql('mv','mf')})`);
   const sql = `(${missing.join(' OR ')})`;
-  return { sql: condition.exclude === true ? `NOT ${sql}` : sql, params: keys };
+  const params = keys.flatMap((key) => periodKey ? [periodKey,key] : [key]);
+  return { sql: condition.exclude === true ? `NOT ${sql}` : sql, params };
 }
 
 function qualityCondition(condition) {
@@ -154,12 +169,16 @@ function buildDirectorateWhere(filter = {}, options = {}) {
   else if (filter.governorate) { clauses.push('governorate.name=?'); params.push(String(filter.governorate).trim()); }
   const search = typeof filter.search === 'string' ? filter.search.trim().slice(0, 120) : '';
   if (search) { clauses.push('instr(unit.name,?)>0'); params.push(search); }
-  const allowedMandatoryKeys = options.allowedMandatoryKeys instanceof Set ? options.allowedMandatoryKeys : new Set(MANDATORY_FIELDS.map((field) => field.key));
+  const periodKey = typeof filter.periodKey === 'string' ? filter.periodKey.trim().slice(0, 80) : '';
+  const allowedMandatoryKeys = options.allowedMandatoryKeys instanceof Set
+    ? options.allowedMandatoryKeys
+    : new Set(MANDATORY_FIELDS.map((field) => field.key).filter((key) => allowedKeys.has(key)));
+  const dynamicFields = options.dynamicFields instanceof Map ? options.dynamicFields : new Map();
   const criteria = (Array.isArray(filter.criteria) ? filter.criteria : []).slice(0, 64).map((condition) => {
-    if (condition?.key === '__completeness') return completenessCondition(condition, allowedMandatoryKeys);
-    if (condition?.key === '__missingField') return missingFieldCondition(condition, allowedKeys);
+    if (condition?.key === '__completeness') return completenessCondition(condition, allowedMandatoryKeys, periodKey);
+    if (condition?.key === '__missingField') return missingFieldCondition(condition, allowedKeys, dynamicFields, periodKey);
     if (condition?.key === '__qualityLevel') return qualityCondition(condition, options.profile);
-    return fieldCondition(condition, allowedKeys) ?? metadataCondition(condition);
+    return fieldCondition(condition, allowedKeys, dynamicFields, periodKey) ?? metadataCondition(condition);
   }).filter(Boolean);
   if (criteria.length) {
     const joiner = filter.logic === 'or' ? ' OR ' : ' AND ';

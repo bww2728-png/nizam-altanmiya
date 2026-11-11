@@ -250,9 +250,13 @@ function canonicalDirectorateRows(database, filter = {}, limit = 50000, options 
   const sortKey = String(filter.sortKey ?? '');
   const sortField = INPUT_FIELDS.find((field) => field.key === sortKey) ?? (DECISION_FIELD.key === sortKey ? DECISION_FIELD : null);
   const sortColumn = sortField ? DIRECTORATE_COLUMNS[sortField.key] : null;
+  const periodKey = typeof filter.periodKey === 'string' ? filter.periodKey.trim().slice(0,80) : '';
   let orderBy = 'governorate.name,unit.name';
   if (sortColumn) orderBy = `legacy.${sortColumn} ${filter.sortDirection === 'desc' ? 'DESC' : 'ASC'},governorate.name,unit.name`;
-  else if (['updated_at','created_at'].includes(sortKey)) orderBy = `er.${sortKey} ${filter.sortDirection === 'asc' ? 'ASC' : 'DESC'},governorate.name,unit.name`;
+  else if (sortKey && options.allowedKeys?.has(sortKey)) {
+    orderBy = `(SELECT CASE sv.data_type WHEN 'number' THEN sv.value_number WHEN 'boolean' THEN sv.value_boolean ELSE sv.value_text END FROM entity_field_values sv JOIN data_field_definitions sd ON sd.id=sv.field_definition_id WHERE sv.record_id=er.id AND sv.period_key=? AND sd.entity_type='directorate' AND sd.field_key=? LIMIT 1) ${filter.sortDirection === 'desc' ? 'DESC' : 'ASC'},governorate.name,unit.name`;
+    params.push(periodKey,sortKey);
+  } else if (['updated_at','created_at'].includes(sortKey)) orderBy = `er.${sortKey} ${filter.sortDirection === 'asc' ? 'ASC' : 'DESC'},governorate.name,unit.name`;
   params.push(bounded,offset);
   const records = database.prepare(`SELECT er.id AS entity_id,er.external_key,er.created_at,er.updated_at,unit.name AS district,governorate.name AS governorate FROM entity_records er JOIN geographic_units unit ON unit.id=er.geographic_unit_id LEFT JOIN geographic_units governorate ON governorate.id=unit.parent_id LEFT JOIN directorates legacy ON legacy.id=CAST(substr(er.external_key,20) AS INTEGER) WHERE ${clauses.join(' AND ')} ORDER BY ${orderBy} LIMIT ? OFFSET ?`).all(...params);
   if (!records.length) return [];
@@ -263,7 +267,7 @@ function canonicalDirectorateRows(database, filter = {}, limit = 50000, options 
   if (!parsed.length) return [];
   const ids = parsed.map(record => record.entity_id);
   const placeholders = ids.map(() => '?').join(',');
-  const values = database.prepare(`SELECT value.record_id,definition.field_key,definition.data_type,value.value_text,value.value_number,value.value_boolean,value.value_state FROM entity_field_values value JOIN data_field_definitions definition ON definition.id=value.field_definition_id WHERE definition.entity_type='directorate' AND value.record_id IN (${placeholders}) AND value.period_key=''`).all(...ids);
+  const values = database.prepare(`SELECT value.record_id,definition.field_key,definition.data_type,value.value_text,value.value_number,value.value_boolean,value.value_state FROM entity_field_values value JOIN data_field_definitions definition ON definition.id=value.field_definition_id WHERE definition.entity_type='directorate' AND value.record_id IN (${placeholders}) AND value.period_key=?`).all(...ids,periodKey);
   const valuesByRecord = new Map(parsed.map(record => [record.entity_id,{}]));
   for (const value of values) {
     if (value.value_state === 'unknown') continue;
@@ -286,6 +290,7 @@ function canonicalDirectorateRows(database, filter = {}, limit = 50000, options 
     };
     const valuesForRecord = valuesByRecord.get(record.entity_id) ?? {};
     for (const [key,column] of COLUMN_ENTRIES) output[column] = valuesForRecord[key] ?? null;
+    for (const [key,value] of Object.entries(valuesForRecord)) output[key] = value;
     output.district = record.district;
     output.governorate = record.governorate ?? '';
     return output;
@@ -301,9 +306,9 @@ function listDirectorateFilterOptions(database, key, options = {}) {
     return database.prepare(`SELECT DISTINCT ${column} AS value FROM directorates WHERE ${column} IS NOT NULL AND TRIM(${column})<>'' ORDER BY ${column} COLLATE NOCASE LIMIT 200`).all().map((row) => row.value);
   }
   if (!allowedKeys.has(key)) return [];
-  const field = [...INPUT_FIELDS,DECISION_FIELD].find((item) => item.key === key);
+  const field = [...INPUT_FIELDS,DECISION_FIELD].find((item) => item.key === key) ?? options.dynamicFields?.get(key);
   if (!field || field.type !== 'text') return [];
-  return database.prepare("SELECT DISTINCT value.value_text AS value FROM entity_field_values value JOIN data_field_definitions definition ON definition.id=value.field_definition_id WHERE definition.entity_type='directorate' AND definition.field_key=? AND value.period_key='' AND value.value_state<>'unknown' AND value.value_text IS NOT NULL AND TRIM(value.value_text)<>'' ORDER BY value.value_text COLLATE NOCASE LIMIT 200").all(key).map((row) => row.value);
+  return database.prepare("SELECT DISTINCT value.value_text AS value FROM entity_field_values value JOIN data_field_definitions definition ON definition.id=value.field_definition_id WHERE definition.entity_type='directorate' AND definition.field_key=? AND value.value_state<>'unknown' AND value.value_text IS NOT NULL AND TRIM(value.value_text)<>'' ORDER BY value.value_text COLLATE NOCASE LIMIT 200").all(key).map((row) => row.value);
 }
 
 function listDirectorates(database, filter = {}, options = {}) {

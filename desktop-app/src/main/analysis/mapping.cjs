@@ -1,6 +1,6 @@
 'use strict';
 
-const { INPUT_FIELDS, DECISION_FIELD, MANDATORY_FIELDS } = require('./schema.cjs');
+const { INPUT_FIELDS, DECISION_FIELD, MANDATORY_FIELDS, DIRECTORATE_FIELD_CLASS_BY_KEY } = require('./schema.cjs');
 const { DIRECTORATE_COLUMNS } = require('./store-schema.cjs');
 const { stripDiacritics, normalizeDigits } = require('./parse.cjs');
 
@@ -162,26 +162,99 @@ function scoreHeaderRow(cells) {
 }
 
 /** Canonical field table for the UI ("mapping" screen). */
-function mappingTable() {
+function filterMetadata(fieldClass) {
+  const map = {
+    identity: ['geography', 'الهوية والموقع'],
+    stable_attribute: ['attributes', 'الخصائص العامة'],
+    temporal_measure: ['measurements', 'القياسات والفترات'],
+    project_summary: ['projects', 'المشاريع'],
+    review_decision: ['review', 'حالة المراجعة'],
+    system_managed: ['system', 'حقول النظام'],
+  };
+  return map[fieldClass] ?? ['measurements', 'البيانات والقياسات'];
+}
+
+function mappingTable(database) {
   const mandatoryKeys = new Set(MANDATORY_FIELDS.map((field) => field.key));
-  return FIELDS.map((field) => ({
-    key: field.key,
-    column: field.column,
-    // The database column matters to the UI because the browse table receives
-    // raw rows (snake_case) while the editor works with field keys.
-    dbColumn: DIRECTORATE_COLUMNS[field.key] ?? null,
-    header: field.header,
-    type: field.type,
-    unit: field.unit ?? null,
-    sensitivity: field.sensitivity,
-    // The interface uses these three flags to render required markers, the
-    // "must be positive" hint and the decision dropdown without duplicating the
-    // schema in the renderer.
-    mandatory: mandatoryKeys.has(field.key),
-    positive: Boolean(field.positive),
-    allowed: field.allowed ?? null,
-    aliases: ALIASES[field.key] ?? [],
+  const definitions = database?.prepare(`SELECT id,field_key,label_ar,data_type,unit,sensitivity,field_class,description,validation_json
+    FROM data_field_definitions WHERE entity_type='directorate' AND active=1 ORDER BY field_key`).all() ?? [];
+  const aliases = new Map();
+  if (database) {
+    for (const item of database.prepare(`SELECT definition.field_key,alias.alias FROM data_field_aliases alias
+      JOIN data_field_definitions definition ON definition.id=alias.field_definition_id
+      WHERE definition.entity_type='directorate' AND definition.active=1 AND alias.approved=1 ORDER BY alias.confidence DESC`).all()) {
+      const values = aliases.get(item.field_key) ?? [];
+      values.push(item.alias);
+      aliases.set(item.field_key, values);
+    }
+  }
+  const definitionsByKey = new Map(definitions.map((definition) => [definition.field_key, definition]));
+  const fields = new Map(FIELDS.map((field) => {
+    const definition = definitionsByKey.get(field.key);
+    const fieldClass = definition?.field_class ?? DIRECTORATE_FIELD_CLASS_BY_KEY[field.key] ?? 'measure';
+    const [filterGroup, filterGroupLabel] = filterMetadata(fieldClass);
+    return [field.key, {
+      key: field.key,
+      column: field.column,
+      dbColumn: DIRECTORATE_COLUMNS[field.key] ?? field.key,
+      header: definition?.label_ar ?? field.header,
+      technicalName: field.key,
+      description: definition?.description ?? '',
+      type: normalizeFilterType(definition?.data_type ?? field.type),
+      unit: definition?.unit ?? field.unit ?? null,
+      sensitivity: definition?.sensitivity ?? field.sensitivity,
+      fieldClass,
+      filterGroup,
+      filterGroupLabel,
+      mandatory: mandatoryKeys.has(field.key),
+      positive: Boolean(field.positive),
+      allowed: field.allowed ?? null,
+      aliases: [...new Set([...(ALIASES[field.key] ?? []), ...(aliases.get(field.key) ?? [])])],
+      searchTerms: [...new Set([field.key, definition?.label_ar, definition?.description, ...(ALIASES[field.key] ?? []), ...(aliases.get(field.key) ?? [])].filter(Boolean))],
+      filterable: fieldClass !== 'system_managed',
+      searchable: fieldClass !== 'system_managed',
+      exportable: fieldClass !== 'system_managed',
+      targetTable: definition ? 'entity_field_values' : 'directorates',
+    }];
   }));
+  for (const definition of definitions) {
+    if (fields.has(definition.field_key)) continue;
+    const fieldClass = definition.field_class ?? 'measure';
+    const [filterGroup, filterGroupLabel] = filterMetadata(fieldClass);
+    const fieldAliases = aliases.get(definition.field_key) ?? [];
+    fields.set(definition.field_key, {
+      key: definition.field_key,
+      column: null,
+      dbColumn: definition.field_key,
+      header: definition.label_ar,
+      technicalName: definition.field_key,
+      description: definition.description ?? '',
+      type: normalizeFilterType(definition.data_type),
+      unit: definition.unit ?? null,
+      sensitivity: definition.sensitivity,
+      fieldClass,
+      filterGroup,
+      filterGroupLabel,
+      mandatory: false,
+      positive: false,
+      allowed: null,
+      aliases: fieldAliases,
+      searchTerms: [...new Set([definition.field_key, definition.label_ar, definition.description, ...fieldAliases].filter(Boolean))],
+      filterable: fieldClass !== 'system_managed',
+      searchable: fieldClass !== 'system_managed',
+      exportable: fieldClass !== 'system_managed',
+      targetTable: 'entity_field_values',
+    });
+  }
+  return [...fields.values()];
+}
+
+function normalizeFilterType(type) {
+  if (['number', 'numeric', 'integer', 'decimal'].includes(type)) return 'number';
+  if (['ratio', 'percentage', 'percent'].includes(type)) return 'ratio';
+  if (['boolean', 'bool'].includes(type)) return 'boolean';
+  if (['date', 'datetime', 'period'].includes(type)) return 'date';
+  return 'text';
 }
 
 module.exports = {

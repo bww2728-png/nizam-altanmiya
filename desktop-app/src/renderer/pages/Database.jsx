@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ChevronLeft, ChevronRight, DatabaseZap, FileSpreadsheet, FileText, Search, Trash2,
+  ChevronLeft, ChevronRight, DatabaseZap, Download, FileSpreadsheet, FileText, Search, Trash2,
 } from 'lucide-react';
 import {
   Badge, Card, Empty, ErrorBanner, Loading, Modal, Switch,
@@ -54,7 +54,8 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
     }));
   }, [catalogue, allColumns]);
 
-  const reportColumnOptions = useMemo(() => catalogue.filter((field) => accessProfile !== 'shared' || field.sensitivity === 'public'), [catalogue, accessProfile]);
+  const reportColumnOptions = useMemo(() => catalogue.filter((field) => field.exportable !== false
+    && (accessProfile !== 'shared' || field.sensitivity === 'public')), [catalogue, accessProfile]);
   const safeReportColumns = reportColumns.filter((key) => reportColumnOptions.some((field) => field.key === key));
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -80,7 +81,9 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
       const request = { type: 'database', filters: appliedFilters, columns: safeReportColumns };
       const result = format === 'pdf'
         ? await window.localApp.exportFilteredPdf(request)
-        : await window.localApp.exportFilteredExcel(request);
+        : format === 'csv'
+          ? await window.localApp.exportFilteredCsv(request)
+          : await window.localApp.exportFilteredExcel(request);
       if (!result?.canceled) notify?.({ tone: 'ok', message: `صُدّر التقرير المطابق إلى ${result.filePath}` });
     } catch (cause) {
       notify?.({ tone: 'bad', message: errText(cause) || 'تعذر تصدير التقرير المطابق.' });
@@ -99,12 +102,6 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
         title="قاعدة البيانات الشاملة"
         subtitle="فلاتر البيانات الجغرافية والسكانية والقطاعية والاقتصادية والجودة والمصدر تُنفّذ محليًا داخل قاعدة البيانات."
         icon={DatabaseZap}
-        actions={(
-          <div className="btn-row">
-            <button className="btn small" onClick={() => exportReport('excel')} disabled={exporting}><FileSpreadsheet size={15} /> Excel مطابق</button>
-            <button className="btn small" onClick={() => exportReport('pdf')} disabled={exporting}><FileText size={15} /> PDF مطابق</button>
-          </div>
-        )}
       >
         <DatabaseReportFilters
           catalogue={catalogue}
@@ -115,6 +112,14 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
           resultCount={total}
           loading={loading}
         />
+        <div className="row between report-download-row">
+          <span className="muted">التقرير يشمل كل النتائج المطابقة، لا الصفحة الحالية فقط.</span>
+          <div className="btn-row">
+            <button className="btn small" onClick={() => exportReport('excel')} disabled={exporting}><FileSpreadsheet size={15} /> Excel مطابق</button>
+            <button className="btn small" onClick={() => exportReport('csv')} disabled={exporting}><Download size={15} /> CSV مطابق</button>
+            <button className="btn small" onClick={() => exportReport('pdf')} disabled={exporting}><FileText size={15} /> PDF مطابق</button>
+          </div>
+        </div>
         <div className="toolbar report-table-toolbar">
           <Switch checked={allColumns} onChange={setAllColumns} label={`عرض كل الأعمدة (${catalogue.filter((field) => field.key !== 'reviewerDecision').length})`} />
           {!allColumns && <Badge tone="gold">عرض مختصر</Badge>}
@@ -149,7 +154,7 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
                   {rows.map((row, index) => (
                     <tr key={row.id} style={{ animation: `rise .3s var(--ease-out) ${Math.min(index, 24) * 12}ms both` }}>
                       <td className="sticky-col num dim">{row.id}</td>
-                      {columns.map((column) => <td key={column.key} className={cx(column.type === 'number' || column.type === 'ratio' ? 'num' : '', column.key === 'districtName' && 'strong')}>{renderCell(row[column.dbColumn], column)}</td>)}
+                      {columns.map((column) => <td key={column.key} className={cx(column.type === 'number' || column.type === 'ratio' ? 'num' : '', column.key === 'districtName' && 'strong')}>{renderCell(row[column.dbColumn ?? column.key], column)}</td>)}
                       <td className="nowrap dim" style={{ fontSize: '0.76rem' }}>{fmtDateTime(row.updated_at)}</td>
                       <td><div className="cell-actions"><button className="btn small ghost" onClick={() => onOpenCard?.(row.id)}>البطاقة</button><button className="icon-button" title="حذف السجل" onClick={() => setPendingDelete(row)}><Trash2 size={15} /></button></div></td>
                     </tr>
