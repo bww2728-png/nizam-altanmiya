@@ -301,27 +301,71 @@ function seedPriority(db,now) {
   const insert=db.prepare('INSERT OR IGNORE INTO priority_criteria(criterion_code,name_ar,default_weight,direction,is_active,created_at,updated_at) VALUES(?,?,?,\'higher_is_higher\',1,?,?)');
   rows.forEach(x=>insert.run(...x,now,now));
 }
-function migrate(db) {
+function checksum() {
   const sql=fs.readFileSync(SQL_FILE,'utf8');
-  db.exec('CREATE TABLE IF NOT EXISTS development_model_migrations(version INTEGER PRIMARY KEY,migration_code TEXT NOT NULL UNIQUE,checksum TEXT NOT NULL,applied_at TEXT NOT NULL,success INTEGER NOT NULL CHECK(success IN (0,1)),details TEXT)');
-  const hash=crypto.createHash('sha256').update(sql+JSON.stringify({CATALOG,LEGACY,UNITS,DIMS,REFS,ENTITY_TYPES})).digest('hex');
-  const previous=db.prepare('SELECT * FROM development_model_migrations WHERE version=?').get(VERSION);
-  if(previous?.success===1){if(previous.checksum!==hash)throw new Error('تم تعديل ترحيل نموذج البيانات بعد تطبيقه؛ أنشئ إصداراً جديداً.');return {version:VERSION,alreadyApplied:true};}
+  return crypto.createHash('sha256').update(sql+JSON.stringify({CATALOG,LEGACY,UNITS,DIMS,REFS,ENTITY_TYPES})).digest('hex');
+}
+function migrateSeedPolicy(db) {
+  const version=2;
+  const code='unified-development-model-seed-policy-v2';
+  const seededWeights=[['severity',0.25],['scale',0.20],['urgency',0.20],['affected_population',0.15],['feasibility',0.10],['equity',0.10]];
+  const catalogAliases=[...new Set(CATALOG.flatMap(([, ,children])=>children.flatMap(([, ,fields])=>fields.map(entry=>norm(entry.split('|')[1])))))];
+  const provenanceRule='only-rows-created-by-development-model-migration-v1';
+  const hash=crypto.createHash('sha256').update(checksum()+code+JSON.stringify(seededWeights)+JSON.stringify(catalogAliases)+provenanceRule).digest('hex');
+  const previous=db.prepare('SELECT * FROM development_model_migrations WHERE version=?').get(version);
+  if(previous?.success===1){if(previous.checksum!==hash)throw new Error('تم تعديل ترحيل سياسة بذور نموذج البيانات بعد تطبيقه؛ أنشئ إصداراً جديداً.');return {version,alreadyApplied:true};}
+  if(previous)db.prepare('DELETE FROM development_model_migrations WHERE version=? AND success=0').run(version);
   const now=new Date().toISOString();
+  const seedTimestamp=db.prepare('SELECT applied_at FROM development_model_migrations WHERE version=1 AND success=1').get()?.applied_at;
+  if(!seedTimestamp)throw new Error('تعذر تحديد توقيت بذور نموذج البيانات للتحقق من مصدرها.');
   try{
     db.transaction(()=>{
-      db.exec(sql);
-      seedUnits(db,now);seedDimensions(db,now);seedRefs(db,now);seedEntities(db,now);seedCatalog(db,now);seedPriority(db,now);
-      const fk=db.prepare('PRAGMA foreign_key_check').all();
-      if(fk.length)throw new Error('مخالفة مفاتيح خارجية في ترحيل نموذج البيانات: '+JSON.stringify(fk.slice(0,8)));
-      db.prepare('INSERT OR REPLACE INTO development_model_migrations(version,migration_code,checksum,applied_at,success,details) VALUES(?,?,?,?,1,?)')
-        .run(VERSION,CODE,hash,now,'إضافة النموذج الموحد بشكل تراكمي دون حذف الجداول أو السجلات السابقة.');
+      const aliases=db.prepare(`SELECT alias.alias_id,alias.normalized_alias FROM field_definition_aliases alias
+        WHERE alias.is_approved=1 AND alias.match_method='curated' AND alias.confidence=1 AND alias.created_at=?
+          AND alias.normalized_alias IN (${catalogAliases.map(()=>'?').join(',')})
+          AND EXISTS (SELECT 1 FROM field_group_fields link JOIN field_groups group_definition USING(group_id)
+            WHERE link.field_definition_id=alias.field_definition_id AND group_definition.group_level='subdomain')`).all(seedTimestamp,...catalogAliases);
+      const unapprove=db.prepare(`UPDATE field_definition_aliases SET is_approved=0,match_method='unverified_catalog_label',confidence=0 WHERE alias_id=? AND normalized_alias=?`);
+      for(const alias of aliases)unapprove.run(alias.alias_id,alias.normalized_alias);
+      const deactivate=db.prepare(`UPDATE priority_criteria SET default_weight=0,is_active=0
+        WHERE criterion_code=? AND default_weight=? AND is_active=1 AND created_at=? AND updated_at=?`);
+      for(const [criterion,weight] of seededWeights)deactivate.run(criterion,weight,seedTimestamp,seedTimestamp);
+      const foreignKeys=db.prepare('PRAGMA foreign_key_check').all();
+      if(foreignKeys.length)throw new Error('مخالفة مفاتيح خارجية في ترحيل سياسة البذور: '+JSON.stringify(foreignKeys.slice(0,8)));
+      db.prepare('INSERT INTO development_model_migrations(version,migration_code,checksum,applied_at,success,details) VALUES(?,?,?,?,1,?)')
+        .run(version,code,hash,now,'تعطيل الاعتماد التلقائي لأسماء الحقول، وتصفير الأوزان الافتراضية غير المعتمدة دون حذف التقييمات.');
     })();
-    return {version:VERSION,alreadyApplied:false};
+    return {version,alreadyApplied:false};
   }catch(error){
     db.prepare('INSERT OR REPLACE INTO development_model_migrations(version,migration_code,checksum,applied_at,success,details) VALUES(?,?,?,?,0,?)')
-      .run(VERSION,CODE,hash,new Date().toISOString(),String(error.message).slice(0,4000));
+      .run(version,code,hash,new Date().toISOString(),String(error.message).slice(0,4000));
     throw error;
   }
 }
-module.exports={migrate,VERSION,CODE,CATALOG};
+function migrate(db) {
+  const sql=fs.readFileSync(SQL_FILE,'utf8');
+  db.exec('CREATE TABLE IF NOT EXISTS development_model_migrations(version INTEGER PRIMARY KEY,migration_code TEXT NOT NULL UNIQUE,checksum TEXT NOT NULL,applied_at TEXT NOT NULL,success INTEGER NOT NULL CHECK(success IN (0,1)),details TEXT)');
+  const hash=checksum();
+  const previous=db.prepare('SELECT * FROM development_model_migrations WHERE version=?').get(VERSION);
+  if(previous?.success===1){if(previous.checksum!==hash)throw new Error('تم تعديل ترحيل نموذج البيانات بعد تطبيقه؛ أنشئ إصداراً جديداً.');}
+  else {
+    if(previous)db.prepare('DELETE FROM development_model_migrations WHERE version=? AND success=0').run(VERSION);
+    const now=new Date().toISOString();
+    try{
+      db.transaction(()=>{
+        db.exec(sql);
+        seedUnits(db,now);seedDimensions(db,now);seedRefs(db,now);seedEntities(db,now);seedCatalog(db,now);seedPriority(db,now);
+        const fk=db.prepare('PRAGMA foreign_key_check').all();
+        if(fk.length)throw new Error('مخالفة مفاتيح خارجية في ترحيل نموذج البيانات: '+JSON.stringify(fk.slice(0,8)));
+        db.prepare('INSERT OR REPLACE INTO development_model_migrations(version,migration_code,checksum,applied_at,success,details) VALUES(?,?,?,?,1,?)')
+          .run(VERSION,CODE,hash,now,'إضافة النموذج الموحد بشكل تراكمي دون حذف الجداول أو السجلات السابقة.');
+      })();
+    }catch(error){
+      db.prepare('INSERT OR REPLACE INTO development_model_migrations(version,migration_code,checksum,applied_at,success,details) VALUES(?,?,?,?,0,?)')
+        .run(VERSION,CODE,hash,new Date().toISOString(),String(error.message).slice(0,4000));
+      throw error;
+    }
+  }
+  return migrateSeedPolicy(db);
+}
+module.exports={migrate,checksum,VERSION,CODE,CATALOG};

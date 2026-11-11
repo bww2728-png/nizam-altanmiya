@@ -6,6 +6,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { StringDecoder } = require('node:string_decoder');
 const unzipper = require('unzipper');
+const { SaxesParser } = require('saxes');
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 24 * 1024 * 1024;
@@ -318,7 +319,69 @@ function workerEnvironment(source = process.env) {
   return environment;
 }
 
+function extractDocxXml(xml, fileName) {
+  const elements = [];
+  let paragraph = '';
+  let inParagraph = false;
+  let inText = false;
+  const parser = new SaxesParser({ xmlns: true });
+  parser.on('opentag', (tag) => {
+    if (tag.uri !== 'http://schemas.openxmlformats.org/wordprocessingml/2006/main') return;
+    if (tag.local === 'p') {
+      inParagraph = true;
+      paragraph = '';
+    } else if (inParagraph && tag.local === 't') inText = true;
+    else if (inParagraph && tag.local === 'tab') paragraph += '\\t';
+    else if (inParagraph && (tag.local === 'br' || tag.local === 'cr')) paragraph += '\\n';
+  });
+  parser.on('text', (value) => { if (inText) paragraph += value; });
+  parser.on('closetag', (tag) => {
+    if (tag.uri !== 'http://schemas.openxmlformats.org/wordprocessingml/2006/main') return;
+    if (tag.local === 't') inText = false;
+    else if (tag.local === 'p') {
+      const content = paragraph.trim();
+      if (content) {
+        if (elements.length >= MAX_ELEMENTS) throw new Error('تجاوز عدد فقرات Word الحد المسموح به.');
+        elements.push({ type: 'paragraph', content, source: { file_name: fileName } });
+      }
+      paragraph = '';
+      inParagraph = false;
+    }
+  });
+  parser.write(xml).close();
+  if (!elements.length) throw new Error('لم يُعثر على نص قابل للاستخراج في ملف Word.');
+  const markdown = elements.map((element) => element.content).join('\\n\\n');
+  return {
+    engine: { name: 'Local DOCX parser', version: '1' },
+    structured: { elements },
+    markdown,
+    elements,
+    warnings: ['استُخرج نص Word محليًا؛ راجع القيم والسياق قبل استخدامها.'],
+  };
+}
+
+async function extractDocxFile(filePath) {
+  const archive = await unzipper.Open.file(filePath);
+  const entry = archive.files.find((item) => item.path === 'word/document.xml');
+  if (!entry) throw new Error('ملف Word لا يحتوي محتوى المستند الأساسي.');
+  if (entry.uncompressedSize > MAX_OUTPUT_BYTES) throw new Error('محتوى ملف Word يتجاوز حد الاستخراج الآمن.');
+  const xml = (await entry.buffer()).toString('utf8');
+  return extractDocxXml(xml, path.basename(filePath));
+}
+
+function workerStartError(error) {
+  if (error.code === 'ENOENT') return new Error('محرك معالجة هذا النوع غير مثبت أو غير مهيأ على الجهاز. بقي الملف الأصلي محفوظًا، ويمكن استخدام استخراج Word المحلي دون تثبيت Python.');
+  return new Error(`تعذر تشغيل محرك الوثائق: ${error.message}`);
+}
+
+function workerExitError(code, stderr) {
+  if (code === 9009) return new Error('محرك معالجة PDF أو الصور غير مثبت أو غير مهيأ على Windows (9009). بقي الملف الأصلي محفوظًا.');
+  return new Error((stderr.trim() || `انتهت عملية محرك الوثائق بالرمز ${code}.`).slice(0, 2000));
+}
+
 function runWorker(filePath, options = {}) {
+  if (path.extname(filePath).toLowerCase() === '.docx') return extractDocxFile(filePath);
+
   const python = options.python ?? process.env.DOCUMENT_WORKER_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
   const script = workerScriptPath(options);
   if (!fs.existsSync(script)) return Promise.reject(new Error('ملفات محرك الوثائق غير موجودة في حزمة التطبيق.'));
@@ -351,12 +414,12 @@ function runWorker(filePath, options = {}) {
       stdout += stdoutDecoder.write(chunk);
     });
     child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString('utf8')).slice(-8000); });
-    child.on('error', (error) => finish(new Error(`تعذر تشغيل محرك الوثائق: ${error.message}`)));
+    child.on('error', (error) => finish(workerStartError(error)));
     child.stdin.on('error', (error) => finish(new Error(`تعذر إرسال مهمة إلى محرك الوثائق: ${error.message}`)));
     child.on('close', (code) => {
       if (settled) return;
       stdout += stdoutDecoder.end();
-      if (code !== 0) return finish(new Error((stderr.trim() || `انتهت عملية محرك الوثائق بالرمز ${code}.`).slice(0, 2000)));
+      if (code !== 0) return finish(workerExitError(code, stderr));
       try { finish(null, JSON.parse(stdout)); }
       catch { finish(new Error('لم يُرجع محرك الوثائق JSON صالحًا.')); }
     });
@@ -365,7 +428,7 @@ function runWorker(filePath, options = {}) {
 }
 
 module.exports = {
-  MAX_FILE_BYTES, MIME_TYPES, SCHEMA, inspectFile, migrate, stageFile, listDocuments, getDocument, readOriginal,
+  MAX_FILE_BYTES, MIME_TYPES, SCHEMA, checksum: () => crypto.createHash('sha256').update(SCHEMA).digest('hex'), inspectFile, migrate, stageFile, listDocuments, getDocument, readOriginal,
   saveRagflowReference, listRagflowReferences, searchDocuments, normalizeSearchText, normalizeExtraction, persistExtraction,
-  markProcessingStarted, markProcessingUnavailable, markProcessingFailure, workerEnvironment, workerScriptPath, runWorker,
+  markProcessingStarted, markProcessingUnavailable, markProcessingFailure, workerEnvironment, workerScriptPath, extractDocxXml, workerExitError, runWorker,
 };

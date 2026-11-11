@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const test = require('node:test');
 const Database = require('better-sqlite3-multiple-ciphers');
 const documents = require('../src/main/documents/document-service.cjs');
@@ -24,6 +25,85 @@ function makeDatabase() {
   documents.migrate(database);
   return database;
 }
+
+function zipFiles(files) {
+  const localParts = [];
+  const centralParts = [];
+  let localOffset = 0;
+  for (const [name, content] of Object.entries(files)) {
+    const nameBytes = Buffer.from(name);
+    const data = Buffer.from(content);
+    const compressed = zlib.deflateRawSync(data);
+    const checksum = zlib.crc32(data);
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(8, 8);
+    localHeader.writeUInt32LE(checksum, 14);
+    localHeader.writeUInt32LE(compressed.length, 18);
+    localHeader.writeUInt32LE(data.length, 22);
+    localHeader.writeUInt16LE(nameBytes.length, 26);
+    localParts.push(localHeader, nameBytes, compressed);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(8, 10);
+    centralHeader.writeUInt32LE(checksum, 16);
+    centralHeader.writeUInt32LE(compressed.length, 20);
+    centralHeader.writeUInt32LE(data.length, 24);
+    centralHeader.writeUInt16LE(nameBytes.length, 28);
+    centralHeader.writeUInt32LE(localOffset, 42);
+    centralParts.push(centralHeader, nameBytes);
+    localOffset += localHeader.length + nameBytes.length + compressed.length;
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const endRecord = Buffer.alloc(22);
+  endRecord.writeUInt32LE(0x06054b50, 0);
+  endRecord.writeUInt16LE(Object.keys(files).length, 8);
+  endRecord.writeUInt16LE(Object.keys(files).length, 10);
+  endRecord.writeUInt32LE(centralDirectory.length, 12);
+  endRecord.writeUInt32LE(localOffset, 16);
+  return Buffer.concat([...localParts, centralDirectory, endRecord]);
+}
+
+test('DOCX extraction runs locally without a Python installation', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'document-docx-'));
+  const filePath = path.join(directory, 'report.docx');
+  const xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>اسم المديرية: الحديدة &amp; صنعاء</w:t></w:r></w:p><w:p><w:r><w:t>عدد السكان: ١٢٣٤</w:t></w:r></w:p></w:body></w:document>';
+  fs.writeFileSync(filePath, zipFiles({
+    '[Content_Types].xml': '<Types/>',
+    '_rels/.rels': '<Relationships/>',
+    'word/document.xml': xml,
+  }));
+  try {
+    await documents.inspectFile(filePath);
+    const result = await documents.runWorker(filePath, { python: 'python-command-that-is-not-installed' });
+    assert.equal(result.engine.name, 'Local DOCX parser');
+    assert.deepEqual(result.elements.map(element => element.content), ['اسم المديرية: الحديدة & صنعاء', 'عدد السكان: ١٢٣٤']);
+    assert.equal(result.elements[0].source.file_name, 'report.docx');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('document center maps reviewed candidates through protected IPC without exposing service credentials', () => {
+  const interfaceSource = fs.readFileSync(path.join(__dirname, '../src/renderer/pages/DocumentCenter.jsx'), 'utf8');
+  const preloadSource = fs.readFileSync(path.join(__dirname, '../src/main/preload.cjs'), 'utf8');
+  const mainSource = fs.readFileSync(path.join(__dirname, '../src/main/main.cjs'), 'utf8');
+  assert.doesNotMatch(interfaceSource, /RAGFlow|API key|مفتاح API|Bearer API|معرّف مجموعة/);
+  assert.match(interfaceSource, /promoteDocumentFieldCandidates/);
+  assert.match(interfaceSource, /لا تصبح القيم رسمية حتى يعتمدها المراجع/);
+  assert.match(preloadSource, /promoteDocumentFieldCandidates: \(request\) => ipcRenderer\.invoke\('documents:field-candidates:promote', request\)/);
+  assert.match(mainSource, /ipcMain\.handle\('documents:field-candidates:promote'[\s\S]*currentProfile\(\) !== 'owner'/);
+  assert.doesNotMatch(preloadSource, /saveRagflowConfig|ragflow:save-config/);
+});
+
+test('Windows worker command-not-found errors explain the missing local engine', () => {
+  assert.match(documents.workerExitError(9009, '').message, /محرك معالجة PDF أو الصور.*9009/);
+  assert.match(documents.workerExitError(1, 'ModuleNotFoundError').message, /ModuleNotFoundError/);
+});
 
 test('document library retains the original, deduplicates it, and stores review-only extraction', async () => {
   const database = makeDatabase();
