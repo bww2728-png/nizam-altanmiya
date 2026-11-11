@@ -176,6 +176,94 @@ test('compact serialization drops per-row values but keeps the analysis usable',
   assert.equal(full.rows[0].values.population, 43739);
 });
 
+test('an existing encrypted store is backed up before its first unified migration and retains user data', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-store-upgrade-'));
+  const filePath = path.join(directory, 'store.db');
+  const keyPath = path.join(directory, 'store.key');
+  const key = 'e'.repeat(64);
+  try {
+    const initial = openEncryptedStore(filePath, key);
+    initial.exec("CREATE TABLE migration_payload(value TEXT NOT NULL); INSERT INTO migration_payload VALUES ('preserve-this');");
+    initial.close();
+
+    const raw = new Database(filePath);
+    raw.pragma("cipher = 'sqlcipher'");
+    raw.pragma(`key = '${key}'`);
+    raw.exec('DROP TABLE store_schema_migrations');
+    raw.close();
+    fs.writeFileSync(keyPath, key + '\n', { mode: 0o600 });
+
+    const upgraded = openEncryptedStore(filePath, key, { keyPath });
+    assert.equal(upgraded.prepare('SELECT value FROM migration_payload').get().value, 'preserve-this');
+    assert.equal(upgraded.prepare('SELECT success FROM store_schema_migrations WHERE version=2').get().success, 1);
+    upgraded.close();
+
+    const [backupPath] = listBackups(filePath);
+    assert.ok(backupPath);
+    assert.equal(fs.readFileSync(backupPath + '.key', 'utf8').trim(), key);
+    assert.equal(classifyStore(backupPath, key).ok, true);
+    const backup = new Database(backupPath, { readonly: true });
+    try {
+      backup.pragma("cipher = 'sqlcipher'");
+      backup.pragma(`key = '${key}'`);
+      assert.equal(backup.prepare('SELECT value FROM migration_payload').get().value, 'preserve-this');
+      assert.throws(() => backup.prepare('SELECT 1 FROM store_schema_migrations').get(), /no such table/i);
+    } finally {
+      backup.close();
+    }
+
+    const reopened = openEncryptedStore(filePath, key, { keyPath });
+    assert.equal(reopened.prepare('SELECT value FROM migration_payload').get().value, 'preserve-this');
+    reopened.close();
+    assert.equal(listBackups(filePath).length, 1);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('an invalid backup key prevents an existing store from being migrated', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-store-upgrade-no-backup-'));
+  const filePath = path.join(directory, 'store.db');
+  const keyPath = path.join(directory, 'store.key');
+  const key = 'f'.repeat(64);
+  try {
+    const initial = openEncryptedStore(filePath, key);
+    initial.exec("CREATE TABLE migration_payload(value TEXT NOT NULL); INSERT INTO migration_payload VALUES ('preserve-this');");
+    initial.close();
+    const raw = new Database(filePath);
+    raw.pragma("cipher = 'sqlcipher'");
+    raw.pragma(`key = '${key}'`);
+    raw.exec('DROP TABLE store_schema_migrations');
+    raw.close();
+    fs.writeFileSync(keyPath, 'invalid-key');
+
+    assert.throws(() => openEncryptedStore(filePath, key, { keyPath }), /مفتاح التخزين غير صالح/);
+    assert.equal(listBackups(filePath).length, 0);
+    const unchanged = new Database(filePath, { readonly: true });
+    unchanged.pragma("cipher = 'sqlcipher'");
+    unchanged.pragma(`key = '${key}'`);
+    assert.equal(unchanged.prepare('SELECT value FROM migration_payload').get().value, 'preserve-this');
+    assert.throws(() => unchanged.prepare('SELECT 1 FROM store_schema_migrations').get(), /no such table/i);
+    unchanged.close();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a failed unified migration rolls back DDL and records its failure', () => {
+  const database = new Database(':memory:');
+  try {
+    database.pragma('foreign_keys = ON');
+    database.exec('CREATE TABLE field_definitions (field_definition_id INTEGER PRIMARY KEY)');
+    assert.throws(() => migrate(database));
+    assert.equal(database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='directorates'").get(), undefined);
+    assert.equal(database.prepare('SELECT success FROM store_schema_migrations WHERE version=2').get().success, 0);
+    assert.equal(database.prepare('SELECT COUNT(*) AS count FROM field_definitions').get().count, 0);
+  } finally {
+    database.close();
+  }
+});
+
 test('an encrypted-store backup includes its matching key and sidecars as one recoverable bundle', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-backup-bundle-'));
   try {
@@ -199,6 +287,28 @@ test('an encrypted-store backup includes its matching key and sidecars as one re
       assert.equal(fs.statSync(backup).mode & 0o077, 0);
       assert.equal(fs.statSync(backup + '.key').mode & 0o077, 0);
     }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('backup verification must pass before existing recoverable backups can be pruned', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-backup-verification-'));
+  const databasePath = path.join(directory, 'development-data.db');
+  const keyPath = path.join(directory, 'store.key');
+  const backupDirectory = path.join(directory, 'backups');
+  const priorBackup = path.join(backupDirectory, path.basename(databasePath) + '.2026-01-01.bak');
+  const key = '1'.repeat(64);
+  try {
+    fs.mkdirSync(backupDirectory);
+    fs.writeFileSync(databasePath, 'current-database-bytes');
+    fs.writeFileSync(keyPath, key);
+    fs.writeFileSync(priorBackup, 'recoverable-database-bytes');
+    fs.writeFileSync(priorBackup + '.key', key);
+
+    assert.throws(() => backupStore(databasePath, { keyPath, keep: 1, verify: () => false }), /تعذر التحقق من النسخة الاحتياطية/);
+    assert.deepEqual(listBackups(databasePath), [priorBackup]);
+    assert.equal(fs.readFileSync(priorBackup + '.key', 'utf8'), key);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

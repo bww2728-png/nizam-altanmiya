@@ -1,7 +1,9 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const canonicalData = require('./canonical-data.cjs');
 const dataArchitecture = require('../database/architecture.cjs');
+const unifiedDevelopmentModel = require('../database/unified-development-model.cjs');
 const documentService = require('../documents/document-service.cjs');
 const schemaDrivenDiscovery = require('../documents/schema-driven-discovery.cjs');
 
@@ -60,6 +62,51 @@ const DIRECTORATE_COLUMNS = {
 };
 
 const SQL = `
+  CREATE TABLE IF NOT EXISTS import_batches (
+    id INTEGER PRIMARY KEY,
+    file_name TEXT NOT NULL,
+    file_type TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'review',
+    warnings_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS review_items (
+    id INTEGER PRIMARY KEY,
+    batch_id INTEGER NOT NULL REFERENCES import_batches(id) ON DELETE CASCADE,
+    field_name TEXT NOT NULL,
+    value_text TEXT NOT NULL,
+    proposed_type TEXT NOT NULL DEFAULT 'غير محدد',
+    governorate TEXT NOT NULL DEFAULT '',
+    district TEXT NOT NULL DEFAULT '',
+    subdistrict TEXT NOT NULL DEFAULT '',
+    settlement TEXT NOT NULL DEFAULT '',
+    record_id TEXT NOT NULL DEFAULT '',
+    source_location TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS review_items_status_idx ON review_items(status, batch_id);
+  CREATE TABLE IF NOT EXISTS data_values (
+    id INTEGER PRIMARY KEY,
+    governorate TEXT NOT NULL,
+    district TEXT NOT NULL,
+    subdistrict TEXT NOT NULL,
+    settlement TEXT NOT NULL,
+    record_type TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    field_name TEXT NOT NULL,
+    value_text TEXT NOT NULL,
+    source_item_id INTEGER NOT NULL REFERENCES review_items(id),
+    source_file TEXT NOT NULL,
+    source_location TEXT NOT NULL,
+    imported_at TEXT NOT NULL,
+    UNIQUE(governorate, district, subdistrict, settlement, record_type, record_id, field_name)
+  );
+  CREATE INDEX IF NOT EXISTS data_values_geo_idx ON data_values(governorate, district, subdistrict, settlement);
   CREATE TABLE IF NOT EXISTS directorates (
     id INTEGER PRIMARY KEY,
     governorate TEXT NOT NULL DEFAULT '',
@@ -328,26 +375,102 @@ function applyColumnMigrations(database, table, migrations) {
   }
 }
 
-/** Idempotent migration; safe to run on every open. */
-function migrate(database) {
-  // Schema creation errors are real and must surface unchanged.
-  database.exec(SQL);
-  applyColumnMigrations(database, 'analysis_results', RESULT_COLUMN_MIGRATIONS);
-  applyColumnMigrations(database, 'directorates', DIRECTORATE_COLUMN_MIGRATIONS);
-  // Additive normalized model + raw workbook staging; never drops legacy tables.
-  canonicalData.migrateCanonicalData(database);
-  dataArchitecture.migrate(database);
-  documentService.migrate(database);
-  schemaDrivenDiscovery.migrate(database);
-  for (const index of EXTRA_INDEXES) {
-    if (!tableExists(database, index.table)) continue;
-    database.exec(index.ddl);
+const MIGRATION_VERSION = 2;
+const MIGRATION_CODE = 'unified-store-schema-v2';
+
+function checksum() {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    version: MIGRATION_VERSION,
+    code: MIGRATION_CODE,
+    sql: SQL,
+    resultColumns: RESULT_COLUMN_MIGRATIONS,
+    directorateColumns: DIRECTORATE_COLUMN_MIGRATIONS,
+    extraIndexes: EXTRA_INDEXES,
+    canonicalData: canonicalData.checksum(),
+    dataArchitecture: dataArchitecture.checksum(),
+    unifiedDevelopmentModel: unifiedDevelopmentModel.checksum(),
+    documentService: documentService.checksum(),
+    schemaDrivenDiscovery: schemaDrivenDiscovery.checksum(),
+  })).digest('hex');
+}
+
+function needsMigration(database) {
+  if (!tableExists(database, 'store_schema_migrations')) return true;
+  const row = database.prepare('SELECT checksum,success FROM store_schema_migrations WHERE version=? AND migration_code=?')
+    .get(MIGRATION_VERSION,MIGRATION_CODE);
+  if (row?.success === 1) {
+    if (row.checksum !== checksum()) throw new Error(`ترحيل ${MIGRATION_CODE} عُدّل بعد تطبيقه؛ يلزم إصدار ترحيل جديد.`);
+    return false;
   }
   return true;
 }
 
+function migrate(database, options = {}) {
+  if (!needsMigration(database)) return { version: MIGRATION_VERSION, alreadyApplied: true };
+  const sourceChecksum = checksum();
+  const startedAt = Date.now();
+  const now = new Date().toISOString();
+  if (typeof options.beforeApply === 'function') options.beforeApply();
+  const preApplyComplete = true;
+  const apply = database.transaction(() => {
+    if (!needsMigration(database)) return { version: MIGRATION_VERSION, alreadyApplied: true };
+    database.exec(`CREATE TABLE IF NOT EXISTS store_schema_migrations(
+      version INTEGER PRIMARY KEY,
+      migration_code TEXT NOT NULL UNIQUE,
+      checksum TEXT NOT NULL,
+      applied_at TEXT NOT NULL,
+      execution_ms INTEGER,
+      success INTEGER NOT NULL CHECK(success IN (0,1)),
+      details TEXT
+    )`);
+    database.exec(SQL);
+    applyColumnMigrations(database, 'analysis_results', RESULT_COLUMN_MIGRATIONS);
+    applyColumnMigrations(database, 'directorates', DIRECTORATE_COLUMN_MIGRATIONS);
+    canonicalData.migrateCanonicalData(database);
+    dataArchitecture.migrate(database);
+    unifiedDevelopmentModel.migrate(database);
+    documentService.migrate(database);
+    schemaDrivenDiscovery.migrate(database);
+    for (const index of EXTRA_INDEXES) {
+      if (tableExists(database, index.table)) database.exec(index.ddl);
+    }
+    const integrity = database.pragma('integrity_check');
+    if (integrity.length !== 1 || Object.values(integrity[0])[0] !== 'ok') {
+      throw new Error('فشل فحص سلامة SQLite بعد الترحيل.');
+    }
+    const foreignKeys = database.pragma('foreign_key_check');
+    if (foreignKeys.length) throw new Error(`مخالفة مفتاح خارجي بعد الترحيل: ${JSON.stringify(foreignKeys.slice(0,8))}`);
+    database.prepare(`INSERT INTO store_schema_migrations(version,migration_code,checksum,applied_at,execution_ms,success,details)
+      VALUES(?,?,?,?,?,1,?)`).run(MIGRATION_VERSION,MIGRATION_CODE,sourceChecksum,now,Date.now()-startedAt,
+      'ترحيل ذري موحد؛ أبقى الجداول القديمة والبيانات دون حذف.');
+    return { version: MIGRATION_VERSION, alreadyApplied: false };
+  });
+  try {
+    return apply.exclusive();
+  } catch (error) {
+    if (!preApplyComplete) throw error;
+    database.exec(`CREATE TABLE IF NOT EXISTS store_schema_migrations(
+      version INTEGER PRIMARY KEY,
+      migration_code TEXT NOT NULL UNIQUE,
+      checksum TEXT NOT NULL,
+      applied_at TEXT NOT NULL,
+      execution_ms INTEGER,
+      success INTEGER NOT NULL CHECK(success IN (0,1)),
+      details TEXT
+    )`);
+    database.prepare(`INSERT OR REPLACE INTO store_schema_migrations(version,migration_code,checksum,applied_at,execution_ms,success,details)
+      VALUES(?,?,?,?,?,0,?)`).run(MIGRATION_VERSION,MIGRATION_CODE,sourceChecksum,new Date().toISOString(),Date.now()-startedAt,
+      String(error.message).slice(0,4000));
+    throw error;
+  }
+}
+
 module.exports = {
   migrate,
+  needsMigration,
+  checksum,
+  MIGRATION_VERSION,
+  MIGRATION_CODE,
   DIRECTORATE_COLUMNS,
   SCHEMA_SQL: SQL,
   RESULT_COLUMN_MIGRATIONS,

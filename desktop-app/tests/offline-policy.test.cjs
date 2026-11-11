@@ -74,7 +74,7 @@ test('packaged main process initializes the restricted automatic updater', () =>
   assert.match(source, /autoUpdater\.checkForUpdates\(\)/);
   assert.match(source, /setupAutoUpdate\(\)/);
   assert.match(source, /installOfflineNetworkGuards\(\{ electronNet: net, allowedNetworkRequest: \(request, init\) => isAllowedUpdateRequest\(request\) \|\| isAllowedRagflowRequest\(request, init\) \}\)/);
-  assert.match(source, /installOfflineSessionGuard\(session\.defaultSession\)/);
+  assert.match(source, /installOfflineSessionGuard\(session\.defaultSession, \{ allowMainRequest: \(details\) => isAllowedRagflowRequest\(details\) \}\)/);
 });
 
 test('Node and Electron network APIs are blocked and recorded by the runtime guard', async () => {
@@ -132,15 +132,19 @@ test('Node and Electron network APIs are blocked and recorded by the runtime gua
   assert.deepEqual(await globalObject.fetch('local-test'), { ok: true });
 });
 
-test('Electron renderer session requests are cancelled and audited', () => {
+test('renderer requests remain blocked while approved main-process local knowledge requests pass', () => {
   clearOfflineNetworkAudit();
   let intercept;
   const fakeSession = { webRequest: { onBeforeRequest(_filter, callback) { intercept = callback; } } };
-  assert.equal(installOfflineSessionGuard(fakeSession), true);
+  assert.equal(installOfflineSessionGuard(fakeSession, { allowMainRequest: isAllowedRagflowRequest }), true);
   let decision;
-  intercept({ resourceType: 'xhr', url: 'https://example.invalid/telemetry' }, value => { decision = value; });
+  intercept({ webContentsId: 12, resourceType: 'xhr', url: 'http://127.0.0.1:9380/api/v1/system/healthz' }, value => { decision = value; });
   assert.deepEqual(decision, { cancel: true });
-  assert.equal(getOfflineNetworkAudit().rendererAttempts.length, 1);
+  intercept({ webContentsId: -1, resourceType: 'xhr', url: 'http://127.0.0.1:9380/api/v1/system/healthz' }, value => { decision = value; });
+  assert.deepEqual(decision, { cancel: false });
+  intercept({ webContentsId: -1, resourceType: 'xhr', url: 'https://example.invalid/telemetry' }, value => { decision = value; });
+  assert.deepEqual(decision, { cancel: true });
+  assert.equal(getOfflineNetworkAudit().rendererAttempts.length, 2);
   assert.equal(installOfflineSessionGuard({}), false);
 });
 

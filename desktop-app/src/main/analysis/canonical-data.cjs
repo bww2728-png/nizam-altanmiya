@@ -141,6 +141,11 @@ function syncLegacyDirectorate(database, id, options = {}) {
   const geographicUnitId = database.prepare("SELECT id FROM geographic_units WHERE unit_type='district' AND IFNULL(parent_id,0)=IFNULL(?,0) AND normalized_name=?")
     .get(governorateId,normalizedDistrict)?.id;
   if (!geographicUnitId) throw new Error('تعذر ربط المديرية بالمرجع الجغرافي المعياري.');
+  const syncGeographicUnit = database.prepare(`UPDATE geographic_units SET geo_unit_id=coalesce(geo_unit_id,id),
+    geo_unit_type_id=coalesce(geo_unit_type_id,(SELECT geo_unit_type_id FROM geo_unit_types WHERE type_code=CASE unit_type WHEN 'district' THEN 'directorate' ELSE unit_type END)),
+    parent_geo_unit_id=coalesce(parent_geo_unit_id,parent_id),name_ar=coalesce(name_ar,name) WHERE id=?`);
+  if (governorateId !== null) syncGeographicUnit.run(governorateId);
+  syncGeographicUnit.run(geographicUnitId);
   const externalKey = 'legacy-directorate:' + recordId;
   database.prepare("INSERT INTO entity_records (entity_type,geographic_unit_id,external_key,status,created_at,updated_at) VALUES ('directorate',?,?,'approved',?,?) ON CONFLICT(entity_type,external_key) WHERE external_key IS NOT NULL DO UPDATE SET geographic_unit_id=excluded.geographic_unit_id,status='approved',updated_at=excluded.updated_at")
     .run(geographicUnitId,externalKey,record.created_at ?? now,record.updated_at ?? now);
@@ -241,6 +246,11 @@ function applyCanonicalMigration(database) {
   }
   backfillLegacyDirectorates(database);
   return true;
+}
+
+function checksum() {
+  const { ALIASES } = require('./mapping.cjs');
+  return crypto.createHash('sha256').update(JSON.stringify({ TABLES, INPUT_FIELDS, DECISION_FIELD, INDICATORS, DIRECTORATE_FIELD_CLASS_BY_KEY, ALIASES })).digest('hex');
 }
 
 function migrateCanonicalData(database) {
@@ -736,6 +746,7 @@ function promoteProjectRegion(database, request = {}) {
       if (item.sector && !item.sectorId) insertIssue.run(batchId,region.sheet_id,item.rowId,'unmatched-project-sector','القطاع «' + item.sector + '» غير موجود في قاموس القطاعات؛ حُفظت قيمته في بيانات المصدر للمراجعة.',now);
       applied.push({ rowNumber: item.rowNumber, projectId });
     }
+    dataArchitecture.syncDomainRecords(database,{ projectIds:applied.map(item => item.projectId) });
     const totalRegionRows = database.prepare('SELECT COUNT(*) AS count FROM workbook_import_rows WHERE batch_id = ? AND sheet_id = ? AND row_number BETWEEN ? AND ?')
       .get(batchId,region.sheet_id,region.first_data_row,region.last_data_row).count;
     const promotedCount = database.prepare('SELECT COUNT(*) AS count FROM workbook_import_promotions WHERE region_id = ?').get(regionId).count;
@@ -884,6 +895,7 @@ function promoteIndicatorRegion(database, request = {}) {
       promotion.run(batchId,regionId,item.rowId,observationId,item.sourceLocation,json(item.columnMap),json({ indicator: item.indicator.code,period: item.period,value: item.value }),now);
       applied.push({ rowNumber: item.rowNumber, observationId });
     }
+    dataArchitecture.syncDomainRecords(database,{ indicatorObservationIds:applied.map(item => item.observationId) });
     const regionRows = database.prepare('SELECT COUNT(*) AS n FROM workbook_import_rows WHERE batch_id=? AND sheet_id=? AND row_number BETWEEN ? AND ?').get(batchId,region.sheet_id,region.first_data_row,region.last_data_row).n;
     const promotedCount = database.prepare('SELECT COUNT(*) AS n FROM workbook_import_promotions WHERE region_id=?').get(regionId).n;
     const status = refused.length ? (applied.length ? 'indicators-partially-promoted' : 'indicators-review-required')
@@ -912,30 +924,50 @@ function listIndicatorObservations(database, request = {}) {
   const offset = Math.max(0, Math.min(1000000, Number(request.offset) || 0));
   const search = String(request.search ?? '').trim().slice(0, 120);
   const indicatorId = request.indicatorId == null || request.indicatorId === '' ? null : Number(request.indicatorId);
-  const conditions = [];
+  const conditions = ['record.record_status=\'approved\''];
   const params = [];
   if (search) {
-    conditions.push("(instr(lower(indicator.label_ar),lower(?))>0 OR instr(lower(geo.name),lower(?))>0 OR instr(lower(coalesce(governorate.name,'')),lower(?))>0 OR instr(lower(observation.period_key),lower(?))>0)");
+    conditions.push("(instr(lower(indicator.label_ar),lower(?))>0 OR instr(lower(geo.name),lower(?))>0 OR instr(lower(coalesce(governorate.name,'')),lower(?))>0 OR instr(lower(iv.period_key),lower(?))>0)");
     params.push(search,search,search,search);
   }
   if (indicatorId !== null) {
     if (!Number.isSafeInteger(indicatorId) || indicatorId <= 0) throw new Error('معرّف المؤشر غير صالح.');
-    conditions.push('observation.indicator_id=?');
+    conditions.push('indicator.id=?');
     params.push(indicatorId);
   }
-  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-  const from = `FROM indicator_observations observation
-    JOIN indicator_definitions indicator ON indicator.id=observation.indicator_id
-    JOIN geographic_units geo ON geo.id=observation.geographic_unit_id
-    LEFT JOIN geographic_units governorate ON governorate.id=geo.parent_id
-    LEFT JOIN data_sources source ON source.id=observation.source_id`;
-  const total = database.prepare('SELECT COUNT(*) AS count ' + from + ' ' + where).get(...params).count;
-  const rows = database.prepare(`SELECT observation.id,observation.indicator_id,observation.geographic_unit_id,observation.period_key,
-      observation.value_number,observation.value_text,observation.value_state,observation.source_id,observation.source_location,observation.created_at,
-      indicator.code AS indicator_code,indicator.label_ar AS indicator_label,indicator.unit,geo.name AS district,governorate.name AS governorate,
+  const cte = `WITH indicator_values AS (
+    SELECT record.form_record_id,record.geo_unit_id,record.record_status,
+      MAX(CASE WHEN field.field_code='indicatorCode' THEN value.value_text END) AS indicator_code,
+      MAX(CASE WHEN field.field_code='periodKey' THEN value.value_text END) AS period_key,
+      MAX(CASE WHEN field.field_code='valueText' THEN value.value_text END) AS value_text,
+      MAX(CASE WHEN field.field_code='valueState' THEN value.value_text END) AS value_state_text,
+      MAX(CASE WHEN field.field_code='valueNumber' THEN observation.value_integer END) AS value_integer,
+      MAX(CASE WHEN field.field_code='valueNumber' THEN observation.value_real END) AS value_real,
+      MAX(CASE WHEN field.field_code='valueState' THEN value.value_text END) AS canonical_value_state,
+      MAX(CASE WHEN field.field_code='valueNumber' THEN observation.source_id END) AS source_id,
+      MAX(CASE WHEN field.field_code='valueNumber' THEN observation.observation_id END) AS value_observation_id
+    FROM form_records record JOIN form_versions version USING(form_version_id) JOIN form_definitions form USING(form_id)
+    JOIN form_fields field USING(form_version_id)
+    LEFT JOIN record_field_values value ON value.form_record_id=record.form_record_id AND value.form_field_id=field.form_field_id
+    LEFT JOIN observations observation ON observation.form_record_id=record.form_record_id AND observation.form_field_id=field.form_field_id
+    WHERE form.form_code='indicator_observation_v1'
+    GROUP BY record.form_record_id
+  )`;
+  const from = `FROM indicator_values iv JOIN form_records record USING(form_record_id)
+    JOIN form_record_legacy_links link ON link.form_record_id=record.form_record_id AND link.legacy_entity_type='indicator_observation'
+    JOIN indicator_definitions indicator ON indicator.code=iv.indicator_code
+    JOIN geographic_units geo ON geo.geo_unit_id=record.geo_unit_id
+    LEFT JOIN geographic_units governorate ON governorate.geo_unit_id=geo.parent_geo_unit_id
+    LEFT JOIN data_sources source ON source.source_id=iv.source_id`;
+  const where = `WHERE ${conditions.join(' AND ')}`;
+  const total = database.prepare(`${cte} SELECT COUNT(*) AS count ${from} ${where}`).get(...params).count;
+  const rows = database.prepare(`${cte} SELECT link.legacy_entity_id AS id,indicator.id AS indicator_id,geo.geo_unit_id AS geographic_unit_id,iv.period_key,
+      coalesce(iv.value_integer,iv.value_real) AS value_number,iv.value_text,coalesce(iv.canonical_value_state,iv.value_state_text,'known') AS value_state,
+      iv.source_id,(SELECT provenance.source_locator FROM value_provenance provenance WHERE provenance.observation_id=iv.value_observation_id ORDER BY provenance.provenance_id DESC LIMIT 1) AS source_location,
+      record.created_at,indicator.code AS indicator_code,indicator.label_ar AS indicator_label,indicator.unit,geo.name AS district,governorate.name AS governorate,
       source.source_type,source.file_name AS source_file,source.document_title AS source_title,
-      (SELECT COUNT(*) FROM indicator_observation_versions version WHERE version.observation_id=observation.id) AS version_count
-    ${from} ${where} ORDER BY observation.id DESC LIMIT ? OFFSET ?`).all(...params,limit,offset);
+      max(0,(SELECT COUNT(*) FROM record_revisions revision WHERE revision.form_record_id=record.form_record_id)-1) AS version_count
+    ${from} ${where} ORDER BY record.updated_at DESC,record.form_record_id DESC LIMIT ? OFFSET ?`).all(...params,limit,offset);
   return { rows,total,limit,offset,hasPrevious:offset>0,hasNext:offset+rows.length<total };
 }
 
@@ -978,6 +1010,7 @@ function saveIndicatorObservation(database, request = {}) {
     }
     database.prepare('INSERT INTO access_log (action,entity,entity_id,fields,detail,created_at) VALUES (?,?,?,?,?,?)')
       .run(previous ? 'manual-update' : 'manual-create','indicator_observations',String(observationId),'indicator_id,geographic_unit_id,period_key,value_number','source=' + sourceId,now);
+    dataArchitecture.syncDomainRecords(database,{ indicatorObservationIds:[observationId] });
     return { id:observationId,action:previous?'updated':'created',sourceId,updatedAt:now,unit:indicator.unit };
   })();
 }
@@ -1082,6 +1115,7 @@ function saveCanonicalProject(database, request = {}) {
       .run(projectId,'manual-create',json(current),sourceId,now);
     database.prepare('INSERT INTO access_log (action,entity,entity_id,fields,detail,created_at) VALUES (?,?,?,?,?,?)')
       .run(previous ? 'manual-update' : 'manual-create','projects',String(projectId),String(values.length),'source=' + sourceId,now);
+    dataArchitecture.syncDomainRecords(database,{ projectIds:[projectId] });
     return { id: projectId, action: previous ? 'updated' : 'created', sourceId, updatedAt: now };
   })();
 }
@@ -1135,6 +1169,7 @@ function addProjectFunding(database, projectId, request = {}) {
     database.prepare('UPDATE projects SET updated_at=?,source_id=? WHERE id=?').run(now,sourceId,id);
     database.prepare('INSERT INTO access_log (action,entity,entity_id,fields,detail,created_at) VALUES (?,?,?,?,?,?)')
       .run('funding-added','projects',String(id),'partner_name,amount,currency_code,funding_date','source=' + sourceId,now);
+    dataArchitecture.syncDomainRecords(database,{ projectIds:[id] });
     return { id: Number(inserted.lastInsertRowid), sourceId, projectId: id, createdAt: now };
   })();
 }
@@ -1192,73 +1227,112 @@ function listCanonicalProjects(database, request = {}) {
   const offset = Math.max(0, Math.min(1000000, Number(request.offset) || 0));
   const search = String(request.search ?? '').trim().slice(0, 120);
   const status = String(request.status ?? '').trim().slice(0, 80);
-  const conditions = [];
+  const conditions = ["p.record_status='approved'"];
   const params = [];
   if (search) {
-    conditions.push("(instr(lower(coalesce(p.name,'')),lower(?)) > 0 OR instr(lower(coalesce(p.code,'')),lower(?)) > 0 OR instr(lower(coalesce(p.description,'')),lower(?)) > 0)");
-    params.push(search, search, search);
+    conditions.push("(instr(lower(coalesce(p.name,'')),lower(?))>0 OR instr(lower(coalesce(p.code,'')),lower(?))>0 OR instr(lower(coalesce(p.description,'')),lower(?))>0)");
+    params.push(search,search,search);
   }
   if (status) {
-    conditions.push("p.status = ?");
+    conditions.push('p.status=?');
     params.push(status);
   }
-  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-  const total = database.prepare('SELECT COUNT(*) AS count FROM projects p ' + where).get(...params).count;
-  const rows = database.prepare(`
-    SELECT p.id,p.code,p.name,p.description,p.geographic_unit_id,p.sector_id,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
-      p.start_date,p.end_date,p.created_at,p.updated_at,
-      geo.name AS geographic_unit_name, geo.unit_type AS geographic_unit_type,
-      sector.name_ar AS sector_name,
+  const cte = `WITH project_values AS (
+    SELECT record.form_record_id,record.record_status,record.created_at,record.updated_at,record.geo_unit_id,link.legacy_entity_id AS id,
+      MAX(CASE WHEN field.field_code='projectCode' THEN value.value_text END) AS code,
+      MAX(CASE WHEN field.field_code='projectName' THEN value.value_text END) AS name,
+      MAX(CASE WHEN field.field_code='description' THEN value.value_text END) AS description,
+      MAX(CASE WHEN field.field_code='projectStatus' THEN value.value_text END) AS status,
+      MAX(CASE WHEN field.field_code='estimatedCost' THEN coalesce(observation.value_integer,observation.value_real) END) AS estimated_cost,
+      MAX(CASE WHEN field.field_code='actualCost' THEN coalesce(observation.value_integer,observation.value_real) END) AS actual_cost,
+      MAX(CASE WHEN field.field_code='currencyCode' THEN value.value_text END) AS currency_code,
+      MAX(CASE WHEN field.field_code='startDate' THEN value.value_date END) AS start_date,
+      MAX(CASE WHEN field.field_code='endDate' THEN value.value_date END) AS end_date,
+      MAX(CASE WHEN field.field_code='sectorCode' THEN value.value_text END) AS sector_code
+    FROM form_records record JOIN form_versions version USING(form_version_id) JOIN form_definitions form USING(form_id)
+    JOIN form_record_legacy_links link ON link.form_record_id=record.form_record_id AND link.legacy_entity_type='project'
+    JOIN form_fields field USING(form_version_id)
+    LEFT JOIN record_field_values value ON value.form_record_id=record.form_record_id AND value.form_field_id=field.form_field_id
+    LEFT JOIN observations observation ON observation.form_record_id=record.form_record_id AND observation.form_field_id=field.form_field_id
+    WHERE form.form_code='project_v1'
+    GROUP BY record.form_record_id
+  )`;
+  const from = `FROM project_values p
+    LEFT JOIN geographic_units geo ON geo.geo_unit_id=p.geo_unit_id
+    LEFT JOIN sectors sector ON sector.code=p.sector_code
+    LEFT JOIN record_revisions revision ON revision.form_record_id=p.form_record_id AND revision.revision_number=(SELECT MAX(latest.revision_number) FROM record_revisions latest WHERE latest.form_record_id=p.form_record_id)
+    LEFT JOIN data_sources source ON source.source_id=revision.source_id`;
+  const where = `WHERE ${conditions.join(' AND ')}`;
+  const total = database.prepare(`${cte} SELECT COUNT(*) AS count ${from} ${where}`).get(...params).count;
+  const rows = database.prepare(`${cte} SELECT p.id,p.code,p.name,p.description,p.geo_unit_id AS geographic_unit_id,sector.id AS sector_id,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
+      p.start_date,p.end_date,p.created_at,p.updated_at,geo.name AS geographic_unit_name,geo.unit_type AS geographic_unit_type,sector.name_ar AS sector_name,
       source.file_name AS source_file,
-      (SELECT COUNT(*) FROM project_funding f WHERE f.project_id = p.id) AS funding_count,
-      (SELECT COUNT(*) FROM workbook_import_promotions promotion
-        JOIN workbook_import_rows source_row ON source_row.id = promotion.row_id
-        JOIN data_quality_issues issue ON issue.row_id = source_row.id
-        WHERE promotion.entity_type = 'project' AND promotion.target_id = p.id AND issue.status = 'open') AS open_quality_issues,
-      (SELECT promotion.source_location FROM workbook_import_promotions promotion
-        WHERE promotion.entity_type = 'project' AND promotion.target_id = p.id LIMIT 1) AS source_location
-    FROM projects p
-    LEFT JOIN geographic_units geo ON geo.id = p.geographic_unit_id
-    LEFT JOIN sectors sector ON sector.id = p.sector_id
-    LEFT JOIN data_sources source ON source.id = p.source_id
-    ${where}
-    ORDER BY p.updated_at DESC,p.id DESC
-    LIMIT ? OFFSET ?
-  `).all(...params, limit, offset);
+      (SELECT COUNT(*) FROM form_record_legacy_links funding_link JOIN form_records funding_record USING(form_record_id)
+        JOIN form_versions funding_version USING(form_version_id) JOIN form_definitions funding_form USING(form_id)
+        WHERE funding_link.legacy_entity_type='project_funding' AND funding_record.parent_record_id=(SELECT form_record_id FROM project_values WHERE id=p.id)
+          AND funding_form.form_code='project_funding_v1') AS funding_count,
+      (SELECT COUNT(*) FROM workbook_import_promotions promotion JOIN workbook_import_rows source_row ON source_row.id=promotion.row_id
+        JOIN data_quality_issues issue ON issue.row_id=source_row.id WHERE promotion.entity_type='project' AND promotion.target_id=p.id AND issue.status='open') AS open_quality_issues,
+      (SELECT promotion.source_location FROM workbook_import_promotions promotion WHERE promotion.entity_type='project' AND promotion.target_id=p.id LIMIT 1) AS source_location,
+      max(0,(SELECT COUNT(*) FROM record_revisions revision WHERE revision.form_record_id=p.form_record_id)-1) AS version_count
+    ${from} ${where} ORDER BY p.updated_at DESC,p.id DESC LIMIT ? OFFSET ?`).all(...params,limit,offset);
   return {
-    rows: rows.map(row => ({
-      ...row,
-      estimatedCost: row.estimated_cost,
-      actualCost: row.actual_cost,
-      currencyCode: row.currency_code,
-      geographicUnitName: row.geographic_unit_name,
-      geographicUnitType: row.geographic_unit_type,
-      sectorName: row.sector_name,
-      sourceFile: row.source_file,
-      fundingCount: row.funding_count,
-      openQualityIssues: row.open_quality_issues,
-      sourceLocation: row.source_location,
+    rows:rows.map(row => ({
+      ...row,estimatedCost:row.estimated_cost,actualCost:row.actual_cost,currencyCode:row.currency_code,
+      geographicUnitName:row.geographic_unit_name,geographicUnitType:row.geographic_unit_type,sectorName:row.sector_name,
+      sourceFile:row.source_file,fundingCount:row.funding_count,openQualityIssues:row.open_quality_issues,sourceLocation:row.source_location,
     })),
-    total, limit, offset, hasPrevious: offset > 0, hasNext: offset + rows.length < total,
+    total,limit,offset,hasPrevious:offset>0,hasNext:offset+rows.length<total,
   };
 }
 
 function getCanonicalProject(database, projectId) {
   const id = Number(projectId);
   if (!Number.isSafeInteger(id) || id <= 0) throw new Error('معرّف المشروع غير صالح.');
-  const project = database.prepare(`
-    SELECT p.id,p.code,p.name,p.description,p.geographic_unit_id,p.sector_id,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
-      p.start_date,p.end_date,p.created_at,p.updated_at,
-      geo.name AS geographic_unit_name,geo.unit_type AS geographic_unit_type,
-      sector.name_ar AS sector_name,source.file_name AS source_file
-    FROM projects p
-    LEFT JOIN geographic_units geo ON geo.id = p.geographic_unit_id
-    LEFT JOIN sectors sector ON sector.id = p.sector_id
-    LEFT JOIN data_sources source ON source.id = p.source_id
-    WHERE p.id = ?
-  `).get(id);
+  const project = database.prepare(`WITH project_values AS (
+    SELECT record.form_record_id,record.record_status,record.created_at,record.updated_at,record.geo_unit_id,link.legacy_entity_id AS id,
+      MAX(CASE WHEN field.field_code='projectCode' THEN value.value_text END) AS code,
+      MAX(CASE WHEN field.field_code='projectName' THEN value.value_text END) AS name,
+      MAX(CASE WHEN field.field_code='description' THEN value.value_text END) AS description,
+      MAX(CASE WHEN field.field_code='projectStatus' THEN value.value_text END) AS status,
+      MAX(CASE WHEN field.field_code='estimatedCost' THEN coalesce(observation.value_integer,observation.value_real) END) AS estimated_cost,
+      MAX(CASE WHEN field.field_code='actualCost' THEN coalesce(observation.value_integer,observation.value_real) END) AS actual_cost,
+      MAX(CASE WHEN field.field_code='currencyCode' THEN value.value_text END) AS currency_code,
+      MAX(CASE WHEN field.field_code='startDate' THEN value.value_date END) AS start_date,
+      MAX(CASE WHEN field.field_code='endDate' THEN value.value_date END) AS end_date,
+      MAX(CASE WHEN field.field_code='sectorCode' THEN value.value_text END) AS sector_code
+    FROM form_records record JOIN form_versions version USING(form_version_id) JOIN form_definitions form USING(form_id)
+    JOIN form_record_legacy_links link ON link.form_record_id=record.form_record_id AND link.legacy_entity_type='project'
+    JOIN form_fields field USING(form_version_id)
+    LEFT JOIN record_field_values value ON value.form_record_id=record.form_record_id AND value.form_field_id=field.form_field_id
+    LEFT JOIN observations observation ON observation.form_record_id=record.form_record_id AND observation.form_field_id=field.form_field_id
+    WHERE form.form_code='project_v1'
+    GROUP BY record.form_record_id
+  )
+  SELECT p.id,p.code,p.name,p.description,p.geo_unit_id AS geographic_unit_id,sector.id AS sector_id,p.status,p.estimated_cost,p.actual_cost,p.currency_code,
+    p.start_date,p.end_date,p.created_at,p.updated_at,geo.name AS geographic_unit_name,geo.unit_type AS geographic_unit_type,sector.name_ar AS sector_name,
+    source.file_name AS source_file,p.form_record_id
+  FROM project_values p
+  LEFT JOIN geographic_units geo ON geo.geo_unit_id=p.geo_unit_id
+  LEFT JOIN sectors sector ON sector.code=p.sector_code
+  LEFT JOIN record_revisions revision ON revision.form_record_id=p.form_record_id AND revision.revision_number=(SELECT MAX(latest.revision_number) FROM record_revisions latest WHERE latest.form_record_id=p.form_record_id)
+  LEFT JOIN data_sources source ON source.source_id=revision.source_id
+  WHERE p.id=? AND p.record_status='approved'`).get(id);
   if (!project) throw new Error('المشروع المطلوب غير موجود.');
-  const funding = database.prepare('SELECT id,partner_name,amount,currency_code,funding_date,created_at FROM project_funding WHERE project_id = ? ORDER BY id').all(id);
+  const funding = database.prepare(`WITH funding_values AS (
+    SELECT record.form_record_id,link.legacy_entity_id AS id,record.created_at,
+      MAX(CASE WHEN field.field_code='partnerName' THEN value.value_text END) AS partner_name,
+      MAX(CASE WHEN field.field_code='amount' THEN coalesce(observation.value_integer,observation.value_real) END) AS amount,
+      MAX(CASE WHEN field.field_code='currencyCode' THEN value.value_text END) AS currency_code,
+      MAX(CASE WHEN field.field_code='fundingDate' THEN value.value_date END) AS funding_date
+    FROM form_records record JOIN form_versions version USING(form_version_id) JOIN form_definitions form USING(form_id)
+    JOIN form_record_legacy_links link ON link.form_record_id=record.form_record_id AND link.legacy_entity_type='project_funding'
+    JOIN form_fields field USING(form_version_id)
+    LEFT JOIN record_field_values value ON value.form_record_id=record.form_record_id AND value.form_field_id=field.form_field_id
+    LEFT JOIN observations observation ON observation.form_record_id=record.form_record_id AND observation.form_field_id=field.form_field_id
+    WHERE form.form_code='project_funding_v1' AND record.parent_record_id=?
+    GROUP BY record.form_record_id
+  ) SELECT id,partner_name,amount,currency_code,funding_date,created_at FROM funding_values ORDER BY id`).all(project.form_record_id);
   const provenance = database.prepare(`
     SELECT promotion.source_location,promotion.mapping_json,promotion.mapped_values_json,
       batch.file_name,batch.sha256,batch.created_at AS received_at
@@ -1274,7 +1348,17 @@ function getCanonicalProject(database, projectId) {
     WHERE promotion.entity_type = 'project' AND promotion.target_id = ?
     ORDER BY issue.id DESC
   `).all(id);
-  const versions = database.prepare('SELECT id,action,created_at,source_id FROM project_versions WHERE project_id=? ORDER BY id DESC LIMIT 50').all(id);
+  const versions = database.prepare(`SELECT revision.record_revision_id AS id,revision.action_type AS action,revision.revision_number,revision.created_at,revision.source_id
+    FROM record_revisions revision WHERE revision.form_record_id=? AND revision.action_type<>'legacy_domain_migration'
+    UNION ALL
+    SELECT revision.record_revision_id AS id,
+      CASE WHEN revision.action_type='legacy_domain_migration' THEN 'funding-added' ELSE revision.action_type END AS action,
+      revision.revision_number,revision.created_at,revision.source_id
+    FROM record_revisions revision JOIN form_records funding_record ON funding_record.form_record_id=revision.form_record_id
+    JOIN form_versions funding_version ON funding_version.form_version_id=funding_record.form_version_id
+    JOIN form_definitions funding_form ON funding_form.form_id=funding_version.form_id
+    WHERE funding_record.parent_record_id=? AND funding_form.form_code='project_funding_v1'
+    ORDER BY created_at DESC,id DESC LIMIT 50`).all(project.form_record_id,project.form_record_id);
   const attachments = database.prepare('SELECT id,original_name,mime_type,extension,size_bytes,sha256,classification,review_status,created_at FROM managed_attachments WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all('project',id);
   return { project, funding, attachments, provenance: provenance ?? null, issues, versions };
 }
@@ -1347,4 +1431,4 @@ function listWorkbookImports(database, limit = 30) {
   return database.prepare("SELECT b.id,b.file_name,b.file_size,b.sha256,b.sheet_count,b.row_count,b.cell_count,b.media_count,b.media_stored_count,b.truncated,b.status,b.created_at,b.updated_at,(SELECT COUNT(*) FROM workbook_import_regions r WHERE r.batch_id=b.id) AS region_count,(SELECT COUNT(*) FROM workbook_import_rows w WHERE w.batch_id=b.id) AS stored_row_count FROM workbook_import_batches b ORDER BY b.id DESC LIMIT ?").all(bounded);
 }
 
-module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, migrateCanonicalData, syncLegacyDirectorate, retireLegacyDirectorate, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, promoteIndicatorRegion, listCanonicalReferences, listIndicatorObservations, saveIndicatorObservation, listDataQualityIssues, listDataSources, resolveDataQualityIssue, saveCanonicalProject, resolveProjectQualityIssue, addProjectFunding, addProjectAttachment, getProjectAttachment, listCanonicalProjects, getCanonicalProject, completeWorkbookImport, listWorkbookImports };
+module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, checksum, migrateCanonicalData, syncLegacyDirectorate, retireLegacyDirectorate, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, promoteIndicatorRegion, listCanonicalReferences, listIndicatorObservations, saveIndicatorObservation, listDataQualityIssues, listDataSources, resolveDataQualityIssue, saveCanonicalProject, resolveProjectQualityIssue, addProjectFunding, addProjectAttachment, getProjectAttachment, listCanonicalProjects, getCanonicalProject, completeWorkbookImport, listWorkbookImports };

@@ -13,7 +13,9 @@ const { migrate } = require('../src/main/analysis/store-schema.cjs');
 const { openEncryptedStore } = require('../src/main/store.cjs');
 const canonical = require('../src/main/analysis/canonical-data.cjs');
 const dataArchitecture = require('../src/main/database/architecture.cjs');
+const unifiedDevelopmentModel = require('../src/main/database/unified-development-model.cjs');
 const recordService = require('../src/main/database/record-service.cjs');
+const persist = require('../src/main/analysis/persist.cjs');
 
 const ONE_PIXEL_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/pXcAAAAASUVORK5CYII=',
@@ -49,10 +51,75 @@ test('canonical model migrations are additive and idempotent', () => {
     assert.ok(db.prepare("SELECT 1 FROM data_field_aliases WHERE field_definition_id=? AND normalized_alias=?").get(populationFieldId, 'اجمالي السكان'));
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM indicator_definitions').get().n, 12);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM directorates').get().n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM form_definitions WHERE form_code GLOB 'form_[0-9][0-9][0-9]' AND data_structure_type='unresolved_definition'").get().n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sectors WHERE code GLOB 'form-range-*-*'").get().n, 0);
+    assert.equal(db.prepare('SELECT success FROM schema_migrations WHERE version=5').get().success, 1);
   } finally {
     db.close();
   }
 });
+
+test('domain records are backfilled into versioned form records atomically and idempotently', () => {
+  const db = openDatabase();
+  try {
+    const now = '2026-01-01T00:00:00.000Z';
+    const governorate = db.prepare("INSERT INTO geographic_units (unit_type,name,normalized_name,created_at,updated_at) VALUES ('governorate','تعز','تعز',?,?)").run(now,now);
+    const district = db.prepare("INSERT INTO geographic_units (parent_id,unit_type,name,normalized_name,created_at,updated_at) VALUES (?,'district','المعافر','المعافر',?,?)").run(governorate.lastInsertRowid,now,now);
+    const sector = db.prepare('INSERT INTO sectors (code,name_ar,created_at) VALUES (?,?,?)').run('water','المياه',now);
+    const source = db.prepare("INSERT INTO data_sources (source_type,document_title,received_at) VALUES ('manual','مصدر اختبار',?)").run(now);
+    const project = db.prepare(`INSERT INTO projects (code,name,description,geographic_unit_id,sector_id,status,estimated_cost,currency_code,start_date,source_id,created_at,updated_at)
+      VALUES ('P-MIG-1','تأهيل شبكة مياه','وصف المشروع',?,?, 'قيد التنفيذ',1250,'YER','2025-01-01',?,?,?)`).run(district.lastInsertRowid,sector.lastInsertRowid,source.lastInsertRowid,now,now);
+    db.prepare("INSERT INTO project_versions (project_id,action,payload_json,source_id,created_at) VALUES (?,'created','{\\\"name\\\":\\\"تأهيل شبكة مياه\\\"}',?,?)")
+      .run(project.lastInsertRowid,source.lastInsertRowid,now);
+    db.prepare("INSERT INTO project_versions (project_id,action,payload_json,source_id,created_at) VALUES (?,'updated','{\\\"name\\\":\\\"تأهيل شبكة مياه مطورة\\\"}',?,?)")
+      .run(project.lastInsertRowid,source.lastInsertRowid,now);
+    const funding = db.prepare(`INSERT INTO project_funding (project_id,partner_name,amount,currency_code,funding_date,source_id,created_at)
+      VALUES (?,'شريك محلي',500,'USD','2025-06-01',?,?)`).run(project.lastInsertRowid,source.lastInsertRowid,now);
+    const indicator = db.prepare("SELECT id FROM indicator_definitions WHERE code='waterDeficit'").get();
+    const observation = db.prepare(`INSERT INTO indicator_observations (indicator_id,geographic_unit_id,period_key,value_number,value_state,source_id,source_location,created_at)
+      VALUES (?,?, '2025',17,'known',?,'المؤشرات!row-2',?)`).run(indicator.id,district.lastInsertRowid,source.lastInsertRowid,now);
+    db.prepare("INSERT INTO indicator_observation_versions (observation_id,action,payload_json,source_id,created_at) VALUES (?,'updated','{\\\"value_number\\\":17}',?,?)")
+      .run(observation.lastInsertRowid,source.lastInsertRowid,now);
+
+    dataArchitecture.migrate(db);
+    dataArchitecture.migrate(db);
+
+    const migrated = db.prepare("SELECT source_table,source_id,target_id FROM application_migration_log WHERE migration_code='domain-records-v1' ORDER BY source_table,source_id").all();
+    assert.deepEqual(migrated.map(row => `${row.source_table}:${row.source_id}`), [
+      `indicator_observations:${observation.lastInsertRowid}`,
+      `project_funding:${funding.lastInsertRowid}`,
+      `projects:${project.lastInsertRowid}`,
+    ]);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM form_records WHERE record_code LIKE 'legacy-project:%'").get().n,1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM form_records WHERE record_code LIKE 'legacy-project-funding:%'").get().n,1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM form_records WHERE record_code LIKE 'legacy-indicator-observation:%'").get().n,1);
+
+    const projectRecord = db.prepare("SELECT form_record_id,geo_unit_id,record_status FROM form_records WHERE record_code=?").get(`legacy-project:${project.lastInsertRowid}`);
+    assert.equal(projectRecord.record_status,'approved');
+    assert.equal(db.prepare('SELECT revision_number FROM form_records WHERE form_record_id=?').get(projectRecord.form_record_id).revision_number,3);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM record_revisions WHERE form_record_id=? AND action_type LIKE 'legacy_%'").get(projectRecord.form_record_id).n,3);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type=\'project\' AND legacy_entity_id=?').get(projectRecord.form_record_id,project.lastInsertRowid).n,1);
+    assert.equal(db.prepare(`SELECT o.value_integer FROM observations o JOIN form_fields f USING(form_field_id)
+      WHERE o.form_record_id=? AND f.field_code='estimatedCost'`).get(projectRecord.form_record_id).value_integer,1250);
+    const fundingRecord = db.prepare("SELECT form_record_id,parent_record_id FROM form_records WHERE record_code=?").get(`legacy-project-funding:${funding.lastInsertRowid}`);
+    assert.equal(fundingRecord.parent_record_id,projectRecord.form_record_id);
+    assert.equal(db.prepare(`SELECT o.value_integer FROM observations o JOIN form_fields f USING(form_field_id)
+      WHERE o.form_record_id=? AND f.field_code='amount'`).get(fundingRecord.form_record_id).value_integer,500);
+    const indicatorRecord = db.prepare("SELECT form_record_id,geo_unit_id FROM form_records WHERE record_code=?").get(`legacy-indicator-observation:${observation.lastInsertRowid}`);
+    assert.equal(indicatorRecord.geo_unit_id,projectRecord.geo_unit_id);
+    assert.equal(db.prepare(`SELECT o.value_integer FROM observations o JOIN form_fields f USING(form_field_id)
+      WHERE o.form_record_id=? AND f.field_code='valueNumber'`).get(indicatorRecord.form_record_id).value_integer,17);
+    assert.equal(db.prepare('SELECT revision_number FROM form_records WHERE form_record_id=?').get(indicatorRecord.form_record_id).revision_number,2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM record_revisions WHERE form_record_id=? AND action_type='legacy_updated'").get(indicatorRecord.form_record_id).n,1);
+    assert.equal(db.prepare(`SELECT p.source_locator FROM value_provenance p JOIN observations o USING(observation_id) JOIN form_fields f USING(form_field_id)
+      WHERE o.form_record_id=? AND f.field_code='valueNumber'`).get(indicatorRecord.form_record_id).source_locator,'المؤشرات!row-2:indicator_observations:' + observation.lastInsertRowid + ':valueNumber');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM value_provenance p JOIN observations o USING(observation_id) WHERE o.form_record_id IN (?,?,?)').get(projectRecord.form_record_id,fundingRecord.form_record_id,indicatorRecord.form_record_id).n,3);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM record_revisions WHERE action_type='legacy_domain_migration'").get().n,3);
+  } finally {
+    db.close();
+  }
+});
+
 
 test('workbook mirroring supports the original encrypted-store table layout', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-normalized-workbook-'));
@@ -105,6 +172,12 @@ test('central record writes validate values and keep revisions, provenance and r
     assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].value,'6500');
     assert.equal(recordService.submitForReview(db,created.formRecordId,'reviewer').status,'pending_review');
     assert.equal(recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' }).status,'approved');
+    const normalizedDirectorates = persist.listDirectorates(db,{ periodKey:'2025',limit:20 });
+    assert.equal(normalizedDirectorates.length,1);
+    assert.equal(normalizedDirectorates[0].population,6500);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='directorate'").get(created.formRecordId).n,1);
+    assert.ok(db.prepare('SELECT geo_unit_id FROM form_records WHERE form_record_id=?').get(created.formRecordId).geo_unit_id);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM observations WHERE form_record_id=? AND geo_unit_id=(SELECT geo_unit_id FROM form_records WHERE form_record_id=?)").get(created.formRecordId,created.formRecordId).n,1);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM record_reviews WHERE form_record_id=?').get(created.formRecordId).n,2);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE resource_type='form_record' AND resource_id=?").get(String(created.formRecordId)).n,4);
     assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,values,changeReason:'محاولة تعديل' }),/قيد المراجعة أو معتمد/);
@@ -503,6 +576,10 @@ test('manual canonical project edits validate values, preserve linked funding an
     const detail = canonical.getCanonicalProject(db, created.id);
     assert.equal(detail.project.name, 'تأهيل شبكة مياه - محدث');
     assert.equal(detail.project.estimated_cost, 1500);
+    const normalizedProjects = canonical.listCanonicalProjects(db,{ search:'تأهيل شبكة مياه - محدث',limit:10 });
+    assert.equal(normalizedProjects.total,1);
+    assert.equal(normalizedProjects.rows[0].estimated_cost,1500);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM form_record_legacy_links WHERE legacy_entity_type='project' AND legacy_entity_id=?").get(created.id).n,1);
     assert.equal(detail.funding.length, 2);
     assert.equal(detail.attachments.length, 1);
     assert.equal(detail.attachments[0].id, attachment.id);
@@ -511,8 +588,18 @@ test('manual canonical project edits validate values, preserve linked funding an
     assert.throws(() => canonical.getProjectAttachment(db,created.id+1,attachment.id),/غير موجود لهذا المشروع/);
     db.prepare('UPDATE managed_attachments SET content=? WHERE id=?').run(Buffer.from('%PDF-9.9\nfixture'),attachment.id);
     assert.throws(() => canonical.getProjectAttachment(db,created.id,attachment.id),/بصمة المرفق/);
-    assert.equal(detail.versions.length, 4);
+    const linkedFormRecordId = db.prepare("SELECT form_record_id FROM form_record_legacy_links WHERE legacy_entity_type='project' AND legacy_entity_id=?").get(created.id).form_record_id;
+    const canonicalRevisionIds = db.prepare(`SELECT revision.record_revision_id FROM record_revisions revision
+      JOIN form_records record ON record.form_record_id=revision.form_record_id
+      LEFT JOIN form_versions version ON version.form_version_id=record.form_version_id
+      LEFT JOIN form_definitions form ON form.form_id=version.form_id
+      WHERE (record.form_record_id=? AND revision.action_type<>'legacy_domain_migration')
+        OR (record.parent_record_id=? AND form.form_code='project_funding_v1')
+      ORDER BY revision.created_at DESC,revision.record_revision_id DESC LIMIT 50`).all(linkedFormRecordId,linkedFormRecordId).map(row => row.record_revision_id);
+    assert.deepEqual(detail.versions.map(version => version.id), canonicalRevisionIds);
     assert.equal(JSON.parse(db.prepare("SELECT payload_json FROM project_versions WHERE action='manual-update'").get().payload_json).name, 'تأهيل شبكة مياه');
+    db.prepare('DELETE FROM project_versions WHERE project_id=?').run(created.id);
+    assert.equal(canonical.getCanonicalProject(db,created.id).versions.length,canonicalRevisionIds.length);
     assert.equal(canonical.listCanonicalReferences(db).sectors.length, 1);
     assert.throws(() => canonical.saveCanonicalProject(db, { name: 'بلا عملة', estimated_cost: 10 }), /رمز عملة/);
     assert.throws(() => canonical.saveCanonicalProject(db, { id: created.id, name: 'تاريخ غير متسق', start_date: '2026-12-01', end_date: '2026-01-01' }), /تاريخ البداية/);
@@ -574,6 +661,10 @@ test('manual indicator observations validate references, preserve prior versions
     assert.equal(listed.total,1);
     assert.equal(listed.rows[0].version_count,1);
     assert.equal(listed.rows[0].source_location,'إدخال يدوي');
+    db.prepare('DELETE FROM indicator_observation_versions WHERE observation_id=?').run(created.id);
+    assert.equal(canonical.listIndicatorObservations(db,{ search:'بني الحارث',limit:10 }).rows[0].version_count,1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM form_record_legacy_links WHERE legacy_entity_type='indicator_observation' AND legacy_entity_id=?").get(created.id).n,1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM observations WHERE form_record_id=(SELECT form_record_id FROM form_record_legacy_links WHERE legacy_entity_type='indicator_observation' AND legacy_entity_id=?)").get(created.id).n,1);
 
     const issue = db.prepare("INSERT INTO data_quality_issues (severity,issue_code,message,status,created_at) VALUES ('warning','manual-review','تحقق من الفترة المرجعية','open',?)").run(now);
     assert.equal(canonical.listDataQualityIssues(db,{ status:'open' }).total,1);
@@ -596,5 +687,131 @@ test('staging rejects empty files before creating a batch', async () => {
   } finally {
     db.close();
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('unified development model seeds the 18-domain field hierarchy and typed dimensions', () => {
+  const db = openDatabase();
+  try {
+    const expectedTables = [
+      'development_model_migrations','field_groups','field_group_fields','field_definition_aliases','field_dimension_rules',
+      'facility_services','staffing_observations','natural_resource_sites','land_use_records',
+      'agricultural_production_records','livestock_production_records','fisheries_production_records',
+      'economic_establishments','tourism_site_profiles','cultural_heritage_profiles',
+      'education_enrollment_records','health_service_records','household_welfare_records','social_protection_records',
+      'financial_accounts','budget_headers','budget_lines','revenue_transactions','expenditure_transactions',
+      'swot_pestle_analyses','development_issue_factors','development_issue_evidence','priority_criteria','issue_priority_assessments',
+      'strategic_objectives','development_programs','program_projects','project_activities','project_milestones',
+      'project_geographic_units','project_beneficiary_targets','indicator_definition_versions','indicator_components',
+      'indicator_weight_profiles','indicator_weights','indicator_targets','indicator_benchmarks',
+      'indicator_calculation_runs','indicator_calculation_results','indicator_result_inputs'
+    ];
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
+    for (const table of expectedTables) assert.ok(tables.has(table), 'missing unified model table: ' + table);
+
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM field_groups WHERE group_level='domain'").get().n, 18);
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM field_groups WHERE group_level=\'subdomain\'').get().n >= 45);
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM field_group_fields').get().n >= 150);
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM field_definition_aliases WHERE is_approved=0').get().n >= 150);
+    const speculativeAlias = db.prepare(`SELECT alias.is_approved,alias.match_method FROM field_definition_aliases alias
+      JOIN field_definitions field USING(field_definition_id)
+      WHERE field.field_code='directorate.population' AND alias.alias_text='إجمالي عدد السكان'`).get();
+    assert.deepEqual(speculativeAlias,{ is_approved:0,match_method:'unverified_catalog_label' });
+    assert.equal(db.prepare("SELECT is_approved FROM field_definition_aliases WHERE field_definition_id=(SELECT field_definition_id FROM field_definitions WHERE field_code='directorate.population') AND alias_text='عدد السكان'").get().is_approved,1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM priority_criteria WHERE is_active=1 AND default_weight>0').get().n, 0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM priority_criteria WHERE default_weight>0').get().n, 0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM priority_criteria WHERE is_active=0').get().n, 6);
+
+    const requiredCodes = [
+      'directorate.population',
+      'directorate.waterCoverage',
+      'directorate.schools',
+      'finance.revenue.assessed',
+      'agriculture.crop.type',
+      'analysis.issue.root_causes',
+      'planning.objective.strategic',
+      'metadata.source_locator'
+    ];
+    for (const code of requiredCodes) {
+      assert.ok(db.prepare('SELECT 1 FROM field_definitions WHERE field_code=?').get(code), 'missing field definition: ' + code);
+      assert.ok(db.prepare('SELECT 1 FROM field_group_fields link JOIN field_definitions field USING(field_definition_id) WHERE field.field_code=?').get(code), 'field is not grouped: ' + code);
+    }
+
+    assert.ok(db.prepare("SELECT 1 FROM dimension_definitions WHERE dimension_code='sex'").get());
+    assert.ok(db.prepare("SELECT 1 FROM dimension_definitions WHERE dimension_code='age_group'").get());
+    assert.ok(db.prepare("SELECT 1 FROM reference_sets WHERE set_code='water_source'").get());
+    assert.ok(db.prepare("SELECT 1 FROM reference_sets WHERE set_code='priority_criterion'").get());
+
+    const migration = db.prepare('SELECT * FROM development_model_migrations WHERE version=1').get();
+    assert.equal(migration.migration_code, unifiedDevelopmentModel.CODE);
+    assert.equal(migration.success, 1);
+    const before = {
+      groups: db.prepare('SELECT COUNT(*) AS n FROM field_groups').get().n,
+      links: db.prepare('SELECT COUNT(*) AS n FROM field_group_fields').get().n,
+      fields: db.prepare('SELECT COUNT(*) AS n FROM field_definitions').get().n
+    };
+    const result = unifiedDevelopmentModel.migrate(db);
+    assert.equal(result.alreadyApplied, true);
+    assert.deepEqual({
+      groups: db.prepare('SELECT COUNT(*) AS n FROM field_groups').get().n,
+      links: db.prepare('SELECT COUNT(*) AS n FROM field_group_fields').get().n,
+      fields: db.prepare('SELECT COUNT(*) AS n FROM field_definitions').get().n
+    }, before);
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.ok(tables.has('directorates'));
+    assert.ok(tables.has('analysis_runs'));
+  } finally {
+    db.close();
+  }
+});
+
+test('seed policy migration withdraws catalog aliases and illustrative weights without deleting historical assessments', () => {
+  const db = openDatabase();
+  try {
+    const now = '2026-11-11T00:00:00.000Z';
+    const fieldId = db.prepare("SELECT field_definition_id FROM field_definitions WHERE field_code='directorate.population'").get().field_definition_id;
+    db.prepare("UPDATE field_definition_aliases SET is_approved=1,match_method='curated',confidence=1 WHERE field_definition_id=? AND alias_text='إجمالي عدد السكان'").run(fieldId);
+    const criterion = db.prepare("SELECT criterion_id FROM priority_criteria WHERE criterion_code='severity'").get().criterion_id;
+    const seedTimestamp = db.prepare('SELECT applied_at FROM development_model_migrations WHERE version=1').get().applied_at;
+    db.prepare('UPDATE priority_criteria SET default_weight=0.25,is_active=1,created_at=?,updated_at=? WHERE criterion_id=?').run(seedTimestamp,seedTimestamp,criterion);
+    const issue = db.prepare('INSERT INTO development_issues(issue_title,created_at,updated_at) VALUES(?,?,?)').run('اختبار حفظ التقييم',now,now);
+    db.prepare('INSERT INTO issue_priority_assessments(issue_id,criterion_id,raw_score,applied_weight,weighted_score,assessed_at) VALUES(?,?,5,0.25,1.25,?)').run(issue.lastInsertRowid,criterion,now);
+    db.prepare('DELETE FROM development_model_migrations WHERE version=2').run();
+
+    const result = unifiedDevelopmentModel.migrate(db);
+    assert.equal(result.alreadyApplied,false);
+    assert.deepEqual(db.prepare("SELECT is_approved,match_method FROM field_definition_aliases WHERE field_definition_id=? AND alias_text='إجمالي عدد السكان'").get(fieldId),{
+      is_approved:0,match_method:'unverified_catalog_label'
+    });
+    assert.deepEqual(db.prepare('SELECT default_weight,is_active FROM priority_criteria WHERE criterion_id=?').get(criterion),{
+      default_weight:0,is_active:0
+    });
+    assert.deepEqual(db.prepare('SELECT applied_weight,weighted_score FROM issue_priority_assessments WHERE issue_id=?').get(issue.lastInsertRowid),{
+      applied_weight:0.25,weighted_score:1.25
+    });
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
+  } finally {
+    db.close();
+  }
+});
+
+test('placeholder cleanup retains a definition already referenced by a real record', () => {
+  const db = openDatabase();
+  try {
+    const now = '2026-11-11T00:00:00.000Z';
+    const form = db.prepare(`INSERT INTO form_definitions(form_code,name_ar,description,data_structure_type,is_active,created_at,updated_at)
+      VALUES('form_999','تعريف غير محسوم للاختبار','لم يتوفر تعريف المصدر الأصلي؛ لم يُخترع اسم أو حقل.','unresolved_definition',0,?,?)`).run(now,now);
+    const version = db.prepare(`INSERT INTO form_versions(form_id,version_number,version_label,status,definition_hash,change_summary,created_at)
+      VALUES(?,1,'غير متاح','draft','test-hash','اختبار الحفاظ على ارتباط قائم',?)`).run(form.lastInsertRowid,now);
+    db.prepare('INSERT INTO form_records(form_version_id,created_at,updated_at) VALUES(?,?,?)').run(version.lastInsertRowid,now,now);
+    db.prepare('DELETE FROM schema_migrations WHERE version=5').run();
+
+    dataArchitecture.migrate(db);
+    assert.ok(db.prepare('SELECT 1 FROM form_definitions WHERE form_id=?').get(form.lastInsertRowid));
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM form_records WHERE form_version_id=?').get(version.lastInsertRowid).n,1);
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
+  } finally {
+    db.close();
   }
 });
