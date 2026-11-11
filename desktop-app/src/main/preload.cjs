@@ -45,6 +45,8 @@ contextBridge.exposeInMainWorld('localApp', {
   documents: (request) => ipcRenderer.invoke('documents:list', request),
   document: (documentId) => ipcRenderer.invoke('documents:get', documentId),
   extractDocument: (documentId) => ipcRenderer.invoke('documents:extract', documentId),
+  documentFieldCandidates: (documentId) => ipcRenderer.invoke('documents:field-candidates', documentId),
+  reviewDocumentFieldCandidate: (request) => ipcRenderer.invoke('documents:field-candidate:review', request),
   searchDocuments: (request) => ipcRenderer.invoke('documents:search-local', request),
   indexDocumentInRagflow: (documentId) => ipcRenderer.invoke('documents:index-ragflow', documentId),
   syncDocumentIndexStatus: (documentId) => ipcRenderer.invoke('documents:sync-index-status', documentId),
@@ -102,6 +104,7 @@ contextBridge.exposeInMainWorld('localApp', {
   exportAnalysisPdf: () => ipcRenderer.invoke('analysis:export-pdf'),
   exportFilteredPdf: (request) => ipcRenderer.invoke('analysis:export-filtered-pdf', request),
   exportFilteredExcel: (request) => ipcRenderer.invoke('analysis:export-filtered-excel', request),
+  exportFilteredCsv: (request) => ipcRenderer.invoke('analysis:export-filtered-csv', request),
 
   // Automatic updates (GitHub Releases)
   updateStatus: () => ipcRenderer.invoke('update:status'),

@@ -21,6 +21,7 @@ const { readDirectorateWorkbook } = require('./analysis/template-reader.cjs');
 const canonicalData = require('./analysis/canonical-data.cjs');
 const dataArchitecture = require('./database/architecture.cjs');
 const documentService = require('./documents/document-service.cjs');
+const schemaDrivenDiscovery = require('./documents/schema-driven-discovery.cjs');
 const { RagflowAdapter } = require('./documents/ragflow-adapter.cjs');
 const recordService = require('./database/record-service.cjs');
 const { mappingTable } = require('./analysis/mapping.cjs');
@@ -28,7 +29,7 @@ const { defaultWeights, validateWeights } = require('./analysis/composite.cjs');
 const persist = require('./analysis/persist.cjs');
 const { serializeAnalysis } = require('./analysis/serialize.cjs');
 const { exportAnalysisWorkbook } = require('./analysis/exporter.cjs');
-const { exportFilteredWorkbook } = require('./analysis/report-exporter.cjs');
+const { exportFilteredWorkbook, exportFilteredCsv } = require('./analysis/report-exporter.cjs');
 const { filterIndicatorReport } = require('./analysis/report-query.cjs');
 const { exportAnalysisPdf, exportDatabaseReportPdf, exportIndicatorsReportPdf } = require('./analysis/pdf.cjs');
 const { INPUT_FIELDS, DECISION_FIELD, MANDATORY_FIELDS } = require('./analysis/schema.cjs');
@@ -50,6 +51,9 @@ let sessionId = crypto.randomUUID();
 /** Canonical path of the last workbook the main process returned from a file dialog. */
 let dialogSelectedPath = null;
 let autoUpdater = null;
+let activeDocumentQueue = Promise.resolve();
+const activeDocumentJobs = new Map();
+let drainingDocumentTasks = false;
 let lastUpdateStatus = { state: 'idle' };
 const UPDATE_CHECK_DELAY_MS = 8_000;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
@@ -115,6 +119,82 @@ function getRagflowAdapter() {
   return new RagflowAdapter({ apiKey: config.apiKey, datasetIds: config.datasetIds, fetch: (url, init) => net.fetch(url, init) });
 }
 
+function processDocument(databaseStore, documentId) {
+  const original = documentService.readOriginal(databaseStore, documentId);
+  const temporaryDirectory = fs.mkdtempSync(path.join(app.getPath('temp'), 'ldi-document-'));
+  const temporaryFile = path.join(temporaryDirectory, `${crypto.randomUUID()}${path.extname(original.file_name).toLowerCase()}`);
+  try {
+    if (process.platform !== 'win32') fs.chmodSync(temporaryDirectory, 0o700);
+    fs.writeFileSync(temporaryFile, original.content, { flag: 'wx', mode: 0o600 });
+    return documentService.runWorker(temporaryFile, app.isPackaged ? { resourcesPath: process.resourcesPath } : {})
+      .then(async (payload) => {
+        const extracted = documentService.persistExtraction(databaseStore,original.id,payload);
+        let discovery = null;
+        let discoveryError = null;
+        let ragflowIndex = null;
+        let ragflowError = null;
+        const adapter = getRagflowAdapter();
+        let health = null;
+        let retrieve;
+        try {
+          health = await adapter.health();
+        } catch (error) {
+          ragflowError = String(error?.message ?? error).slice(0,500);
+        }
+        if (health?.configured && health?.available) {
+          try {
+            const references = documentService.listRagflowReferences(databaseStore,original.id);
+            ragflowIndex = await adapter.indexDocument(original,{
+              references,
+              onReference: (reference) => documentService.saveRagflowReference(databaseStore,original.id,reference.dataset_id,reference.ragflow_document_id,reference.status),
+            });
+            retrieve = (request) => adapter.retrieve(request);
+          } catch (error) {
+            ragflowError = String(error?.message ?? error).slice(0,500);
+          }
+        } else if (!ragflowError) {
+          ragflowError = health?.error ?? health?.message ?? 'خدمة RAGFlow المحلية غير متاحة.';
+        }
+        try {
+          discovery = await schemaDrivenDiscovery.discoverFields(databaseStore,{ documentId: original.id },{ retrieve });
+        } catch (error) {
+          discoveryError = String(error?.message ?? error).slice(0, 500);
+        }
+        auditRead('documents:extract',{ entity:'document_records',entityId:original.id,result:extracted.status,detail:`engine=${extracted.engine.name};elements=${extracted.elementCount};fieldCandidates=${discovery?.evidenceCount ?? 0}` });
+        return { ...extracted,discovery,discoveryError,ragflowIndex,ragflowError };
+      })
+      .catch((error) => {
+        const message = String(error?.message ?? error).slice(0, 2000);
+        documentService.markProcessingFailure(databaseStore,original.id,'document-worker',message,/not found|not installed|غير موجود|غير مثبت|غير متاح/i.test(message) ? 'unavailable' : 'failed');
+        auditRead('documents:extract', { entity: 'document_records', entityId: original.id, result: 'failed' });
+        throw new Error(message);
+      })
+      .finally(() => {
+        try { fs.rmSync(temporaryDirectory,{ recursive: true,force: true }); } catch {}
+      });
+  } catch (error) {
+    try { fs.rmSync(temporaryDirectory,{ recursive: true,force: true }); } catch {}
+    throw error;
+  }
+}
+
+function enqueueDocumentProcessing(documentId) {
+  const key = String(documentId);
+  if (activeDocumentJobs.has(key)) return activeDocumentJobs.get(key);
+  const store = requireDatabase();
+  documentService.markProcessingStarted(store,key);
+  const task = activeDocumentQueue.catch(() => {}).then(() => processDocument(store,key));
+  activeDocumentQueue = task.catch(() => {});
+  activeDocumentJobs.set(key,task);
+  task.then(() => activeDocumentJobs.delete(key),() => activeDocumentJobs.delete(key));
+  return task;
+}
+
+function hasActiveDocumentJobs() {
+  return activeDocumentJobs.size > 0;
+}
+
+
 function hasUsableDatabase() {
   const filePath = getDatabasePath();
   return fs.existsSync(filePath) && fs.statSync(filePath).size > 0;
@@ -150,22 +230,34 @@ function currentProfile() {
 }
 
 /** Mask DB rows (column-keyed) for the active access profile. */
-function maskDbRows(rows, profile) {
-  if (profile !== 'shared') return { rows, masked: [] };
+function maskDbRows(rows, profile, database = null) {
+  const catalogue = database ? mappingTable(database) : [];
+  const columnsByKey = { ...COLUMN_BY_KEY, ...Object.fromEntries(catalogue.map((field) => [field.key, field.dbColumn ?? field.key])) };
+  const dynamicRestricted = profile === 'shared'
+    ? catalogue.filter((field) => field.sensitivity !== 'public' && !security.isProtected(field.key, profile))
+    : [];
   const maskedKeys = new Set();
   const output = rows.map((row) => {
-    const result = security.maskRecord(row, profile, COLUMN_BY_KEY);
+    const result = security.maskRecord(row, profile, columnsByKey);
     result.masked.forEach((key) => maskedKeys.add(key));
+    for (const field of dynamicRestricted) {
+      if (field.dbColumn in result.record && result.record[field.dbColumn] !== null) {
+        result.record[field.dbColumn] = null;
+        maskedKeys.add(field.key);
+      }
+    }
     return result.record;
   });
   return { rows: output, masked: [...maskedKeys] };
 }
 
-function directorateQueryOptions(profile) {
-  const fieldKeys = [...INPUT_FIELDS, DECISION_FIELD].map((field) => field.key);
-  const allowedKeys = new Set(fieldKeys.filter((key) => !security.isProtected(key, profile)));
+function directorateQueryOptions(database, profile) {
+  const catalogue = mappingTable(database);
+  const dynamicFields = new Map(catalogue.map((field) => [field.key, { key: field.key, type: field.type }]));
+  const allowedKeys = new Set(catalogue.filter((field) => field.filterable && !security.isProtected(field.key, profile)
+    && (profile !== 'shared' || field.sensitivity === 'public')).map((field) => field.key));
   const allowedMandatoryKeys = new Set(MANDATORY_FIELDS.map((field) => field.key).filter((key) => allowedKeys.has(key)));
-  return { allowedKeys, allowedMandatoryKeys, profile };
+  return { allowedKeys, allowedMandatoryKeys, dynamicFields, profile };
 }
 
 function sanitizeReportFilters(input = {}, profile = 'owner') {
@@ -184,6 +276,7 @@ function sanitizeReportFilters(input = {}, profile = 'owner') {
   return {
     search: typeof request.search === 'string' ? request.search.trim().slice(0, 120) : '',
     governorates: [...new Set((Array.isArray(request.governorates) ? request.governorates : []).map((value) => String(value).trim().slice(0, 120)).filter(Boolean))].slice(0, 100),
+    periodKey: typeof request.periodKey === 'string' ? request.periodKey.trim().slice(0, 80) : '',
     logic: request.logic === 'or' ? 'or' : 'and',
     criteria,
     sortKey: typeof request.sortKey === 'string' ? request.sortKey.slice(0, 80) : '',
@@ -562,6 +655,10 @@ function registerHandlers() {
     });
     if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
     const staged = await documentService.stageFile(requireDatabase(), result.filePaths[0]);
+    if (!staged.duplicate) {
+      enqueueDocumentProcessing(staged.id).catch(() => {});
+      staged.status = 'processing';
+    }
     auditRead('documents:stage', { entity: 'document_records', entityId: staged.id, result: staged.duplicate ? 'duplicate' : 'staged' });
     return staged;
   });
@@ -582,25 +679,21 @@ function registerHandlers() {
 
   ipcMain.handle('documents:extract', async (_event, documentId) => {
     if (currentProfile() !== 'owner') throw new Error('استخراج الوثائق يتطلب وضع المالك.');
-    const db = requireDatabase();
-    const original = documentService.readOriginal(db, documentId);
-    const temporaryDirectory = fs.mkdtempSync(path.join(app.getPath('temp'), 'ldi-document-'));
-    const temporaryFile = path.join(temporaryDirectory, `${crypto.randomUUID()}${path.extname(original.file_name).toLowerCase()}`);
-    try {
-      if (process.platform !== 'win32') fs.chmodSync(temporaryDirectory, 0o700);
-      fs.writeFileSync(temporaryFile, original.content, { flag: 'wx', mode: 0o600 });
-      const payload = await documentService.runWorker(temporaryFile, app.isPackaged ? { resourcesPath: process.resourcesPath } : {});
-      const result = documentService.persistExtraction(db, original.id, payload);
-      auditRead('documents:extract', { entity: 'document_records', entityId: original.id, result: result.status, detail: `engine=${result.engine.name};elements=${result.elementCount}` });
-      return result;
-    } catch (error) {
-      const message = String(error?.message ?? error).slice(0, 2000);
-      documentService.markProcessingFailure(db, original.id, 'document-worker', message, /not found|not installed|غير موجود|غير مثبت|غير متاح/i.test(message) ? 'unavailable' : 'failed');
-      auditRead('documents:extract', { entity: 'document_records', entityId: original.id, result: 'failed' });
-      throw new Error(message);
-    } finally {
-      try { fs.rmSync(temporaryDirectory, { recursive: true, force: true }); } catch {}
-    }
+    return enqueueDocumentProcessing(documentId);
+  });
+
+  ipcMain.handle('documents:field-candidates', (_event, documentId) => {
+    if (currentProfile() !== 'owner') return { restricted: true, run: null, rows: [] };
+    const result = schemaDrivenDiscovery.listCandidates(requireDatabase(),String(documentId));
+    auditRead('documents:field-candidates', { entity: 'document_field_candidates', entityId: String(documentId), rowCount: result.rows.length });
+    return result;
+  });
+
+  ipcMain.handle('documents:field-candidate:review', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('مراجعة القيم المرشحة تتطلب وضع المالك.');
+    const result = schemaDrivenDiscovery.reviewCandidate(requireDatabase(),request);
+    auditRead('documents:field-candidate:review', { entity: 'document_field_candidates', entityId: result.candidateId, result: result.status, detail: 'officialDataChanged=false' });
+    return result;
   });
 
   ipcMain.handle('documents:search-local', (_event, request = {}) => {
@@ -717,7 +810,8 @@ function registerHandlers() {
     return { success: true, quarantined, recoveredFrom, backup };
   });
 
-  ipcMain.handle('db:lock', () => {
+  ipcMain.handle('db:lock', async () => {
+    if (activeDocumentJobs.size) await Promise.allSettled([...activeDocumentJobs.values()]);
     if (database) database.close();
     database = undefined;
     // Anything cached from the unlocked session must not survive the lock.
@@ -1375,14 +1469,14 @@ function registerHandlers() {
   ipcMain.handle('analysis:audit', (_event, request = {}) =>
     ({ writes: persist.listAccess(requireDatabase(), request.limit ?? 200), reads: persist.listReads(requireDatabase(), request.limit ?? 200) }));
 
-  ipcMain.handle('analysis:fields', () => mappingTable());
+  ipcMain.handle('analysis:fields', () => mappingTable(requireDatabase()));
 
   ipcMain.handle('analysis:directorates', (_event, request = {}) => {
     const db = requireDatabase();
     const profile = security.getAccessProfile(db);
-    const queryOptions = directorateQueryOptions(profile);
+    const queryOptions = directorateQueryOptions(db, profile);
     const rows = persist.listDirectorates(db, request, queryOptions);
-    const masked = maskDbRows(rows, profile);
+    const masked = maskDbRows(rows, profile, db);
     const total = persist.countDirectorates(db, request, queryOptions);
     auditRead('analysis:directorates', {
       entity: 'directorates',
@@ -1397,12 +1491,11 @@ function registerHandlers() {
   ipcMain.handle('analysis:directorates:filter-options', (_event, request = []) => {
     const db = requireDatabase();
     const profile = security.getAccessProfile(db);
-    const fieldKeys = [...INPUT_FIELDS, DECISION_FIELD].map((field) => field.key);
-    const allowedKeys = new Set(fieldKeys.filter((key) => !security.isProtected(key, profile)));
+    const queryOptions = directorateQueryOptions(db, profile);
     const options = {};
     for (const key of [...new Set((Array.isArray(request) ? request : []).map(String))].slice(0, 64)) {
-      if (key.startsWith('__') || allowedKeys.has(key)) {
-        options[key] = persist.listDirectorateFilterOptions(db, key, { allowedKeys });
+      if (key.startsWith('__') || queryOptions.allowedKeys.has(key)) {
+        options[key] = persist.listDirectorateFilterOptions(db, key, queryOptions);
       }
     }
     auditRead('analysis:directorates:filter-options', { entity: 'directorates', rowCount: Object.keys(options).length });
@@ -1519,12 +1612,12 @@ function registerHandlers() {
     const input = request && typeof request === 'object' ? request : {};
     if (!['database', 'indicators'].includes(input.type)) throw new Error('نوع التقرير المطلوب غير صالح.');
     const rowLimit = format === 'pdf' ? 3000 : 50000;
-    const extension = format === 'pdf' ? 'pdf' : 'xlsx';
+    const extension = format === 'pdf' ? 'pdf' : format === 'csv' ? 'csv' : 'xlsx';
     const filtersInput = input.filters && typeof input.filters === 'object' ? input.filters : {};
     const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
       title: 'تصدير التقرير المخصص',
       defaultPath: `تقرير-${input.type === 'indicators' ? 'المؤشرات' : 'قاعدة-البيانات'}-${new Date().toISOString().slice(0, 10)}.${extension}`,
-      filters: [{ name: format === 'pdf' ? 'PDF' : 'Excel', extensions: [extension] }],
+      filters: [{ name: format === 'pdf' ? 'PDF' : format === 'csv' ? 'CSV UTF-8' : 'Excel', extensions: [extension] }],
     });
     if (canceled || !filePath) return { canceled: true };
 
@@ -1534,30 +1627,31 @@ function registerHandlers() {
     let labels = [];
     if (input.type === 'database') {
       const filters = sanitizeReportFilters(filtersInput, profile);
-      const options = directorateQueryOptions(profile);
+      const options = directorateQueryOptions(db, profile);
       rowCount = persist.countDirectorates(db, filters, options);
       if (rowCount > rowLimit) throw new Error(`عدد النتائج (${rowCount.toLocaleString('ar')}) يتجاوز حد ${format === 'pdf' ? 'PDF' : 'Excel'} الآمن (${rowLimit.toLocaleString('ar')}). أضف فلاتر لتقليل النتائج.`);
       const rows = persist.listDirectorates(db, { ...filters, limit: rowLimit }, options);
-      const masked = maskDbRows(rows, profile);
+      const masked = maskDbRows(rows, profile, db);
       maskedFields = masked.masked;
-      const catalogue = [...INPUT_FIELDS, DECISION_FIELD];
-      const allowedFields = catalogue.filter((field) => !security.isProtected(field.key, profile));
+      const catalogue = mappingTable(db);
+      const allowedFields = catalogue.filter((field) => !security.isProtected(field.key, profile)
+        && (profile !== 'shared' || field.sensitivity === 'public') && field.exportable !== false);
       const allowedKeys = new Set(allowedFields.map((field) => field.key));
       const requestedKeys = Array.isArray(input.columns)
         ? input.columns.map(String).slice(0, catalogue.length)
         : ['districtName', 'governorate', 'population', 'waterCoverage', 'pavedRoads', 'schools', 'projectStatus'];
       const selectedKeys = [...new Set(requestedKeys)].filter((key) => allowedKeys.has(key));
       for (const identityKey of ['districtName', 'governorate']) {
-        if (!selectedKeys.includes(identityKey)) selectedKeys.unshift(identityKey);
+        if (!selectedKeys.includes(identityKey) && allowedKeys.has(identityKey)) selectedKeys.unshift(identityKey);
       }
       const fields = allowedFields.filter((field) => selectedKeys.includes(field.key));
-      const columns = fields.map((field) => ({ key: field.key, header: field.header, type: field.type, dbColumn: COLUMN_BY_KEY[field.key] }));
+      const columns = fields.map((field) => ({ key: field.key, header: field.header, type: field.type, dbColumn: field.dbColumn ?? field.key }));
       const reportRows = masked.rows.map((row) => ({
         ...row,
         ...Object.fromEntries(columns.map((column) => [column.key, row[column.dbColumn]])),
       }));
       labels = reportFilterLabels(filters, catalogue);
-      const reportFilters = { search: filters.search, governorates: filters.governorates, logic: filters.logic, criteria: labels, labels };
+      const reportFilters = { search: filters.search, governorates: filters.governorates, periodKey: filters.periodKey, logic: filters.logic, criteria: labels, labels };
       const summary = directorateReportSummary(reportRows, new Set(fields.map((field) => field.key)));
       const report = {
         title: 'تقرير قاعدة البيانات الشاملة',
@@ -1570,7 +1664,7 @@ function registerHandlers() {
       };
       result = format === 'pdf'
         ? await exportDatabaseReportPdf({ BrowserWindow }, filePath, report)
-        : await exportFilteredWorkbook(filePath, report);
+        : format === 'csv' ? await exportFilteredCsv(filePath, report) : await exportFilteredWorkbook(filePath, report);
       auditRead(`analysis:export-filtered-${format}`, {
         entity: 'directorates', rowCount, fields: maskedFields.join(','),
         result: maskedFields.length ? 'masked' : 'ok', detail: 'type=database',
@@ -1635,7 +1729,7 @@ function registerHandlers() {
           summary: exportReport.summary,
           includePriority,
         })
-        : await exportFilteredWorkbook(filePath, exportReport);
+        : format === 'csv' ? await exportFilteredCsv(filePath, exportReport) : await exportFilteredWorkbook(filePath, exportReport);
       auditRead(`analysis:export-filtered-${format}`, {
         entity: 'directorates', rowCount, result: profile === 'shared' ? 'masked' : 'ok',
         detail: `type=indicators;view=${view};mode=${mode}`,
@@ -1650,6 +1744,7 @@ function registerHandlers() {
 
   ipcMain.handle('analysis:export-filtered-pdf', (_event, request = {}) => exportFilteredReport(request, 'pdf'));
   ipcMain.handle('analysis:export-filtered-excel', (_event, request = {}) => exportFilteredReport(request, 'excel'));
+  ipcMain.handle('analysis:export-filtered-csv', (_event, request = {}) => exportFilteredReport(request, 'csv'));
 
   ipcMain.handle('analysis:export-pdf', async () => {
 
@@ -1739,8 +1834,17 @@ if (!gotSingleInstanceLock) {
   });
 }
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   stopAutoUpdate();
+  if (activeDocumentJobs.size && !drainingDocumentTasks) {
+    event.preventDefault();
+    drainingDocumentTasks = true;
+    Promise.allSettled([...activeDocumentJobs.values()]).finally(() => {
+      drainingDocumentTasks = false;
+      app.quit();
+    });
+    return;
+  }
   if (database) database.close();
   database = undefined;
 });

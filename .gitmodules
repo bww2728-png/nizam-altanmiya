@@ -1,0 +1,3 @@
+[submodule "vendor/ragflow"]
+	path = vendor/ragflow
+	url = https://github.com/infiniflow/ragflow.git

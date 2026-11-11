@@ -3,6 +3,7 @@
 const canonicalData = require('./canonical-data.cjs');
 const dataArchitecture = require('../database/architecture.cjs');
 const documentService = require('../documents/document-service.cjs');
+const schemaDrivenDiscovery = require('../documents/schema-driven-discovery.cjs');
 
 /**
  * Database schema for the analysis layer.
@@ -337,6 +338,7 @@ function migrate(database) {
   canonicalData.migrateCanonicalData(database);
   dataArchitecture.migrate(database);
   documentService.migrate(database);
+  schemaDrivenDiscovery.migrate(database);
   for (const index of EXTRA_INDEXES) {
     if (!tableExists(database, index.table)) continue;
     database.exec(index.ddl);

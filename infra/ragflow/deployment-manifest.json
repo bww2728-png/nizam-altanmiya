@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "product": "Nizam Development System",
+  "integration": {
+    "type": "git-submodule",
+    "path": "vendor/ragflow",
+    "repository": "https://github.com/infiniflow/ragflow.git",
+    "tag": "v1.0.0",
+    "commit": "db1cd5929a7885a3074547791f5ecc4d2f891739"
+  },
+  "upstreamDeploymentReference": {
+    "composeEntrypoint": "vendor/ragflow/docker/docker-compose.yml",
+    "composeBase": "vendor/ragflow/docker/docker-compose-base.yml",
+    "environmentReference": "vendor/ragflow/docker/.env",
+    "requiredServices": [
+      "ragflow-cpu",
+      "mysql",
+      "minio",
+      "kvrocks",
+      "nats",
+      "clickhouse",
+      "tei-cpu"
+    ],
+    "upstreamDefaultProfiles": [
+      "elasticsearch",
+      "cpu",
+      "metadata-mysql"
+    ],
+    "defaultEmbeddingService": {
+      "profile": "tei-cpu",
+      "enabledByUpstreamDefault": false,
+      "image": "infiniflow/text-embeddings-inference:cpu-1.8",
+      "model": null,
+      "modelStatus": "not-selected"
+    }
+  },
+  "target": {
+    "userProduct": "نظام التنمية المحلية",
+    "host": "standalone Windows x64 PC",
+    "containerPlatform": "linux/amd64",
+    "linuxRuntime": "not-selected"
+  },
+  "readiness": {
+    "status": "reference-only-not-deployable",
+    "productComposeOverlay": null,
+    "dockerImageDigestsVerified": false,
+    "embeddingWeightsPackaged": false,
+    "licenseAuditComplete": false,
+    "sbomAvailable": false,
+    "offlinePackageBuilt": false,
+    "windowsRuntimeTested": false,
+    "blockingGates": [
+      "Select and test the Windows Linux runtime (WSL2 versus VM) on target hardware.",
+      "Create a product-owned Compose overlay with reviewed loopback-only port bindings and generated secrets; do not launch upstream defaults as-is.",
+      "Select and benchmark a local embedding model using licensed Arabic evaluation data, then record its immutable revision and checksums.",
+      "Resolve redistribution terms and record image digests, model checksums, SBOM, and third-party notices.",
+      "Build and test the unified installer and full offline assets on clean Windows x64 hardware."
+    ]
+  }
+}

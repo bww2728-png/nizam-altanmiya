@@ -16,6 +16,10 @@ function statusTone(status) {
   return 'neutral';
 }
 
+function candidateStatusLabel(status) {
+  return ({ pending: 'بانتظار المراجعة', reviewed: 'رُوجع — غير معتمد رسميًا', rejected: 'مرفوض', no_evidence: 'لم يُعثر على دليل' })[status] ?? status;
+}
+
 export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
   const [documents, setDocuments] = useState({ rows: [], total: 0, offset: 0, limit: PAGE_SIZE });
   const [selected, setSelected] = useState(null);
@@ -28,6 +32,8 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
   const [results, setResults] = useState(null);
   const [apiKey, setApiKey] = useState('');
   const [datasetIds, setDatasetIds] = useState('');
+  const [candidateValues, setCandidateValues] = useState({});
+  const [candidateNotes, setCandidateNotes] = useState({});
   const [savingConfig, setSavingConfig] = useState(false);
 
   const load = useCallback(async () => {
@@ -40,6 +46,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
       setRagflow(service);
       if (selected?.document?.id) {
         const details = await window.localApp.document(selected.document.id);
+        details.fieldReview = await window.localApp.documentFieldCandidates(selected.document.id);
         setSelected(details);
       }
     } catch (cause) {
@@ -66,8 +73,28 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
 
   const openDocument = async (documentId) => {
     setError('');
-    try { setSelected(await window.localApp.document(documentId)); }
-    catch (cause) { setError(errText(cause) || 'تعذر فتح الوثيقة.'); }
+    try {
+      const details = await window.localApp.document(documentId);
+      details.fieldReview = await window.localApp.documentFieldCandidates(documentId);
+      setSelected(details);
+    } catch (cause) { setError(errText(cause) || 'تعذر فتح الوثيقة.'); }
+  };
+
+  const reviewCandidate = async (candidate, status) => {
+    setBusyId(selected.document.id);
+    setError('');
+    try {
+      await window.localApp.reviewDocumentFieldCandidate({
+        candidateId: candidate.id,
+        status,
+        value: status === 'reviewed' ? (candidateValues[candidate.id] ?? candidate.raw_value ?? '') : null,
+        note: candidateNotes[candidate.id] ?? '',
+      });
+      const fieldReview = await window.localApp.documentFieldCandidates(selected.document.id);
+      setSelected(current => ({ ...current, fieldReview }));
+      notify?.({ tone: 'ok', message: status === 'reviewed' ? 'حُفظت نتيجة المراجعة كمرشح فقط؛ لم تتغير البيانات الرسمية.' : 'رُفض المرشح؛ لم تتغير البيانات الرسمية.' });
+    } catch (cause) { setError(errText(cause) || 'تعذرت مراجعة المرشح.'); }
+    finally { setBusyId(''); }
   };
 
   const extract = async (documentId) => {
@@ -199,6 +226,22 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
 
       {selected && <Card title={`مراجعة: ${selected.document.file_name}`} subtitle={`الأصل SHA-256: ${selected.document.sha256} · المحرك: ${selected.document.engine_name ?? 'لم يُشغّل'} ${selected.document.engine_version ?? ''}`} actions={selected.ragflowReferences?.length > 0 ? <button className="btn small ghost" onClick={() => syncIndexStatus(selected.document.id)} disabled={busyId === selected.document.id || !ragflow?.configured}><RefreshCw size={14} /> فحص حالة الفهرسة</button> : null}>
         {selected.document.processing_error && <div className="quote">{selected.document.processing_error}</div>}
+        {selected.fieldReview?.run && <section className="stack" style={{ marginBottom: 18 }}>
+          <div><h3>حقول مقترحة للمراجعة</h3><p className="muted">المقترحات مستخرجة من أدلة الوثائق فقط. مراجعتها هنا لا تعتمدها ولا تغيّر قاعدة البيانات الرسمية.</p>
+            <div className="chip-row"><Badge>{fmtNumber(selected.fieldReview.run.searched_count, 0)} حقلاً جرى فحصه</Badge><Badge tone="ok">{fmtNumber(selected.fieldReview.run.evidence_count, 0)} دليلًا</Badge><Badge tone="neutral">{fmtNumber(selected.fieldReview.run.no_evidence_count, 0)} بلا دليل</Badge></div>
+          </div>
+          {(selected.fieldReview.rows ?? []).filter(candidate => candidate.review_status === 'pending').map(candidate => <article className="quote stack tight" key={candidate.id}>
+            <div className="row between" style={{ flexWrap: 'wrap' }}><strong>{candidate.field_label_ar}</strong><Badge>{candidateStatusLabel(candidate.review_status)}</Badge></div>
+            <div className="chip-row"><Badge>{candidate.entity_type} · {candidate.field_key}</Badge>{candidate.source_file_name && <Badge>{candidate.source_file_name}</Badge>}{candidate.page_number && <Badge>صفحة {fmtNumber(candidate.page_number, 0)}</Badge>}</div>
+            {candidate.evidence_text && <p>{candidate.evidence_text}</p>}
+            {candidate.raw_value && <label className="stack tight"><span>القيمة المستخرجة — راجعها قبل حفظ نتيجة المراجعة</span><input className="input" value={candidateValues[candidate.id] ?? candidate.raw_value} onChange={event => setCandidateValues(current => ({ ...current, [candidate.id]: event.target.value }))} maxLength={1000} /></label>}
+            <label className="stack tight"><span>سبب قرار المراجعة (مطلوب)</span><input className="input" value={candidateNotes[candidate.id] ?? ''} onChange={event => setCandidateNotes(current => ({ ...current, [candidate.id]: event.target.value }))} maxLength={1000} /></label>
+            <div className="row"><button className="btn small primary" onClick={() => reviewCandidate(candidate, 'reviewed')} disabled={busyId === selected.document.id || !(candidateNotes[candidate.id] ?? '').trim()}>تسجيل المراجعة</button><button className="btn small ghost" onClick={() => reviewCandidate(candidate, 'rejected')} disabled={busyId === selected.document.id || !(candidateNotes[candidate.id] ?? '').trim()}>رفض المرشح</button><span className="muted">لا يُرحّل إلى البيانات الرسمية تلقائيًا.</span></div>
+          </article>)}
+          {(selected.fieldReview.rows ?? []).some(candidate => ['reviewed','rejected'].includes(candidate.review_status)) && <details><summary>قرارات المراجعة السابقة ({fmtNumber((selected.fieldReview.rows ?? []).filter(candidate => ['reviewed','rejected'].includes(candidate.review_status)).length, 0)})</summary><div className="stack" style={{ marginTop: 10 }}>{(selected.fieldReview.rows ?? []).filter(candidate => ['reviewed','rejected'].includes(candidate.review_status)).map(candidate => <article className="quote stack tight" key={candidate.id}><div className="row between"><strong>{candidate.field_label_ar}</strong><Badge>{candidateStatusLabel(candidate.review_status)}</Badge></div>{candidate.reviewedValue?.value && <span>القيمة التي راجعها المستخدم: {candidate.reviewedValue.value}</span>}<span>السبب: {candidate.review_note}</span><span className="muted">المراجع: {candidate.reviewed_by ?? 'غير مسجل'} · {fmtDateTime(candidate.reviewed_at)}</span></article>)}</div></details>}
+          {(selected.fieldReview.rows ?? []).some(candidate => candidate.review_status === 'no_evidence') && <details><summary>الحقول التي لم يظهر لها دليل ({fmtNumber((selected.fieldReview.rows ?? []).filter(candidate => candidate.review_status === 'no_evidence').length, 0)})</summary><div className="chip-row" style={{ marginTop: 10 }}>{(selected.fieldReview.rows ?? []).filter(candidate => candidate.review_status === 'no_evidence').map(candidate => <Badge key={candidate.id}>{candidate.field_label_ar}</Badge>)}</div></details>}
+        </section>}
+        {selected.fieldReview?.run?.status === 'failed' && <div className="quote">تعذر إنشاء قائمة المرشحين: {selected.fieldReview.run.error_text}</div>}
         {(selected.artifacts ?? []).map(artifact => artifact.artifact_type === 'markdown' ? <details key={artifact.artifact_type}><summary>النص Markdown المستخرج (للمراجعة فقط)</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 500, overflow: 'auto' }}>{artifact.content}</pre></details> : <details key={artifact.artifact_type}><summary>بيانات {artifact.artifact_type}</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 500, overflow: 'auto' }}>{artifact.content.slice(0, 20000)}</pre></details>)}
         <div className="stack" style={{ marginTop: 16 }}>{(selected.elements ?? []).map(element => <article className="quote" key={element.id}><div className="chip-row"><Badge>{element.element_type}</Badge>{element.page_number && <Badge>صفحة {element.page_number}</Badge>}{element.confidence !== null && <Badge>ثقة OCR {Number(element.confidence).toFixed(3)}</Badge>}</div>{element.heading && <strong>{element.heading}</strong>}<p>{element.content}</p><span className="muted">مصدر العنصر: {element.source_json}</span></article>)}</div>
         {(selected.ragflowReferences ?? []).map(reference => <div className="muted" key={reference.dataset_id}>RAGFlow {reference.dataset_id}: {reference.status} · {fmtDateTime(reference.updated_at)}</div>)}
