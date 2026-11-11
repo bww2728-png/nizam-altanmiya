@@ -76,7 +76,7 @@ function validateReference(root = repositoryRoot, manifest = JSON.parse(readText
   requireMatch(compose, /image:\s*\$\{RAGFLOW_IMAGE\}/, 'RAGFlow image is configured through the pinned release environment');
   for (const service of manifest.upstreamDeploymentReference.requiredServices) {
     const serviceSource = service === 'ragflow-cpu' ? compose : composeBase;
-    if (!serviceSource.split('\n').includes(`  ${service}:`)) {
+    if (!serviceSource.split(/\r?\n/).some((line) => line.trimEnd() === `  ${service}:`)) {
       throw new Error(`RAGFlow reference check failed: upstream service ${service} exists`);
     }
   }
