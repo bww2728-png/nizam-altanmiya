@@ -26,18 +26,25 @@ async function run() {
   }
   result.modules.store = null;
   try {
-    const { openEncryptedStore, loadOrCreateStoreKey } = require(path.join(__dirname, '..', 'src', 'main', 'store.cjs'));
+    const { openOrConvertStore } = require(path.join(__dirname, '..', 'src', 'main', 'store.cjs'));
     const tmp = path.join(app.getPath('temp'), `smoke-${Date.now()}.db`);
     const keyFile = path.join(app.getPath('temp'), `smoke-${Date.now()}.key`);
-    // Exercises the shipped flow: key generated once, then reused to reopen the same file.
-    const generated = loadOrCreateStoreKey(keyFile);
-    const store = openEncryptedStore(tmp, generated);
-    store.exec('CREATE TABLE z(v TEXT)');
-    store.prepare('INSERT INTO z VALUES (?)').run('ok');
-    store.close();
-    const reopened = openEncryptedStore(tmp, loadOrCreateStoreKey(keyFile));
-    result.modules.store = { value: reopened.prepare('SELECT v FROM z').get().v, keyStable: loadOrCreateStoreKey(keyFile) === generated };
-    reopened.close();
+    const quiet = { info() {} };
+    // Exercises the shipped flow: a fresh store opens as plain SQLite with no key,
+    // and reopening the same file neither converts nor writes a store.key.
+    const opened = openOrConvertStore(tmp, { keyPath: keyFile, log: quiet });
+    opened.database.exec('CREATE TABLE z(v TEXT)');
+    opened.database.prepare('INSERT INTO z VALUES (?)').run('ok');
+    opened.database.close();
+    const header = fs.readFileSync(tmp).subarray(0, 16).toString('latin1');
+    const reopened = openOrConvertStore(tmp, { keyPath: keyFile, log: quiet });
+    result.modules.store = {
+      value: reopened.database.prepare('SELECT v FROM z').get().v,
+      plaintextHeader: header === 'SQLite format 3\u0000',
+      openedWithoutKey: reopened.converted === false && reopened.wasEncrypted === false,
+      keyFileAbsent: !fs.existsSync(keyFile),
+    };
+    reopened.database.close();
     fs.rmSync(tmp, { force: true });
     fs.rmSync(keyFile, { force: true });
   } catch (error) {

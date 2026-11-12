@@ -392,7 +392,7 @@ async function stageWorkbook(database, filePath, workbookOption = null) {
     const source = database.prepare("INSERT INTO data_sources (source_type,document_title,file_name,mime_type,content_sha256,file_size,received_at,notes) VALUES ('excel-workbook',?,?,?, ?,?,?,?)")
       .run(path.basename(filePath), path.basename(filePath), path.extname(filePath).toLowerCase() === '.xlsm'
         ? 'application/vnd.ms-excel.sheet.macroEnabled.12' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        sha, stat.size, now, 'نسخة المصدر الأصلية محفوظة داخل قاعدة البيانات المحلية المشفّرة.');
+        sha, stat.size, now, 'نسخة المصدر الأصلية محفوظة داخل قاعدة البيانات المحلية غير المشفّرة (ملف SQLite محلي).');
     database.prepare("UPDATE workbook_import_batches SET source_id=? WHERE id=?").run(Number(source.lastInsertRowid), batchId);
 
     const sheetIds = new Map();

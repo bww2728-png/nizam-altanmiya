@@ -26,8 +26,30 @@ const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'template-v3.3.xlsx');
 const EVIDENCE = path.join(ROOT, '..', 'نتائج-الفحص');
 const USER_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-e2e-'));
 const SAMPLE = path.join(USER_DATA, 'sample-20.xlsx');
+const STORE_PATH = path.join(USER_DATA, 'development-data.db');
+const LEGACY_KEY_PATH = path.join(USER_DATA, 'store.key');
 const interactionTrace = [];
 const rendererRuntimeErrors = [];
+
+/**
+ * Optional pre-existing encrypted store.
+ *
+ * The store is a plain SQLite file now, so the default run verifies the store the
+ * application creates from scratch. Run with E2E_SEED_ENCRYPTED_STORE=1 to seed a
+ * store written by the earlier encrypted build and prove the automatic conversion
+ * end to end: the same assertions then cover the converted file and the kept
+ * encrypted original.
+ */
+const SEED_ENCRYPTED_STORE = process.env.E2E_SEED_ENCRYPTED_STORE === '1';
+if (SEED_ENCRYPTED_STORE) {
+  const { openEncryptedStore } = require(path.join(__dirname, '..', 'src', 'main', 'store.cjs'));
+  const seededKey = 'ab'.repeat(32);
+  const seeded = openEncryptedStore(STORE_PATH, seededKey);
+  seeded.close();
+  fs.writeFileSync(LEGACY_KEY_PATH, seededKey + '\n', { mode: 0o600 });
+  console.log('[E2E] seeded encrypted store header=' + JSON.stringify(fs.readFileSync(STORE_PATH).subarray(0, 16).toString('latin1')));
+}
+const LEGACY_KEY_PRESENT = fs.existsSync(LEGACY_KEY_PATH);
 
 app.on('browser-window-created', (_event, browserWindow) => {
   browserWindow.webContents.on('console-message', (_consoleEvent, level, message, line, sourceId) => {
@@ -293,7 +315,23 @@ app.whenReady().then(async () => {
     const labels = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.side-nav .nav-item span')].map((node) => node.textContent)`);
     const expectedNav = ['اللوحة التفاعلية', 'المؤشرات الـ 12', 'ترتيب الأولويات', 'الاستيراد الآلي', 'سجل المشاريع', 'سجل قياسات المؤشرات', 'جودة البيانات', 'تصحيح البيانات', 'قاعدة البيانات الشاملة', 'بطاقة مديرية'];
     check('nav', 'التنقل يعرض الشاشات العشر', expectedNav.every((label) => labels.includes(label)), labels.join(' · '));
-    check('entry', 'قاعدة البيانات تُفتح وتصبح مشفّرة', await window.webContents.executeJavaScript(`window.localApp.status().then((s) => s.unlocked && s.hasKey)`));
+    const storeState = await window.webContents.executeJavaScript(`window.localApp.status().then((s) => ({ unlocked: s.unlocked, hasKey: s.hasKey, plaintext: s.plaintext, encrypted: s.encrypted }))`);
+    check('entry', 'قاعدة البيانات مفتوحة في صيغة SQLite عادية بلا تشفير', storeState.unlocked === true && storeState.plaintext === true && storeState.encrypted === false, JSON.stringify(storeState));
+    const storeHeader = fs.readFileSync(STORE_PATH).subarray(0, 16).toString('latin1');
+    check('entry', 'ملف قاعدة البيانات على القرص يبدأ بترويسة SQLite عادية', storeHeader === 'SQLite format 3\u0000', JSON.stringify(storeHeader));
+    check('entry', 'قاعدة البيانات تُفتح بأداة SQLite عادية بلا مفتاح', require(path.join(ROOT, 'src', 'main', 'store.cjs')).classifyStore(STORE_PATH, null).reason === 'plaintext', STORE_PATH);
+    if (LEGACY_KEY_PRESENT) {
+      // A store written by the earlier encrypted build was present: the plaintext
+      // header above can only be the result of the automatic conversion, and the
+      // encrypted original must still be recoverable with its key.
+      const kept = fs.readdirSync(USER_DATA).filter((name) => name.includes('.encrypted-') && name.endsWith('.bak'));
+      check('entry', 'حُوّلت القاعدة المشفّرة تلقائيًا وبقيت النسخة المشفّرة مع مفتاحها',
+        kept.length > 0 && kept.every((name) => fs.existsSync(path.join(USER_DATA, name + '.key')))
+          && fs.readdirSync(path.join(USER_DATA, 'backups')).some((name) => name.endsWith('.bak')),
+        JSON.stringify({ kept }));
+    } else {
+      check('entry', 'لا يُنشئ التطبيق ملف مفتاح لقاعدة جديدة', !fs.existsSync(LEGACY_KEY_PATH), JSON.stringify({ keyPresent: fs.existsSync(LEGACY_KEY_PATH) }));
+    }
 
     // ---------- 2. Import (scan -> plan -> apply) ----------
     const sample = await buildSampleWorkbook(SAMPLE);
@@ -317,7 +355,7 @@ app.whenReady().then(async () => {
     })()`);
     check('import', 'فحص الملف يكتشف الورقة وصف الرؤوس', imported.canceled === false && imported.sheet === 'قاعدة البيانات الشاملة' && imported.headerRow === 2, JSON.stringify(imported));
     check('import', 'كل أعمدة الإدخال الـ39 مطابقة', imported.matched >= 39, `matched=${imported.matched}`);
-    check('import', 'الخطة تعرض 20 صفًا وتُطبَّق في القاعدة المشفّرة', imported.planRows === 20 && imported.total === 20 && imported.created === 20, JSON.stringify(imported));
+    check('import', 'الخطة تعرض 20 صفًا وتُطبَّق في قاعدة SQLite المحلية (بترويسة SQLite format 3)', imported.planRows === 20 && imported.total === 20 && imported.created === 20, JSON.stringify(imported));
     check('import', 'لا صفوف مرفوضة أثناء التطبيق', imported.refused === 0, `refused=${imported.refused}`);
 
     // Exercise backup + restore through the actual operator-facing control.
@@ -326,7 +364,7 @@ app.whenReady().then(async () => {
     await window.webContents.executeJavaScript('(() => { window.confirm = () => true; return true; })()');
     const restoreClicked = await clickBySelector(window, '.topbar button[aria-label="استعادة نسخة احتياطية"]', 'استعادة النسخة الاحتياطية');
     await waitFor(window, `document.body.innerText.includes('تمت استعادة النسخة الاحتياطية والتحقق من قاعدة البيانات')`, 30000);
-    check('security', 'استعادة النسخة الاحتياطية تعمل من واجهة المستخدم', restoreClicked && await window.webContents.executeJavaScript(`window.localApp.status().then((state) => state.unlocked && state.hasKey)`));
+    check('security', 'استعادة النسخة الاحتياطية تعمل من واجهة المستخدم', restoreClicked && await window.webContents.executeJavaScript(`window.localApp.status().then((state) => state.unlocked && state.plaintext && !state.encrypted)`));
     await screenshot(window, '9-بعد-استعادة-النسخة.png');
 
     // ---------- 3. Pages ----------
@@ -609,10 +647,10 @@ app.whenReady().then(async () => {
     const ExcelJS = require('exceljs');
     const Database = require('better-sqlite3-multiple-ciphers');
 
-    const database = new Database(path.join(USER_DATA, 'development-data.db'));
-    database.pragma("cipher = 'sqlcipher'");
-    const key = fs.readFileSync(path.join(USER_DATA, 'store.key'), 'utf8').trim();
-    database.pragma(`key = '${key}'`);
+    const finalStoreHeader = fs.readFileSync(STORE_PATH).subarray(0, 16).toString('latin1');
+    check('export', 'قاعدة البيانات النهائية تبقى ملف SQLite عاديًا بلا مفتاح', finalStoreHeader === 'SQLite format 3\u0000', JSON.stringify(finalStoreHeader));
+    // The store opens with no key at all: this is the whole point of the change.
+    const database = new Database(STORE_PATH, { readonly: true });
     const liveAnalysis = analyze(persist.loadAnalysisRows(database), {});
     // Mode A normalises against the sample's own min/max, so the invariant is
     // "database run equals workbook run on the same 20 rows", not a fixed 0.200.

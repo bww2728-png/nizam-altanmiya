@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document records the additive data model introduced for the local-first desktop application and distinguishes what is already executable from the next domain-integration work. Excel is an input format, not the canonical database schema. The encrypted local SQLite database remains the single source of truth for approved application data.
+This document records the additive data model introduced for the local-first desktop application and distinguishes what is already executable from the next domain-integration work. Excel is an input format, not the canonical database schema. The plain local SQLite database (unencrypted) remains the single source of truth for approved application data.
 
 ## Current implementation
 
@@ -35,14 +35,14 @@ The import IPC path now:
 
 1. Validates the selected file using the existing XLSX ZIP preflight and file allowlist.
 2. Attempts the legacy directorate-specific reader. If there is no suitable visible directorate table, it records that fact instead of coercing an unrelated sheet into directorate rows.
-3. Saves the original workbook bytes and SHA-256 fingerprint in the encrypted SQLite database.
+3. Saves the original workbook bytes and SHA-256 fingerprint in the local SQLite database.
 4. Inventories every worksheet within documented bounds, including hidden state, dimensions, non-empty rows/cells, candidate headers, formula counts, hidden rows, merged ranges, Excel tables, media and image anchors where the library exposes them.
 5. Stores each scanned non-empty row and cell with its address, row/column, cell type, raw representation, readable text, formula, cached result and note/comment when available.
 6. Stores extractable embedded image bytes separately, with SHA-256 and anchor metadata if available. Assets without a trustworthy worksheet/row anchor remain unassigned.
 7. Creates the existing directorate review plan separately. The legacy directorate importer still requires explicit user approval. Project-candidate regions have an owner-only mapping and row-approval path into canonical projects; indicator-candidate regions have a separate owner-only mapping and explicit row-approval path into dated canonical observations. Other regions remain staged and unapproved.
 8. Updates the intake batch status after the directorate review action and displays a durable intake history.
 
-Staging is transactional: if the file exceeds a scan cap before the write transaction begins, no partial staging batch is committed. The original source file is retained in the encrypted database so the source package can be re-examined without relying on the original path.
+Staging is transactional: if the file exceeds a scan cap before the write transaction begins, no partial staging batch is committed. The original source file is retained in the local database so the source package can be re-examined without relying on the original path.
 
 The normalized import mirror carries mapping suggestions separately from the legacy staging record. Migration v3 adds target entity/field codes and persists explicit project- and indicator-column decisions with actor, timestamp and audit event when rows are promoted. Unselected columns remain unmapped; suggestions alone never authorize promotion. Approved directorate import plans likewise record accepted form-field mappings. This mirror is additive and idempotent, and can locate regions created by the earlier normalized region-code format.
 
@@ -54,7 +54,7 @@ In owner mode, the intake screen exposes each discovered project region, a bound
 
 The promotion service currently handles project identity, description/status, estimated and actual costs, currency, ISO-like dates, optional geographic/sector references, and an optional funding partner/amount/currency. It refuses hidden rows, formula-bearing rows, invalid numeric/date values, duplicate project codes, and rows already promoted. It writes projects, funding, source references, row-to-entity promotion records, and unresolved geographic/sector quality issues in a database transaction. The original workbook, cell provenance, selected mapping and source row location remain traceable.
 
-The project register supports owner-only manual create/update through the same main-process validation used for project fields: required identity, numeric and currency checks, date ordering, and reference validation. Each manual operation creates a data-source record; edits preserve a pre-change snapshot in `project_versions`. Funding can be added with its own amount/currency/date and provenance. A user-selected PDF, PNG, JPEG or WebP attachment is signature-checked, deduplicated by SHA-256, stored as a BLOB in the encrypted database, and explicitly linked to the open project. The owner can export an attachment only through a save dialog; content length and SHA-256 are checked before writing, and the export is audited. Project-linked quality issues can be resolved with a required rationale and timestamp; the resolution is audited. Inline preview is not implemented.
+The project register supports owner-only manual create/update through the same main-process validation used for project fields: required identity, numeric and currency checks, date ordering, and reference validation. Each manual operation creates a data-source record; edits preserve a pre-change snapshot in `project_versions`. Funding can be added with its own amount/currency/date and provenance. A user-selected PDF, PNG, JPEG or WebP attachment is signature-checked, deduplicated by SHA-256, stored as a BLOB in the local database, and explicitly linked to the open project. The owner can export an attachment only through a save dialog; content length and SHA-256 are checked before writing, and the export is audited. Project-linked quality issues can be resolved with a required rationale and timestamp; the resolution is audited. Inline preview is not implemented.
 
 Indicator-candidate regions can be explicitly mapped to a seeded indicator definition, canonical geographic unit, period, value and optional unit. Only individually approved rows with a unique indicator/geography/period key and a valid source mapping are promoted. Ambiguous geography, unknown indicators, hidden/formula-bearing rows, invalid values and duplicate observations remain unpromoted with a row-specific reason.
 
@@ -62,15 +62,19 @@ This remains a bounded entity-specific implementation, not a universal import en
 
 ## Automatic update channel
 
-The runtime keeps application data on the device: the SQLite store is encrypted locally and no telemetry, analytics or cloud AI service is called. Application-level guards deny Node, Electron and renderer network requests except HTTPS GET requests to the configured GitHub Releases pages and GitHub release-asset hosts. The automatic updater checks `bww2728-png/nizam-altanmiya` for a version strictly higher than the installed one and installs a downloaded update on quit. `setupAutoUpdate()` in `src/main/main.cjs` performs the first check shortly after launch and repeats every six hours; the state is pushed to the renderer over `update:status`.
+The runtime keeps application data on the device: the SQLite store is a plain local file and no telemetry, analytics or cloud AI service is called. Application-level guards deny Node, Electron and renderer network requests except HTTPS GET requests to the configured GitHub Releases pages and GitHub release-asset hosts. The automatic updater checks `bww2728-png/nizam-altanmiya` for a version strictly higher than the installed one and installs a downloaded update on quit. `setupAutoUpdate()` in `src/main/main.cjs` performs the first check shortly after launch and repeats every six hours; the state is pushed to the renderer over `update:status`.
 
 These guards cover the standard APIs patched in `offline-policy.cjs`, but cannot guarantee that native add-ons, operating-system services or future unguarded APIs have no network access. A strict zero-egress environment must also enforce and verify an operating-system firewall rule; that policy will intentionally block automatic updates.
 
-## Encrypted backup and restore
+## Store backup and restore
 
-A backup is treated as a bundle: encrypted database bytes plus the matching 64-hex-character store.key companion (.bak.key) and any SQLite sidecars present. Creating a database-only backup without its key is rejected. Restore validates the source database, key and any SQLite sidecars as regular files before touching the active database, creates a safety backup of the current store, stages the replacement files in the target directory, swaps the database and key together, and re-opens the restored store. A failed file swap rolls back the previous database/key pair; if the subsequent store initialization fails, the handler attempts to reinstall the safety backup.
+The store is a plain SQLite file, so a backup is a plain bundle: database bytes plus any SQLite sidecars present (`-journal`, `-wal`, `-shm`). No key is created or copied. `backupPlaintextStore()` verifies the copy still classifies as the plaintext store before accepting it, and `db:backup` flushes the WAL with `wal_checkpoint(TRUNCATE)` first so the snapshot is consistent. Backups land in `backups/` as `<file>.<stamp>.bak`, and the newest 10 are kept.
+
+Restore validates the source as a regular file (rejecting symlinks) before touching the active store, creates a safety backup of the current database, stages the replacement in the target directory, swaps it in, and re-opens the store. A legacy encrypted bundle is still restorable: a `.bak` with a matching `.bak.key` beside it goes through `restoreBackupBundle()`, which validates the key and database first and swaps database and key together; `openOrConvertStore()` then converts the restored file to plaintext. A failed swap rolls back the previous files; if the subsequent store initialization fails, the handler attempts to reinstall the safety backup.
 
 The UI exposes restore via a file picker for .bak files and requires confirmation. Unit and Electron end-to-end tests exercise restore. Recovery must still be run on a real Windows installation before release; CI evidence is not a substitute for testing the user's own backup file and filesystem permissions.
+
+Neither the database nor its backups are encrypted: anyone who can read the data folder or a backup copy can read every record. Protection is the Windows account, NTFS permissions on the user-data directory, and physical security; the in-product owner/shared profile masking is a display and export control only. See [plaintext store decision](plaintext-store-decision.md).
 
 ## Limits and known caveats
 
@@ -95,4 +99,4 @@ Manual indicator observations are available in a separate owner-only, paged regi
 
 ## Test coverage added
 
-`canonical-data.test.cjs` verifies additive/idempotent and rollback-safe migrations, seeding of directorate fields and indicators, canonical-source analysis reads, durable source-byte/cell provenance, hidden worksheet/row handling, formulas, merged ranges and embedded images, explicit project and indicator promotion, manual observation validation/version retention, paged observation reads, quality-issue listing/resolution, project funding and attachment validation/storage/export integrity, prior-version retention and empty-file rejection. `import-staging-wiring.test.cjs` verifies owner-gated project, attachment-export, observation and quality IPC and renderer wiring. `hardening.test.cjs` covers encrypted backup/restore bundles. The repository CI must pass on both Windows and Linux before this change is considered verified.
+`canonical-data.test.cjs` verifies additive/idempotent and rollback-safe migrations, seeding of directorate fields and indicators, canonical-source analysis reads, durable source-byte/cell provenance, hidden worksheet/row handling, formulas, merged ranges and embedded images, explicit project and indicator promotion, manual observation validation/version retention, paged observation reads, quality-issue listing/resolution, project funding and attachment validation/storage/export integrity, prior-version retention and empty-file rejection. `import-staging-wiring.test.cjs` verifies owner-gated project, attachment-export, observation and quality IPC and renderer wiring. `hardening.test.cjs` covers plaintext backup/restore and legacy encrypted bundle restore. The repository CI must pass on both Windows and Linux before this change is considered verified.

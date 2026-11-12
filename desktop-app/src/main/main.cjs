@@ -5,14 +5,12 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
-  openEncryptedStore,
-  loadOrCreateStoreKey,
+  openOrConvertStore,
   classifyStore,
   findLegacyBackups,
-  quarantineLegacyDatabase,
-  backupStore,
-  copyStoreKey,
+  backupPlaintextStore,
   restoreBackupBundle,
+  restorePlaintextBundle,
   listBackups,
 } = require('./store.cjs');
 const security = require('./security.cjs');
@@ -186,12 +184,30 @@ function hasUsableDatabase() {
   return fs.existsSync(filePath) && fs.statSync(filePath).size > 0;
 }
 
-function openDatabase() {
-  const filePath = getDatabasePath();
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+/**
+ * A legacy `store.key`, or null when there is none to read.
+ *
+ * The value is only ever used to classify or convert an encrypted store; a
+ * key with unexpected content returns null so the caller falls back to the
+ * explicit "this store is encrypted and needs its key" error instead of
+ * touching anything.
+ */
+function readLegacyStoreKey() {
   const keyPath = getStoreKeyPath();
-  const key = loadOrCreateStoreKey(keyPath, { databaseExists: hasUsableDatabase() });
-  return openEncryptedStore(filePath, key, { keyPath });
+  if (!fs.existsSync(keyPath)) return null;
+  const key = fs.readFileSync(keyPath, 'utf8').trim();
+  return /^[0-9a-f]{64}$/i.test(key) ? key : null;
+}
+
+/**
+ * Open the store — plaintext is the only mode.
+ *
+ * No key is required to open or create it. An encrypted store left by an earlier
+ * build is converted once, in place, with a verified backup (see
+ * openOrConvertStore), and the encrypted original keeps its key beside it.
+ */
+function openDatabase() {
+  return openOrConvertStore(getDatabasePath(), { keyPath: getStoreKeyPath() });
 }
 
 function requireDatabase() {
@@ -621,14 +637,36 @@ function createWindow() {
 function registerHandlers() {
   ipcMain.handle('app:status', () => {
     const profile = database ? security.getAccessProfile(database) : security.DEFAULT_PROFILE;
+    const filePath = getDatabasePath();
+    const hasDatabase = hasUsableDatabase();
+    // Nothing is encrypted any more, so the two flags have to be earned instead
+    // of inferred: `plaintext` means the store is open or is recognised as our
+    // plain SQLite file, `encrypted` means only an earlier build's key opens it.
+    // A busy, corrupt, foreign or unreadable file is neither, so the UI never
+    // shows a protection that does not exist. While the store is unlocked its
+    // mode is already known from the open connection and the file is not probed
+    // again (a second connection would only add a lock race).
+    // `hasKey` means exactly "a legacy store.key exists on disk" and survives
+    // for renderer compatibility.
+    let plaintext = Boolean(database);
+    let encrypted = false;
+    if (!database && hasDatabase) {
+      const verdict = classifyStore(filePath, readLegacyStoreKey());
+      plaintext = verdict.reason === 'plaintext';
+      // 'readable' means the plain probe failed and the legacy key succeeded:
+      // the file is still encrypted, it simply has its key beside it.
+      encrypted = verdict.reason === 'encrypted' || verdict.reason === 'readable';
+    }
     return {
       unlocked: Boolean(database),
-      hasDatabase: hasUsableDatabase(),
+      hasDatabase,
       hasKey: fs.existsSync(getStoreKeyPath()),
+      plaintext,
+      encrypted,
       accessProfile: profile,
       accessProfileLabel: security.PROFILE_LABELS[profile],
       // A pre-open count so the welcome screen can warn before the user clicks.
-      backups: hasUsableDatabase() ? listBackups(getDatabasePath()).length : 0,
+      backups: hasDatabase ? listBackups(filePath).length : 0,
     };
   });
 
@@ -746,20 +784,23 @@ function registerHandlers() {
   });
 
   ipcMain.handle('db:open', () => {
-    if (database) return { success: true, quarantined: null, recoveredFrom: null, backup: null };
-    // A database created by the earlier passphrase-protected build cannot be read with the
-    // generated key. Instead of failing, keep the user's file: build the replacement at a
-    // temporary path first (so a broken key or disk never leaves the user with nothing),
-    // then move the legacy file aside and promote the new store into place.
+    if (database) return { success: true, quarantined: null, recoveredFrom: null, backup: null, converted: false, encryptedBefore: false, backupPath: null };
+    // No key is required to open (or create) the store any more: it is a plain
+    // SQLite file. A database created by the earlier passphrase-protected build
+    // is converted in place by openOrConvertStore below, keeping an encrypted
+    // backup (and its key) beside the new file. A file this application does not
+    // recognise is never replaced, moved or overwritten: another application's
+    // file, a different encryption or a truncated store must not be swapped for
+    // an empty database, so the open fails with an explicit error instead.
     const filePath = getDatabasePath();
-    const keyPath = getStoreKeyPath();
     const hadUsable = hasUsableDatabase();
-    let quarantined = null;
-    let backup = null;
+    // Kept in the response shape for the renderer and scripts/e2e-analysis.cjs;
+    // nothing is quarantined or backed up on this path any more.
+    const quarantined = null;
+    const backup = null;
 
     if (hadUsable) {
-      const key = loadOrCreateStoreKey(keyPath, { databaseExists: true });
-      const verdict = classifyStore(filePath, key);
+      const verdict = classifyStore(filePath, readLegacyStoreKey());
       if (verdict.reason === 'busy') {
         throw new Error('قاعدة البيانات مفتوحة في نافذة أخرى من التطبيق. أغلق النسخة الأخرى ثم أعد المحاولة.');
       }
@@ -773,33 +814,38 @@ function registerHandlers() {
         throw new Error(`تعذّر فحص قاعدة البيانات الموجودة، ولم تُعدّل أي بيانات. ${verdict.error?.message ?? ''}`.trim());
       }
       if (verdict.reason === 'foreign') {
-        // Keep a byte-for-byte copy before touching anything: the "foreign"
-        // verdict usually means a different key, not a worthless file.
-        try { backup = backupStore(filePath, { keyPath }); } catch { /* the move below still protects the user */ }
-        let stagedPath = `${filePath}.staged-${Date.now()}`;
-        try {
-          const staged = openEncryptedStore(stagedPath, key);
-          staged.close();
-          quarantined = quarantineLegacyDatabase(filePath);
-          fs.renameSync(stagedPath, filePath);
-          stagedPath = null;
-        } catch (error) {
-          if (stagedPath) { try { fs.rmSync(stagedPath, { force: true }); } catch { /* best effort */ } }
-          if (quarantined) {
-            throw new Error(`تعذّر تجهيز قاعدة البيانات الجديدة. لم تُحذف بياناتك؛ نُقلت إلى «${quarantined}». أعد المحاولة أو استعد النسخة يدويًا.`);
-          }
-          throw error;
-        }
+        throw new Error(
+          `الملف «${filePath}» ليس قاعدة بيانات معروفة لهذا التطبيق. لم يُعدّل التطبيق الملف ولم ينقله من مكانه. `
+          + 'انقل الملف يدويًا إلى مجلد آخر أو استعد نسخة احتياطية، ثم أعد المحاولة.'
+        );
       }
     }
 
-    database = openDatabase();
+    const opened = openDatabase();
+    database = opened.database;
     sessionId = crypto.randomUUID();
-    // When no usable store existed but a previous quarantine backup does, tell the
-    // user where their old data went instead of silently starting empty.
-    const recoveredFrom = !hadUsable && !quarantined ? findLegacyBackups(filePath)[0] ?? null : null;
-    auditRead('db:open', { entity: 'store', result: 'ok', detail: `quarantined=${Boolean(quarantined)};backup=${Boolean(backup)}` });
-    return { success: true, quarantined, recoveredFrom, backup };
+    // openOrConvertStore reports what it repaired when a previous conversion was
+    // cut off ('plaintext-staging' once the swap finished, 'encrypted-backup' when
+    // it restored the kept encrypted original and converted once again). That value
+    // must survive: overwriting it here would hide a real recovery from the user.
+    // Only when the store itself recovered nothing and no usable store existed do we
+    // fall back to the older quarantined copy, so the user still learns where their
+    // old data went instead of silently starting empty.
+    const recoveredFrom = opened.recoveredFrom ?? (hadUsable ? null : findLegacyBackups(filePath)[0] ?? null);
+    auditRead('db:open', {
+      entity: 'store',
+      result: 'ok',
+      detail: `quarantined=${Boolean(quarantined)};backup=${Boolean(backup)};converted=${opened.converted};encryptedBefore=${opened.wasEncrypted};recoveredFrom=${recoveredFrom ?? 'none'}`,
+    });
+    return {
+      success: true,
+      quarantined,
+      recoveredFrom,
+      backup,
+      converted: opened.converted,
+      encryptedBefore: opened.wasEncrypted,
+      backupPath: opened.backupPath ?? backup,
+    };
   });
 
   ipcMain.handle('db:lock', async () => {
@@ -813,34 +859,33 @@ function registerHandlers() {
   });
 
   function createConsistentBackup(db) {
-    // SQLCipher's backup API rejects a plain target database created by the
-    // default backup helper. Flush WAL first, then copy the encrypted database,
-    // any remaining sidecars and its companion key as a single bundle. The
-    // synchronous copy runs on the main-process event loop, so no IPC write can
-    // interleave between checkpoint and file copies.
+    // The store is a plain SQLite database. Flush WAL first, then copy the
+    // database and any remaining sidecars as one bundle. The synchronous copy
+    // runs on the main-process event loop, so no IPC write can interleave between
+    // checkpoint and file copies. No key is copied: the bundle must be readable
+    // without one, which is exactly what being plaintext means.
     const checkpointRows = db.pragma('wal_checkpoint(TRUNCATE)');
     const checkpoint = Array.isArray(checkpointRows) ? checkpointRows[0] : checkpointRows;
     if (checkpoint && Number(checkpoint.busy ?? 0) > 0) {
       throw new Error('تعذّر أخذ لقطة متسقة لقاعدة البيانات؛ توجد عملية قراءة تمنع إتمام WAL checkpoint. أعد المحاولة بعد انتهاء القراءة.');
     }
 
-    const target = backupStore(getDatabasePath(), { keyPath: getStoreKeyPath() });
+    const target = backupPlaintextStore(getDatabasePath());
     if (!target) throw new Error('تعذّر إنشاء النسخة الاحتياطية لأن ملف قاعدة البيانات غير موجود.');
 
-    const key = fs.readFileSync(target + '.key', 'utf8').trim();
-    const verdict = classifyStore(target, key);
-    if (!verdict.ok) {
-      for (const suffix of ['', '.key', '-wal', '-shm', '-journal']) {
+    const verdict = classifyStore(target, null);
+    if (verdict.reason !== 'plaintext') {
+      for (const suffix of ['', '-wal', '-shm', '-journal']) {
         try { fs.rmSync(target + suffix, { force: true }); } catch { /* best effort cleanup */ }
       }
-      throw new Error('أُنشئت ملفات النسخة لكن فشل التحقق من قابليتها للفتح؛ أزيلت النسخة غير الموثوقة. السبب: ' + verdict.reason);
+      throw new Error('أُنشئت ملفات النسخة لكنها لم تثبت أنها قاعدة SQLite عادية بلا تشفير؛ أزيلت النسخة غير الموثوقة. السبب: ' + verdict.reason);
     }
     return target;
   }
 
   ipcMain.handle('db:backup', async () => {
     const db = requireDatabase();
-    if (currentProfile() !== 'owner') throw new Error('إنشاء نسخة كاملة من قاعدة البيانات يتطلب وضع المالك؛ فقد تتضمن النسخة حقولًا مقيّدة.');
+    if (currentProfile() !== 'owner') throw new Error('إنشاء نسخة كاملة غير مشفّرة من قاعدة البيانات يتطلب وضع المالك؛ فقد تتضمن النسخة حقولًا مقيّدة وملفها SQLite عادي يُفتح بلا مفتاح.');
     const target = await createConsistentBackup(db);
     persist.logAccess(db, { action: 'store-backup', entity: 'store', entityId: target });
     auditRead('db:backup', { entity: 'store', entityId: target });
@@ -865,28 +910,48 @@ function registerHandlers() {
     let safetyBackup = null;
 
     if (database) safetyBackup = await createConsistentBackup(database);
-    else if (fs.existsSync(databasePath)) safetyBackup = backupStore(databasePath, { keyPath });
+    else if (fs.existsSync(databasePath)) safetyBackup = backupPlaintextStore(databasePath);
 
     if (database) database.close();
     database = undefined;
     pendingPlan = null;
     invalidateSheets();
 
+    // A legacy bundle carries its own key beside it; a plaintext bundle has none.
+    const encryptedBundle = fs.existsSync(selected + '.key');
     try {
-      const restored = restoreBackupBundle(selected, databasePath, keyPath);
-      database = openDatabase();
+      const restored = encryptedBundle
+        ? restoreBackupBundle(selected, databasePath, keyPath)
+        : restorePlaintextBundle(selected, databasePath);
+      const opened = openDatabase();
+      database = opened.database;
       sessionId = crypto.randomUUID();
-      auditRead('db:restore', { entity: 'store', entityId: selected, result: 'ok', detail: 'safetyBackup=' + Boolean(safetyBackup) });
-      return { canceled: false, restored: true, safetyBackup, filePath: restored.restoredPath };
+      auditRead('db:restore', {
+        entity: 'store',
+        entityId: selected,
+        result: 'ok',
+        detail: `safetyBackup=${Boolean(safetyBackup)};encryptedBundle=${encryptedBundle};converted=${opened.converted}`,
+      });
+      return {
+        canceled: false,
+        restored: true,
+        safetyBackup,
+        filePath: restored.restoredPath,
+        converted: opened.converted,
+        encryptedBefore: opened.wasEncrypted,
+        backupPath: opened.backupPath,
+      };
     } catch (error) {
       // Restore the safety snapshot even if the file swap succeeded but opening
       // the replacement store failed during schema migration or initialization.
       try {
-        if (!database && safetyBackup && fs.existsSync(safetyBackup) && fs.existsSync(safetyBackup + '.key')) {
-          restoreBackupBundle(safetyBackup, databasePath, keyPath);
+        if (!database && safetyBackup && fs.existsSync(safetyBackup)) {
+          if (fs.existsSync(safetyBackup + '.key')) restoreBackupBundle(safetyBackup, databasePath, keyPath);
+          else restorePlaintextBundle(safetyBackup, databasePath);
         }
-        if (!database && fs.existsSync(databasePath) && fs.existsSync(keyPath)) {
-          database = openDatabase();
+        if (!database && fs.existsSync(databasePath)) {
+          const recovered = openDatabase();
+          database = recovered.database;
           sessionId = crypto.randomUUID();
         }
       } catch (recoveryError) {
@@ -962,7 +1027,7 @@ function registerHandlers() {
         warnings: [{ row: null, code: 'no-directorate-table', message: directorateReadError }],
       };
     }
-    sendImportProgress(event.sender, { phase: 'staging', message: 'جارٍ حفظ الملف الأصلي وجميع الأوراق والخلايا والصور القابلة للاستخراج في منطقة مراجعة محلية مشفّرة...' });
+    sendImportProgress(event.sender, { phase: 'staging', message: 'جارٍ حفظ الملف الأصلي وجميع الأوراق والخلايا والصور القابلة للاستخراج في منطقة مراجعة محلية (قاعدة SQLite محلية غير مشفّرة)...' });
     const staging = await canonicalData.stageWorkbook(db, filePath, read.workbook ?? null);
     const normalizedImport = dataArchitecture.mirrorWorkbookImport(db, staging.batchId);
     if (Object.prototype.hasOwnProperty.call(read, 'workbook')) delete read.workbook;

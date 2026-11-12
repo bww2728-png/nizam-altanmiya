@@ -97,7 +97,7 @@ export default function Projects({ notify, refreshKey }) {
       if (!result?.canceled) {
         setDetail(await window.localApp.canonicalProject(selectedId));
         await load();
-        notify?.({ tone: 'ok', message: 'تم حفظ المرفق داخل قاعدة البيانات المحلية المشفرة.' });
+        notify?.({ tone: 'ok', message: 'تم حفظ المرفق داخل قاعدة البيانات المحلية غير المشفّرة.' });
       }
     } catch (cause) {
       notify?.({ tone: 'bad', message: errText(cause) || 'تعذر إضافة المرفق.' });
@@ -220,8 +220,8 @@ export default function Projects({ notify, refreshKey }) {
       >
         {restricted ? (
           <div className="quote">
-            <strong>البيانات المالية والمصدرية محمية</strong>
-            <p className="muted">انتقل إلى وضع المالك لعرض المشاريع وتكاليفها وتمويلها ومعلومات المصدر.</p>
+            <strong>البيانات المالية والمصدرية محجوبة في العرض والتصدير</strong>
+            <p className="muted">انتقل إلى وضع المالك لعرض المشاريع وتكاليفها وتمويلها ومعلومات المصدر. هذا الحجب يخص العرض والتصدير فقط، وليس حماية للملف.</p>
           </div>
         ) : (
           <form className="toolbar" onSubmit={submitSearch}>
@@ -444,7 +444,7 @@ export default function Projects({ notify, refreshKey }) {
                   </div>
                 ))
                 : <span className="muted">لا توجد مرفقات مرتبطة بهذا المشروع.</span>}
-              <span className="muted">تُحفظ المحتويات داخل قاعدة البيانات المحلية المشفرة ولا تُعرض أو تُرسل عبر الشبكة.</span>
+              <span className="muted">تُحفظ المحتويات داخل قاعدة البيانات المحلية غير المشفّرة ولا تُعرض أو تُرسل عبر الشبكة.</span>
             </div>
 
             <div className="stack tight">

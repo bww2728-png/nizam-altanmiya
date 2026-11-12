@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   Activity, Briefcase, ClipboardCheck, DatabaseZap, FileSearch, FileSpreadsheet, LayoutDashboard, ListOrdered,
-  LockKeyhole, LogOut, PenLine, RefreshCw, RotateCcw, ShieldCheck, Users, Files, GitBranch, Target, Wallet,
+  LogOut, PenLine, RefreshCw, RotateCcw, ShieldCheck, Users, Files, GitBranch, Target, Wallet,
 } from 'lucide-react';
 import { cx, fmtDate } from '../lib/format.js';
 import ThemeToggle from './ThemeToggle.jsx';
@@ -75,8 +75,8 @@ export default function AppShell({
         <div className="workspace-card">
           <span className="status-dot" />
           <div>
-            <strong>قاعدة محلية مشفّرة</strong>
-            <small>البيانات على هذا الجهاز فقط</small>
+            <strong>قاعدة بيانات SQLite محلية</strong>
+            <small>البيانات على هذا الجهاز في ملف غير مشفّر</small>
           </div>
         </div>
 
@@ -146,7 +146,7 @@ export default function AppShell({
             >
               <RefreshCw size={17} />
             </button>
-            <span className="chip"><LockKeyhole size={13} /> محلي ومشفّر</span>
+            <span className="chip"><DatabaseZap size={13} /> محلي · SQLite بلا تشفير</span>
             <span className="chip gold">م</span>
           </div>
         </header>

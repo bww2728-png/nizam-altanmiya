@@ -159,7 +159,7 @@ async function stageFile(database, filePath) {
   const save = database.transaction(() => {
     const source = database.prepare(`INSERT INTO data_sources
       (source_type,document_title,file_name,mime_type,content_sha256,file_size,received_at,notes)
-      VALUES('document',?,?,?,?,?,?,?)`).run(path.basename(inspected.filePath), path.basename(inspected.filePath), inspected.mimeType, sha256, content.length, now, 'نسخة أصلية محفوظة داخل قاعدة البيانات المحلية المشفرة.');
+      VALUES('document',?,?,?,?,?,?,?)`).run(path.basename(inspected.filePath), path.basename(inspected.filePath), inspected.mimeType, sha256, content.length, now, 'نسخة أصلية محفوظة داخل قاعدة البيانات المحلية غير المشفرة (ملف SQLite محلي).');
     database.prepare(`INSERT INTO document_records
       (id,source_id,file_name,mime_type,file_size,sha256,original_content,status,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,'staged',?,?)`)
