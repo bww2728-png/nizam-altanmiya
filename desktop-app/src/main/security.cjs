@@ -282,6 +282,7 @@ function maskStoredRun(payload, profile) {
     confidenceText: null,
     confidenceLevel: null,
     sourceFile: null,
+    calculationLineage: null,
     gaps: [],
     calibrated: result.calibrated
       ? {

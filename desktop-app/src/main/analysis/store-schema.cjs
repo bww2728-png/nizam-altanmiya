@@ -6,6 +6,7 @@ const dataArchitecture = require('../database/architecture.cjs');
 const unifiedDevelopmentModel = require('../database/unified-development-model.cjs');
 const documentService = require('../documents/document-service.cjs');
 const schemaDrivenDiscovery = require('../documents/schema-driven-discovery.cjs');
+const indicatorCalculationPersistence = require('./indicator-calculation-persistence.cjs');
 
 /**
  * Database schema for the analysis layer.
@@ -375,8 +376,8 @@ function applyColumnMigrations(database, table, migrations) {
   }
 }
 
-const MIGRATION_VERSION = 2;
-const MIGRATION_CODE = 'unified-store-schema-v2';
+const MIGRATION_VERSION = 3;
+const MIGRATION_CODE = 'unified-store-schema-v3';
 
 function checksum() {
   return crypto.createHash('sha256').update(JSON.stringify({
@@ -389,6 +390,7 @@ function checksum() {
     canonicalData: canonicalData.checksum(),
     dataArchitecture: dataArchitecture.checksum(),
     unifiedDevelopmentModel: unifiedDevelopmentModel.checksum(),
+    indicatorCalculationPersistence: indicatorCalculationPersistence.checksum(),
     documentService: documentService.checksum(),
     schemaDrivenDiscovery: schemaDrivenDiscovery.checksum(),
   })).digest('hex');
@@ -429,6 +431,7 @@ function migrate(database, options = {}) {
     canonicalData.migrateCanonicalData(database);
     dataArchitecture.migrate(database);
     unifiedDevelopmentModel.migrate(database);
+    indicatorCalculationPersistence.migrate(database);
     documentService.migrate(database);
     schemaDrivenDiscovery.migrate(database);
     for (const index of EXTRA_INDEXES) {

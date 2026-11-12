@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, ArrowDown, ArrowUp, ListOrdered, Medal, Scale, Trophy } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowUp, Calculator, CircleHelp, ListOrdered, Medal, Scale, Trophy } from 'lucide-react';
 import { Badge, Bar, Card, Empty, ErrorBanner, Loading, Segmented } from '../components/ui.jsx';
 import { errText, fmtByType, fmtNumber, fmtPercent } from '../lib/format.js';
 
@@ -16,11 +16,23 @@ export default function Ranking({ catalogue, notify, onOpenCard }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [profile, setProfile] = useState('');
+  const [runs, setRuns] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setData(await window.localApp.sheetRanking({ mode }));
+      const [ranking, history, access] = await Promise.all([
+        window.localApp.sheetRanking({ mode }),
+        window.localApp.analysisRuns(),
+        window.localApp.accessProfile(),
+      ]);
+      setData(ranking);
+      setRuns(history ?? []);
+      setProfile(access?.profile ?? '');
     } catch (cause) {
       setError(errText(cause) || 'تعذر تحميل ترتيب الأولويات.');
     } finally {
@@ -29,6 +41,44 @@ export default function Ranking({ catalogue, notify, onOpenCard }) {
   }, [mode]);
 
   useEffect(() => { load(); }, [load]);
+
+  async function saveCalculation() {
+    setRunning(true);
+    try {
+      const saved = await window.localApp.runAnalysis({ mode: 'both' });
+      setDetail(null);
+      await load();
+      notify?.({ tone: 'ok', message: `تم حفظ التشغيل المعياري ${saved.runId} وربطه بمدخلاته.` });
+    } catch (cause) {
+      const message = errText(cause) || 'تعذر حفظ تشغيل التحليل المعياري.';
+      setError(message);
+      notify?.({ tone: 'bad', message });
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  async function showCalculation(row) {
+    const run = runs.find(item => item[`${mode}_calculation_run_id`]);
+    if (!run || !row.directorateId) {
+      notify?.({ tone: 'warn', message: 'لا توجد نتيجة معيارية محفوظة لهذا الترتيب بعد.' });
+      return;
+    }
+    setDetailLoading(true);
+    try {
+      const result = await window.localApp.analysisCalculationDetail({
+        runId: run.id,
+        directorateId: row.directorateId,
+        mode,
+      });
+      setDetail(result);
+      if (!result) notify?.({ tone: 'warn', message: 'لا تتوفر تفاصيل محفوظة لهذه المديرية في هذا التشغيل.' });
+    } catch (cause) {
+      notify?.({ tone: 'bad', message: errText(cause) || 'تعذر استرداد تفاصيل الحساب.' });
+    } finally {
+      setDetailLoading(false);
+    }
+  }
 
   async function exportPdf() {
     try {
@@ -79,6 +129,9 @@ export default function Ranking({ catalogue, notify, onOpenCard }) {
               {mode === 'calibrated' ? 'نقاط مرجعية ثابتة (موصى به)' : 'تطبيق المعادلة المرجعية (القيمة المفقودة = صفر)'}
             </span>
             <button className="btn small" onClick={exportPdf}><Scale size={14} /> تصدير التقرير PDF</button>
+            {profile === 'owner' && <button className="btn small primary" onClick={saveCalculation} disabled={running || loading}>
+              <Calculator size={14} /> {running ? 'جارٍ الحفظ...' : 'احسب واحفظ بالتتبع'}
+            </button>}
           </div>
         </div>
       </Card>
@@ -104,6 +157,7 @@ export default function Ranking({ catalogue, notify, onOpenCard }) {
                   <th className="num">السكان</th>
                   <th>قرار المراجع</th>
                   <th />
+                  {profile === 'owner' && <th>تتبع الحساب</th>}
                 </tr>
               </thead>
               <tbody>
@@ -126,6 +180,11 @@ export default function Ranking({ catalogue, notify, onOpenCard }) {
                     <td>
                       <button className="btn small ghost" onClick={() => onOpenCard?.(row.directorateId)}>البطاقة</button>
                     </td>
+                    {profile === 'owner' && <td>
+                      <button className="btn small ghost" onClick={() => showCalculation(row)} disabled={detailLoading}>
+                        <CircleHelp size={13} /> التفسير
+                      </button>
+                    </td>}
                   </tr>
                 ))}
               </tbody>
@@ -133,6 +192,40 @@ export default function Ranking({ catalogue, notify, onOpenCard }) {
           </div>
         )}
       </Card>
+
+      {detailLoading && <Card title="تفاصيل الحساب"><Loading label="جارٍ استرداد المدخلات والمصادر..." /></Card>}
+      {detail && <Card title={`تفسير نتيجة ${detail.districtName}`} subtitle={`التشغيل ${detail.runId} · حساب ${detail.calculation.calculationRunId} · بصمة المدخلات ${detail.calculation.inputSnapshotHash}`}>
+        <div className="kv">
+          <dt>نمط الحساب</dt><dd>{detail.calculation.parameters.runMode}</dd>
+          <dt>إصدار المعادلات</dt><dd>{detail.calculation.parameters.templateVersion}</dd>
+          <dt>إصدار المحرك</dt><dd>{detail.calculation.algorithmVersion}</dd>
+          <dt>النتيجة المركبة</dt><dd>{fmtNumber(detail.calculation.compositeScore, 6)}</dd>
+          <dt>المرتبة</dt><dd>{detail.calculation.rank ?? 'غير مرتبة'}</dd>
+          <dt>التغطية</dt><dd>{detail.calculation.coverageRatio == null ? '—' : fmtPercent(detail.calculation.coverageRatio * 100, 1)}</dd>
+        </div>
+        <div className="stack tight" style={{ marginTop: 16 }}>
+          {Object.entries(detail.calculation.indicators).map(([code, indicator]) => (
+            <details className="list-item" key={code}>
+              <summary className="row between">
+                <strong>{code}</strong>
+                <span className="dim">خام: {fmtNumber(indicator.rawValue, 5)} · معياري: {fmtNumber(indicator.normalizedValue, 5)} · موزون: {fmtNumber(indicator.weightedValue, 5)}</span>
+              </summary>
+              <div className="stack tight" style={{ marginTop: 10 }}>
+                <div className="row gap-sm"><span>الوزن المسجل: {fmtNumber(detail.calculation.parameters.weights?.[code], 5)}</span><span>·</span><code>{indicator.inputs[0]?.transformation?.formula ?? 'لا توجد معادلة محفوظة'}</code></div>
+                {indicator.inputs.map((input, index) => <div className="quote" key={`${input.fieldCode}-${index}`}>
+                  <strong>{input.fieldCode}</strong> — القيمة: {fmtByType(input.value)} — الحالة: {input.state}
+                  <div className="dim" style={{ fontSize: '0.78rem' }}>
+                    المصدر: {input.sourceId ?? 'غير مسجل'}{input.sourceLocator ? ` · الموضع: ${input.sourceLocator}` : ''}
+                    {input.transformation?.rawSourceValue != null ? ` · الأصل: ${input.transformation.rawSourceValue}` : ''}
+                    {input.transformation?.formulaVersion ? ` · إصدار الصيغة: ${input.transformation.formulaVersion}` : ''}
+                  </div>
+                </div>)}
+                {indicator.missingInputs.length > 0 && <div className="chip-row">{indicator.missingInputs.map(field => <Badge tone="warn" key={field}>مدخل مفقود: {field}</Badge>)}</div>}
+              </div>
+            </details>
+          ))}
+        </div>
+      </Card>}
 
       <div className="grid-2">
         <Card title="بانتظار الاستكمال" subtitle="حقول إلزامية ناقصة تمنع دخول المديرية إلى الترتيب.">
