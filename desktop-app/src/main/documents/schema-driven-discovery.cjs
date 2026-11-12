@@ -452,6 +452,7 @@ function promoteReviewedCandidates(database, request = {}, options = {}) {
 
 module.exports = {
   SCHEMA,
+  checksum: () => crypto.createHash('sha256').update(SCHEMA).digest('hex'),
   migrate,
   normalizeSearchText,
   fieldRegistry,

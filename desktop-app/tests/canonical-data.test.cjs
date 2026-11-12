@@ -13,6 +13,7 @@ const { migrate } = require('../src/main/analysis/store-schema.cjs');
 const { openEncryptedStore } = require('../src/main/store.cjs');
 const canonical = require('../src/main/analysis/canonical-data.cjs');
 const dataArchitecture = require('../src/main/database/architecture.cjs');
+const unifiedDevelopmentModel = require('../src/main/database/unified-development-model.cjs');
 const recordService = require('../src/main/database/record-service.cjs');
 const persist = require('../src/main/analysis/persist.cjs');
 
@@ -50,6 +51,9 @@ test('canonical model migrations are additive and idempotent', () => {
     assert.ok(db.prepare("SELECT 1 FROM data_field_aliases WHERE field_definition_id=? AND normalized_alias=?").get(populationFieldId, 'اجمالي السكان'));
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM indicator_definitions').get().n, 12);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM directorates').get().n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM form_definitions WHERE form_code GLOB 'form_[0-9][0-9][0-9]' AND data_structure_type='unresolved_definition'").get().n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sectors WHERE code GLOB 'form-range-*-*'").get().n, 0);
+    assert.equal(db.prepare('SELECT success FROM schema_migrations WHERE version=5').get().success, 1);
   } finally {
     db.close();
   }
@@ -773,5 +777,131 @@ test('staging rejects empty files before creating a batch', async () => {
   } finally {
     db.close();
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('unified development model seeds the 18-domain field hierarchy and typed dimensions', () => {
+  const db = openDatabase();
+  try {
+    const expectedTables = [
+      'development_model_migrations','field_groups','field_group_fields','field_definition_aliases','field_dimension_rules',
+      'facility_services','staffing_observations','natural_resource_sites','land_use_records',
+      'agricultural_production_records','livestock_production_records','fisheries_production_records',
+      'economic_establishments','tourism_site_profiles','cultural_heritage_profiles',
+      'education_enrollment_records','health_service_records','household_welfare_records','social_protection_records',
+      'financial_accounts','budget_headers','budget_lines','revenue_transactions','expenditure_transactions',
+      'swot_pestle_analyses','development_issue_factors','development_issue_evidence','priority_criteria','issue_priority_assessments',
+      'strategic_objectives','development_programs','program_projects','project_activities','project_milestones',
+      'project_geographic_units','project_beneficiary_targets','indicator_definition_versions','indicator_components',
+      'indicator_weight_profiles','indicator_weights','indicator_targets','indicator_benchmarks',
+      'indicator_calculation_runs','indicator_calculation_results','indicator_result_inputs'
+    ];
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
+    for (const table of expectedTables) assert.ok(tables.has(table), 'missing unified model table: ' + table);
+
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM field_groups WHERE group_level='domain'").get().n, 18);
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM field_groups WHERE group_level=\'subdomain\'').get().n >= 45);
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM field_group_fields').get().n >= 150);
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM field_definition_aliases WHERE is_approved=0').get().n >= 150);
+    const speculativeAlias = db.prepare(`SELECT alias.is_approved,alias.match_method FROM field_definition_aliases alias
+      JOIN field_definitions field USING(field_definition_id)
+      WHERE field.field_code='directorate.population' AND alias.alias_text='إجمالي عدد السكان'`).get();
+    assert.deepEqual(speculativeAlias,{ is_approved:0,match_method:'unverified_catalog_label' });
+    assert.equal(db.prepare("SELECT is_approved FROM field_definition_aliases WHERE field_definition_id=(SELECT field_definition_id FROM field_definitions WHERE field_code='directorate.population') AND alias_text='عدد السكان'").get().is_approved,1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM priority_criteria WHERE is_active=1 AND default_weight>0').get().n, 0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM priority_criteria WHERE default_weight>0').get().n, 0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM priority_criteria WHERE is_active=0').get().n, 6);
+
+    const requiredCodes = [
+      'directorate.population',
+      'directorate.waterCoverage',
+      'directorate.schools',
+      'finance.revenue.assessed',
+      'agriculture.crop.type',
+      'analysis.issue.root_causes',
+      'planning.objective.strategic',
+      'metadata.source_locator'
+    ];
+    for (const code of requiredCodes) {
+      assert.ok(db.prepare('SELECT 1 FROM field_definitions WHERE field_code=?').get(code), 'missing field definition: ' + code);
+      assert.ok(db.prepare('SELECT 1 FROM field_group_fields link JOIN field_definitions field USING(field_definition_id) WHERE field.field_code=?').get(code), 'field is not grouped: ' + code);
+    }
+
+    assert.ok(db.prepare("SELECT 1 FROM dimension_definitions WHERE dimension_code='sex'").get());
+    assert.ok(db.prepare("SELECT 1 FROM dimension_definitions WHERE dimension_code='age_group'").get());
+    assert.ok(db.prepare("SELECT 1 FROM reference_sets WHERE set_code='water_source'").get());
+    assert.ok(db.prepare("SELECT 1 FROM reference_sets WHERE set_code='priority_criterion'").get());
+
+    const migration = db.prepare('SELECT * FROM development_model_migrations WHERE version=1').get();
+    assert.equal(migration.migration_code, unifiedDevelopmentModel.CODE);
+    assert.equal(migration.success, 1);
+    const before = {
+      groups: db.prepare('SELECT COUNT(*) AS n FROM field_groups').get().n,
+      links: db.prepare('SELECT COUNT(*) AS n FROM field_group_fields').get().n,
+      fields: db.prepare('SELECT COUNT(*) AS n FROM field_definitions').get().n
+    };
+    const result = unifiedDevelopmentModel.migrate(db);
+    assert.equal(result.alreadyApplied, true);
+    assert.deepEqual({
+      groups: db.prepare('SELECT COUNT(*) AS n FROM field_groups').get().n,
+      links: db.prepare('SELECT COUNT(*) AS n FROM field_group_fields').get().n,
+      fields: db.prepare('SELECT COUNT(*) AS n FROM field_definitions').get().n
+    }, before);
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.ok(tables.has('directorates'));
+    assert.ok(tables.has('analysis_runs'));
+  } finally {
+    db.close();
+  }
+});
+
+test('seed policy migration withdraws catalog aliases and illustrative weights without deleting historical assessments', () => {
+  const db = openDatabase();
+  try {
+    const now = '2026-11-11T00:00:00.000Z';
+    const fieldId = db.prepare("SELECT field_definition_id FROM field_definitions WHERE field_code='directorate.population'").get().field_definition_id;
+    db.prepare("UPDATE field_definition_aliases SET is_approved=1,match_method='curated',confidence=1 WHERE field_definition_id=? AND alias_text='إجمالي عدد السكان'").run(fieldId);
+    const criterion = db.prepare("SELECT criterion_id FROM priority_criteria WHERE criterion_code='severity'").get().criterion_id;
+    const seedTimestamp = db.prepare('SELECT applied_at FROM development_model_migrations WHERE version=1').get().applied_at;
+    db.prepare('UPDATE priority_criteria SET default_weight=0.25,is_active=1,created_at=?,updated_at=? WHERE criterion_id=?').run(seedTimestamp,seedTimestamp,criterion);
+    const issue = db.prepare('INSERT INTO development_issues(issue_title,created_at,updated_at) VALUES(?,?,?)').run('اختبار حفظ التقييم',now,now);
+    db.prepare('INSERT INTO issue_priority_assessments(issue_id,criterion_id,raw_score,applied_weight,weighted_score,assessed_at) VALUES(?,?,5,0.25,1.25,?)').run(issue.lastInsertRowid,criterion,now);
+    db.prepare('DELETE FROM development_model_migrations WHERE version=2').run();
+
+    const result = unifiedDevelopmentModel.migrate(db);
+    assert.equal(result.alreadyApplied,false);
+    assert.deepEqual(db.prepare("SELECT is_approved,match_method FROM field_definition_aliases WHERE field_definition_id=? AND alias_text='إجمالي عدد السكان'").get(fieldId),{
+      is_approved:0,match_method:'unverified_catalog_label'
+    });
+    assert.deepEqual(db.prepare('SELECT default_weight,is_active FROM priority_criteria WHERE criterion_id=?').get(criterion),{
+      default_weight:0,is_active:0
+    });
+    assert.deepEqual(db.prepare('SELECT applied_weight,weighted_score FROM issue_priority_assessments WHERE issue_id=?').get(issue.lastInsertRowid),{
+      applied_weight:0.25,weighted_score:1.25
+    });
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
+  } finally {
+    db.close();
+  }
+});
+
+test('placeholder cleanup retains a definition already referenced by a real record', () => {
+  const db = openDatabase();
+  try {
+    const now = '2026-11-11T00:00:00.000Z';
+    const form = db.prepare(`INSERT INTO form_definitions(form_code,name_ar,description,data_structure_type,is_active,created_at,updated_at)
+      VALUES('form_999','تعريف غير محسوم للاختبار','لم يتوفر تعريف المصدر الأصلي؛ لم يُخترع اسم أو حقل.','unresolved_definition',0,?,?)`).run(now,now);
+    const version = db.prepare(`INSERT INTO form_versions(form_id,version_number,version_label,status,definition_hash,change_summary,created_at)
+      VALUES(?,1,'غير متاح','draft','test-hash','اختبار الحفاظ على ارتباط قائم',?)`).run(form.lastInsertRowid,now);
+    db.prepare('INSERT INTO form_records(form_version_id,created_at,updated_at) VALUES(?,?,?)').run(version.lastInsertRowid,now,now);
+    db.prepare('DELETE FROM schema_migrations WHERE version=5').run();
+
+    dataArchitecture.migrate(db);
+    assert.ok(db.prepare('SELECT 1 FROM form_definitions WHERE form_id=?').get(form.lastInsertRowid));
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM form_records WHERE form_version_id=?').get(version.lastInsertRowid).n,1);
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
+  } finally {
+    db.close();
   }
 });

@@ -248,6 +248,11 @@ function applyCanonicalMigration(database) {
   return true;
 }
 
+function checksum() {
+  const { ALIASES } = require('./mapping.cjs');
+  return crypto.createHash('sha256').update(JSON.stringify({ TABLES, INPUT_FIELDS, DECISION_FIELD, INDICATORS, DIRECTORATE_FIELD_CLASS_BY_KEY, ALIASES })).digest('hex');
+}
+
 function migrateCanonicalData(database) {
   return database.transaction(() => applyCanonicalMigration(database))();
 }
@@ -1426,4 +1431,4 @@ function listWorkbookImports(database, limit = 30) {
   return database.prepare("SELECT b.id,b.file_name,b.file_size,b.sha256,b.sheet_count,b.row_count,b.cell_count,b.media_count,b.media_stored_count,b.truncated,b.status,b.created_at,b.updated_at,(SELECT COUNT(*) FROM workbook_import_regions r WHERE r.batch_id=b.id) AS region_count,(SELECT COUNT(*) FROM workbook_import_rows w WHERE w.batch_id=b.id) AS stored_row_count FROM workbook_import_batches b ORDER BY b.id DESC LIMIT ?").all(bounded);
 }
 
-module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, migrateCanonicalData, syncLegacyDirectorate, retireLegacyDirectorate, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, promoteIndicatorRegion, listCanonicalReferences, listIndicatorObservations, saveIndicatorObservation, listDataQualityIssues, listDataSources, resolveDataQualityIssue, saveCanonicalProject, resolveProjectQualityIssue, addProjectFunding, addProjectAttachment, getProjectAttachment, listCanonicalProjects, getCanonicalProject, completeWorkbookImport, listWorkbookImports };
+module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, checksum, migrateCanonicalData, syncLegacyDirectorate, retireLegacyDirectorate, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, promoteIndicatorRegion, listCanonicalReferences, listIndicatorObservations, saveIndicatorObservation, listDataQualityIssues, listDataSources, resolveDataQualityIssue, saveCanonicalProject, resolveProjectQualityIssue, addProjectFunding, addProjectAttachment, getProjectAttachment, listCanonicalProjects, getCanonicalProject, completeWorkbookImport, listWorkbookImports };

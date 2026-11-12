@@ -95,6 +95,7 @@ contextBridge.exposeInMainWorld('localApp', {
   runAnalysis: (request) => ipcRenderer.invoke('analysis:run', request),
   latestAnalysis: () => ipcRenderer.invoke('analysis:latest'),
   analysisRuns: () => ipcRenderer.invoke('analysis:runs'),
+  analysisCalculationDetail: (request) => ipcRenderer.invoke('analysis:calculation-detail', request),
   rowDetail: (request) => ipcRenderer.invoke('analysis:row-detail', request),
   getWeights: () => ipcRenderer.invoke('analysis:weights:get'),
   setWeights: (request) => ipcRenderer.invoke('analysis:weights:set', request),
@@ -115,5 +116,66 @@ contextBridge.exposeInMainWorld('localApp', {
     const listener = (_event, message) => handler(message);
     ipcRenderer.on('update:status', listener);
     return () => ipcRenderer.removeListener('update:status', listener);
+  },
+
+  // Unified data layer (one contract over the workbook, the store and imports)
+  unified: {
+    summary: () => ipcRenderer.invoke('unified:summary'),
+    datasets: () => ipcRenderer.invoke('unified:datasets'),
+    describe: (datasetKey) => ipcRenderer.invoke('unified:describe', datasetKey),
+    list: (request) => ipcRenderer.invoke('unified:list', request),
+    get: (request) => ipcRenderer.invoke('unified:get', request),
+    save: (request) => ipcRenderer.invoke('unified:save', request),
+    remove: (request) => ipcRenderer.invoke('unified:remove', request),
+    options: (request) => ipcRenderer.invoke('unified:options', request),
+  },
+
+  // Development track: portfolio view, context matrix, issue tree, prioritisation
+  development: {
+    overview: ({ geoUnitId, periodId } = {}) => ipcRenderer.invoke('development:overview', { geoUnitId, periodId }),
+    contextMatrix: (request) => ipcRenderer.invoke('development:context-matrix', request),
+    issueTree: (request) => ipcRenderer.invoke('development:issue-tree', request),
+    criteria: () => ipcRenderer.invoke('development:criteria'),
+    priorityRanking: (request) => ipcRenderer.invoke('development:priority-ranking', request),
+    saveAssessment: (request) => ipcRenderer.invoke('development:save-assessment', request),
+    issueLinks: (request) => ipcRenderer.invoke('development:issue-links', request),
+  },
+
+  // Planning: objectives -> programs -> project links, coverage and portfolio
+  planning: {
+    overview: () => ipcRenderer.invoke('planning:overview'),
+    objectives: (request) => ipcRenderer.invoke('planning:objectives', request),
+    programs: (request) => ipcRenderer.invoke('planning:programs', request),
+    linkProject: (request) => ipcRenderer.invoke('planning:link-project', request),
+    projectProgress: (request) => ipcRenderer.invoke('planning:project-progress', request),
+    portfolio: (request) => ipcRenderer.invoke('planning:portfolio', request),
+    beneficiaries: (request) => ipcRenderer.invoke('planning:beneficiaries', request),
+    geography: (request) => ipcRenderer.invoke('planning:geography', request),
+    objectiveCoverage: (request) => ipcRenderer.invoke('planning:objective-coverage', request),
+  },
+
+  // Finance: budget vs actual, ledger, revenues, expenditures, commitments
+  finance: {
+    overview: () => ipcRenderer.invoke('finance:overview'),
+    accounts: () => ipcRenderer.invoke('finance:accounts'),
+    budgetVariance: (request) => ipcRenderer.invoke('finance:budget-variance', request),
+    ledger: (request) => ipcRenderer.invoke('finance:ledger', request),
+    recordRevenue: (request) => ipcRenderer.invoke('finance:record-revenue', request),
+    recordExpenditure: (request) => ipcRenderer.invoke('finance:record-expenditure', request),
+    currencySummary: (request) => ipcRenderer.invoke('finance:currency-summary', request),
+    commitments: (request) => ipcRenderer.invoke('finance:commitments', request),
+  },
+
+  // Indicator catalogue: definitions, versions, weighting profiles, analysis runs
+  indicatorCatalog: {
+    list: (request) => ipcRenderer.invoke('indicator-catalog:list', request),
+    detail: (request) => ipcRenderer.invoke('indicator-catalog:detail', request),
+    saveVersion: (request) => ipcRenderer.invoke('indicator-catalog:save-version', request),
+    weightProfiles: () => ipcRenderer.invoke('indicator-catalog:weight-profiles'),
+    createWeightProfile: (request) => ipcRenderer.invoke('indicator-catalog:create-weight-profile', request),
+    runs: (request) => ipcRenderer.invoke('indicator-catalog:runs', request),
+    runDetail: (request) => ipcRenderer.invoke('indicator-catalog:run-detail', request),
+    verifyRun: (request) => ipcRenderer.invoke('indicator-catalog:verify-run', request),
+    targetCoverage: (request) => ipcRenderer.invoke('indicator-catalog:target-coverage', request),
   },
 });

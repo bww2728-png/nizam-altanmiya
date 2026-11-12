@@ -428,7 +428,7 @@ function runWorker(filePath, options = {}) {
 }
 
 module.exports = {
-  MAX_FILE_BYTES, MIME_TYPES, SCHEMA, inspectFile, migrate, stageFile, listDocuments, getDocument, readOriginal,
+  MAX_FILE_BYTES, MIME_TYPES, SCHEMA, checksum: () => crypto.createHash('sha256').update(SCHEMA).digest('hex'), inspectFile, migrate, stageFile, listDocuments, getDocument, readOriginal,
   saveRagflowReference, listRagflowReferences, searchDocuments, normalizeSearchText, normalizeExtraction, persistExtraction,
   markProcessingStarted, markProcessingUnavailable, markProcessingFailure, workerEnvironment, workerScriptPath, extractDocxXml, workerExitError, runWorker,
 };

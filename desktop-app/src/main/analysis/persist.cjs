@@ -13,6 +13,7 @@
 const { DIRECTORATE_COLUMNS } = require('./store-schema.cjs');
 const { INPUT_FIELDS, DECISION_FIELD } = require('./schema.cjs');
 const canonicalData = require('./canonical-data.cjs');
+const indicatorCalculationPersistence = require('./indicator-calculation-persistence.cjs');
 const { parseFieldValue } = require('./parse.cjs');
 const { buildDirectorateWhere } = require('./report-filters.cjs');
 
@@ -446,12 +447,15 @@ function saveRun(database, analysis, meta = {}) {
         sensitivity_json, project_type, confidence_text, confidence_level, gaps_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    const legacyResults = [];
 
     for (const row of rows) {
       const key = identityOf(row).key;
-      insert.run(
+      const legacyDirectorateId = idByKey.get(key) ?? null;
+      if (!legacyDirectorateId) throw new Error(`لا يوجد ربط متوافق للمديرية ${row.districtName} ضمن قاعدة البيانات.`);
+      const result = insert.run(
         runId,
-        idByKey.get(key) ?? null,
+        legacyDirectorateId,
         row.districtName,
         row.governorate ?? '',
         safeJson(row.indicators, '{}'),
@@ -472,7 +476,15 @@ function saveRun(database, analysis, meta = {}) {
         row.confidence?.level ?? null,
         safeJson(analysis.gaps?.recordIssues?.get(row) ?? [], '[]'),
       );
+      legacyResults.push({ row, legacyDirectorateId, legacyResultId: Number(result.lastInsertRowid) });
     }
+    const calculation = indicatorCalculationPersistence.persistCalculationRuns(database, {
+      legacyRunId: runId,
+      analysis,
+      legacyResults,
+      filter: meta.filter ?? {},
+      createdAt,
+    });
 
     database.prepare('INSERT INTO access_log (action, entity, entity_id, fields, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run('analysis-run', 'analysis_runs', String(runId), String(rows.length), `mode=${meta.mode ?? 'both'}`, createdAt);
@@ -487,11 +499,11 @@ function saveRun(database, analysis, meta = {}) {
       savedAt: createdAt,
     }, '{}'));
 
-    return runId;
+    return { runId, calculation };
   });
 
-  const runId = write();
-  return { runId, results: rows.length };
+  const saved = write();
+  return { runId: saved.runId, results: rows.length, ...saved.calculation };
 }
 
 function getRun(database, runId) {
@@ -503,8 +515,30 @@ function getRun(database, runId) {
     LEFT JOIN directorates d ON d.id = r.directorate_id
     WHERE r.run_id = ?
     ORDER BY CASE WHEN r.calibrated_rank IS NULL THEN 1 ELSE 0 END, r.calibrated_rank, r.district
-  `).all(runId);
-  return { run: hydrateRun(run), results: results.map(hydrateResult) };
+  `).all(runId).map(result => {
+    const hydrated = hydrateResult(result);
+    const calculations = indicatorCalculationPersistence.hydrateCalculation(database, result.id);
+    if (!calculations) return hydrated;
+    const replica = calculations.replica;
+    const calibrated = calculations.calibrated;
+    return {
+      ...hydrated,
+      indicators: Object.fromEntries(Object.entries(calibrated?.indicators ?? replica?.indicators ?? {}).map(([code, value]) => [code, value.rawValue])),
+      replica: replica ? { ...hydrated.replica, composite: replica.compositeScore, rank: replica.rank } : hydrated.replica,
+      calibrated: calibrated ? {
+        ...hydrated.calibrated,
+        composite: calibrated.compositeScore,
+        rank: calibrated.rank,
+        degradedCount: calibrated.details?.degradedCount ?? hydrated.calibrated.degradedCount,
+        severe: calibrated.details?.severe ?? hydrated.calibrated.severe,
+        blocked: calibrated.details?.blocked ?? hydrated.calibrated.blocked,
+        blockReason: calibrated.details?.blockReason ?? hydrated.calibrated.blockReason,
+        weightCoverage: calibrated.details?.weightCoverage ?? hydrated.calibrated.weightCoverage,
+      } : hydrated.calibrated,
+      calculationLineage: calculations,
+    };
+  });
+  return { run: hydrateRun(run), results };
 }
 
 function getLatestRun(database) {
@@ -513,8 +547,28 @@ function getLatestRun(database) {
 }
 
 function listRuns(database, limit = 50) {
-  return database.prepare('SELECT id, mode, k_threshold, deprivation_line, row_count, created_at FROM analysis_runs ORDER BY id DESC LIMIT ?')
+  return database.prepare(`SELECT run.id,run.mode,run.k_threshold,run.deprivation_line,run.row_count,run.created_at,
+    (SELECT link.calculation_run_id FROM analysis_calculation_run_links link WHERE link.legacy_analysis_run_id=run.id AND link.run_mode='replica') AS replica_calculation_run_id,
+    (SELECT link.calculation_run_id FROM analysis_calculation_run_links link WHERE link.legacy_analysis_run_id=run.id AND link.run_mode='calibrated') AS calibrated_calculation_run_id
+    FROM analysis_runs run ORDER BY run.id DESC LIMIT ?`)
     .all(Math.min(500, Math.max(1, Number(limit) || 50)));
+}
+
+function getCalculationDetail(database, runId, directorateId, mode = 'calibrated') {
+  const selectedMode = mode === 'replica' ? 'replica' : 'calibrated';
+  const result = database.prepare(`SELECT id,directorate_id,district,governorate FROM analysis_results
+    WHERE run_id=? AND directorate_id=? ORDER BY id DESC LIMIT 1`).get(Number(runId), Number(directorateId));
+  if (!result) return null;
+  const calculation = indicatorCalculationPersistence.hydrateCalculation(database, result.id)?.[selectedMode];
+  if (!calculation) return null;
+  return {
+    runId: Number(runId),
+    legacyResultId: Number(result.id),
+    directorateId: Number(result.directorate_id),
+    districtName: result.district,
+    governorate: result.governorate,
+    calculation,
+  };
 }
 
 function hydrateRun(run) {
@@ -1058,6 +1112,7 @@ module.exports = {
   saveRun,
   getRun,
   getLatestRun,
+  getCalculationDetail,
   listRuns,
   logAccess,
   listAccess,

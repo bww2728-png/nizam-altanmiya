@@ -16,6 +16,10 @@ import Indicators from './pages/Indicators.jsx';
 import Ranking from './pages/Ranking.jsx';
 import Database from './pages/Database.jsx';
 import DirectorateCard from './pages/DirectorateCard.jsx';
+import DomainRecords from './pages/DomainRecords.jsx';
+import DevelopmentAnalysis from './pages/DevelopmentAnalysis.jsx';
+import PlanningExecution from './pages/PlanningExecution.jsx';
+import FinanceBudget from './pages/FinanceBudget.jsx';
 import Welcome from './pages/Welcome.jsx';
 import { cx, errText } from './lib/format.js';
 
@@ -315,6 +319,14 @@ export default function App() {
         return <ImportPage onNavigate={navigate} notify={notify} onApplied={refresh} />;
       case 'documents':
         return <DocumentCenter notify={notify} accessProfile={status?.accessProfile ?? 'owner'} />;
+      case 'domain-records':
+        return <DomainRecords notify={notify} refreshKey={refreshKey} />;
+      case 'development-analysis':
+        return <DevelopmentAnalysis notify={notify} refreshKey={refreshKey} />;
+      case 'planning':
+        return <PlanningExecution notify={notify} refreshKey={refreshKey} />;
+      case 'finance':
+        return <FinanceBudget notify={notify} refreshKey={refreshKey} />;
       case 'data-entry':
         return <DataEntry notify={notify} refreshKey={refreshKey} onDataChanged={refresh} onShowDatabase={() => navigate('database')} />;
       case 'correction':

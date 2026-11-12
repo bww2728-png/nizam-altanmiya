@@ -4,11 +4,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { INPUT_FIELDS, DECISION_FIELD, DIRECTORATE_FIELD_CLASS_BY_KEY } = require('../analysis/schema.cjs');
+const migrationIntegrity = require('./migration-integrity.cjs');
 
 const VERSION = 4;
 const CODE = '2026-11-11-domain-record-backfill-v4';
 const SCHEMA_FILE = path.join(__dirname, 'architecture-v1.sql');
-const SCHEMA_SQL = fs.readFileSync(SCHEMA_FILE, 'utf8');
+// Raw bytes of the schema file. The digest helpers below canonicalise the text so
+// a Windows (CRLF) checkout and an LF checkout produce the same migration checksum.
+const SCHEMA_SQL_RAW = fs.readFileSync(SCHEMA_FILE, 'utf8');
+const SCHEMA_SQL = migrationIntegrity.canonicalText(SCHEMA_SQL_RAW);
 const TABLE_COLUMNS = {
   sectors: [['sector_id','INTEGER'],['parent_sector_id','INTEGER'],['sector_code','TEXT'],['name_en','TEXT'],['sort_order','INTEGER NOT NULL DEFAULT 0'],['is_active','INTEGER NOT NULL DEFAULT 1'],['updated_at','TEXT']],
   geographic_units: [['geo_unit_id','INTEGER'],['geo_unit_type_id','INTEGER'],['parent_geo_unit_id','INTEGER'],['name_ar','TEXT'],['name_en','TEXT'],['valid_from','TEXT'],['valid_to','TEXT'],['is_active','INTEGER NOT NULL DEFAULT 1'],['source_id','INTEGER']],
@@ -30,6 +34,7 @@ function normalize(value) {
     .replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
     .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ').toLowerCase();
 }
+const SCHEMA_CHECKSUMS = migrationIntegrity.migrationChecksums({ text: SCHEMA_SQL_RAW, definition: JSON.stringify(TABLE_COLUMNS) });
 function tableExists(db, table) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table));
 }
@@ -924,14 +929,14 @@ function mirrorWorkbookImport(db, workbookBatchId) {
   return syncWorkbookImportStatus(db,id);
 }
 function checksum() {
-  return crypto.createHash('sha256').update(SCHEMA_SQL + JSON.stringify(TABLE_COLUMNS)).digest('hex');
+  return SCHEMA_CHECKSUMS.canonical;
 }
-function migrate(db) {
+function migrateV4(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,migration_code TEXT NOT NULL UNIQUE,migration_name TEXT NOT NULL,checksum TEXT NOT NULL,applied_at TEXT NOT NULL,execution_ms INTEGER,success INTEGER NOT NULL CHECK(success IN (0,1)),details TEXT)`);
   const sourceChecksum = checksum();
   const existing = db.prepare('SELECT * FROM schema_migrations WHERE version=?').get(VERSION);
   if (existing?.success === 1) {
-    if (existing.checksum !== sourceChecksum) throw new Error(`ترحيل ${CODE} عُدّل بعد تطبيقه. أنشئ إصدار ترحيل جديداً.`);
+    migrationIntegrity.verifyAppliedMigration(db, { table: 'schema_migrations', version: VERSION, recorded: existing.checksum, checksums: SCHEMA_CHECKSUMS, label: CODE });
     db.transaction(() => {
       const now = new Date().toISOString();
       backfillLegacy(db,now);
@@ -964,4 +969,65 @@ function migrate(db) {
   }
 }
 
-module.exports = { migrate, normalize, mirrorWorkbookImport, syncWorkbookImportStatus, recordImportMappingDecisions, syncLegacyDirectorateRecord, syncDomainRecords, VERSION, CODE, SCHEMA_FILE, UNIT_CODES };
+function migrateV5(db) {
+  const migrationVersion = 5;
+  const migrationCode = '2026-11-11-remove-unresolved-placeholder-forms-v5';
+  const cleanupPolicy = 'unresolved-only;retain-records-imports-profiles-sections-fields-rows;retain-referenced-sectors';
+  const V5_CHECKSUMS = migrationIntegrity.migrationChecksums({ text: SCHEMA_SQL_RAW, definition: JSON.stringify(TABLE_COLUMNS), suffix: migrationCode + cleanupPolicy });
+  const migrationChecksum = V5_CHECKSUMS.canonical;
+  const existing = db.prepare('SELECT * FROM schema_migrations WHERE version=?').get(migrationVersion);
+  if (existing?.success === 1) {
+    migrationIntegrity.verifyAppliedMigration(db, { table: 'schema_migrations', version: migrationVersion, recorded: existing.checksum, checksums: V5_CHECKSUMS, label: migrationCode });
+    return { version:migrationVersion,alreadyApplied:true };
+  }
+  if (existing) db.prepare('DELETE FROM schema_migrations WHERE version=? AND success=0').run(migrationVersion);
+  const startedAt = Date.now();
+  const now = new Date().toISOString();
+  try {
+    db.transaction(() => {
+      const candidates = db.prepare(`SELECT definition.form_id FROM form_definitions definition
+        WHERE definition.form_code GLOB 'form_[0-9][0-9][0-9]'
+          AND definition.description='لم يتوفر تعريف المصدر الأصلي؛ لم يُخترع اسم أو حقل.'
+          AND definition.data_structure_type='unresolved_definition'
+          AND definition.is_active=0
+          AND NOT EXISTS (
+            SELECT 1 FROM form_versions version WHERE version.form_id=definition.form_id AND (
+              EXISTS (SELECT 1 FROM form_records record WHERE record.form_version_id=version.form_version_id)
+              OR EXISTS (SELECT 1 FROM import_regions region WHERE region.form_version_id=version.form_version_id)
+              OR EXISTS (SELECT 1 FROM import_profiles profile WHERE profile.form_version_id=version.form_version_id)
+              OR EXISTS (SELECT 1 FROM form_sections section WHERE section.form_version_id=version.form_version_id)
+              OR EXISTS (SELECT 1 FROM form_fields field WHERE field.form_version_id=version.form_version_id)
+              OR EXISTS (SELECT 1 FROM form_row_definitions row_definition WHERE row_definition.form_version_id=version.form_version_id)
+            )
+          )`).all();
+      const deleteVersions = db.prepare('DELETE FROM form_versions WHERE form_id=?');
+      const deleteForm = db.prepare('DELETE FROM form_definitions WHERE form_id=?');
+      for (const candidate of candidates) {
+        deleteVersions.run(candidate.form_id);
+        deleteForm.run(candidate.form_id);
+      }
+      const sectorReferences = [
+        ['form_definitions','sector_id'],['observations','sector_id'],['development_issues','sector_id'],['plan_priorities','sector_id'],
+        ['strategic_objectives','sector_id'],['development_programs','sector_id']
+      ].filter(([table]) => tableExists(db,table));
+      const sectorUsage = sectorReferences.map(([table,column]) => `AND NOT EXISTS (SELECT 1 FROM ${table} reference WHERE reference.${column}=sectors.sector_id)`).join(' ');
+      db.prepare(`DELETE FROM sectors WHERE code GLOB 'form-range-*-*'
+        AND description='نطاق تصنيف النماذج؛ لا يمثل توصيفاً لحقولها.' ${sectorUsage}`).run();
+      const foreignKeys = db.prepare('PRAGMA foreign_key_check').all();
+      if (foreignKeys.length) throw new Error(`مخالفة مفتاح خارجي بعد ترحيل تنظيف النماذج: ${JSON.stringify(foreignKeys.slice(0,8))}`);
+      db.prepare('INSERT INTO schema_migrations(version,migration_code,migration_name,checksum,applied_at,execution_ms,success,details) VALUES(?,?,?,?,?,?,1,?)')
+        .run(migrationVersion,migrationCode,'إزالة النماذج الفارغة غير الموثقة مع إبقاء أي تعريف مستخدم أو مرتبط',migrationChecksum,now,Date.now()-startedAt,`حُذفت ${candidates.length} تعريفات فارغة غير مرتبطة.`);
+    })();
+    return { version:migrationVersion,alreadyApplied:false };
+  } catch (error) {
+    db.prepare('INSERT OR REPLACE INTO schema_migrations(version,migration_code,migration_name,checksum,applied_at,execution_ms,success,details) VALUES(?,?,?,?,?,?,0,?)')
+      .run(migrationVersion,migrationCode,'إزالة النماذج الفارغة غير الموثقة مع إبقاء أي تعريف مستخدم أو مرتبط',migrationChecksum,new Date().toISOString(),Date.now()-startedAt,String(error.message).slice(0,4000));
+    throw error;
+  }
+}
+function migrate(db) {
+  migrateV4(db);
+  return migrateV5(db);
+}
+
+module.exports = { migrate, checksum, normalize, mirrorWorkbookImport, syncWorkbookImportStatus, recordImportMappingDecisions, syncLegacyDirectorateRecord, syncDomainRecords, VERSION:5, CODE:'2026-11-11-remove-unresolved-placeholder-forms-v5', SCHEMA_FILE, UNIT_CODES };

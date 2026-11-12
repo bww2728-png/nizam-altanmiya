@@ -25,6 +25,11 @@ const documentService = require('./documents/document-service.cjs');
 const schemaDrivenDiscovery = require('./documents/schema-driven-discovery.cjs');
 const { RagflowAdapter } = require('./documents/ragflow-adapter.cjs');
 const recordService = require('./database/record-service.cjs');
+const domainService = require('./database/domain-service.cjs');
+const analysisService = require('./database/analysis-service.cjs');
+const planningService = require('./database/planning-service.cjs');
+const financeService = require('./database/finance-service.cjs');
+const indicatorCatalogService = require('./database/indicator-catalog-service.cjs');
 const { mappingTable } = require('./analysis/mapping.cjs');
 const { defaultWeights, validateWeights } = require('./analysis/composite.cjs');
 const persist = require('./analysis/persist.cjs');
@@ -1385,6 +1390,7 @@ function registerHandlers() {
       templateFile: pendingPlan?.plan?.fileName ?? analysis.meta?.template?.fileName ?? null,
       templateSheet: pendingPlan?.plan?.sheetName ?? analysis.meta?.template?.sheet ?? null,
       mode: 'both',
+      filter: request.filter ?? {},
     });
     // A new run makes every cached sheet number stale. Invalidated before the
     // fresh analysis is stored in memory, because the cache reset also drops
@@ -1444,6 +1450,20 @@ function registerHandlers() {
   });
 
   ipcMain.handle('analysis:runs', () => persist.listRuns(requireDatabase(), 50));
+
+  ipcMain.handle('analysis:calculation-detail', (_event, request = {}) => {
+    const db = requireDatabase();
+    if (currentProfile() !== 'owner') throw new Error('تفاصيل مدخلات الحساب متاحة لمالك الجهاز فقط.');
+    const detail = persist.getCalculationDetail(db, request.runId, request.directorateId, request.mode);
+    if (!detail) return null;
+    auditRead('analysis:calculation-detail', {
+      entity: 'indicator_calculation_results',
+      entityId: detail.calculation.calculationRunId,
+      fields: 'raw_value,normalized_value,weighted_value,inputs,source_locator',
+      rowCount: Object.keys(detail.calculation.indicators).length,
+    });
+    return detail;
+  });
 
   ipcMain.handle('analysis:weights:get', () => {
     const db = requireDatabase();
@@ -1761,6 +1781,361 @@ function registerHandlers() {
     persist.logAccess(db, { action: 'export-pdf', entity: 'file', entityId: filePath, detail: `profile=${profile}` });
     auditRead('analysis:export-pdf', { entity: 'file', entityId: filePath, result: profile === 'shared' ? 'masked' : 'ok' });
     return { canceled: false, ...result };
+  });
+
+  // Unified domain, development analysis, planning, finance and indicator-catalog read/write channels.
+  // Every read is audited; every write is blocked for the shared read-only profile and drops sheet caches.
+  ipcMain.handle('unified:summary', () => {
+    const db = requireDatabase();
+    try {
+      const result = domainService.summary(db);
+      auditRead('unified:summary', { entity: 'datasets', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('unified:datasets', () => {
+    const db = requireDatabase();
+    try {
+      const result = domainService.listDatasets(db);
+      auditRead('unified:datasets', { entity: 'datasets', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('unified:describe', (_event, datasetKey) => {
+    const db = requireDatabase();
+    try {
+      const result = domainService.describe(db, datasetKey);
+      auditRead('unified:describe', { entity: 'datasets', entityId: datasetKey ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('unified:list', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = domainService.list(db, request);
+      auditRead('unified:list', { entity: request.dataset ?? null, entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('unified:get', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = domainService.read(db, request.dataset, request.id);
+      auditRead('unified:get', { entity: request.dataset ?? null, entityId: request.id ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('unified:save', (_event, request = {}) => {
+    const db = requireDatabase();
+    const profile = currentProfile();
+    if (profile === 'shared') throw new Error('الملف المشترك للقراءة فقط؛ لا يمكن الحفظ.');
+    try {
+      const result = domainService.save(db, { ...request, actor: profile, sessionId });
+      auditRead('unified:save', { entity: request.dataset ?? null, entityId: request.id ?? null, result: 'ok' });
+      invalidateSheets();
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('unified:remove', (_event, request = {}) => {
+    const db = requireDatabase();
+    const profile = currentProfile();
+    if (profile === 'shared') throw new Error('الملف المشترك للقراءة فقط؛ لا يمكن الحفظ.');
+    try {
+      const result = domainService.remove(db, { ...request, actor: profile, sessionId });
+      auditRead('unified:remove', { entity: request.dataset ?? null, entityId: request.id ?? null, result: 'ok' });
+      invalidateSheets();
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('unified:options', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = domainService.options(db, request.kind, request);
+      auditRead('unified:options', { entity: String(request.kind ?? 'options'), entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('development:overview', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = analysisService.overview(db, request);
+      auditRead('development:overview', { entity: 'development', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('development:context-matrix', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = analysisService.contextMatrix(db, request);
+      auditRead('development:context-matrix', { entity: 'context_matrix', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('development:issue-tree', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = analysisService.issueTree(db, request);
+      auditRead('development:issue-tree', { entity: 'issue_tree', entityId: request.issueId ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('development:criteria', () => {
+    const db = requireDatabase();
+    try {
+      const result = analysisService.criteria(db);
+      auditRead('development:criteria', { entity: 'criteria', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('development:priority-ranking', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = analysisService.priorityRanking(db, request);
+      auditRead('development:priority-ranking', { entity: 'priority_ranking', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('development:save-assessment', (_event, request = {}) => {
+    const db = requireDatabase();
+    const profile = currentProfile();
+    if (profile === 'shared') throw new Error('الملف المشترك للقراءة فقط؛ لا يمكن الحفظ.');
+    try {
+      const result = analysisService.saveAssessment(db, { ...request, actor: profile });
+      auditRead('development:save-assessment', { entity: 'assessments', entityId: request.criterionId ?? null, result: 'ok' });
+      invalidateSheets();
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('development:issue-links', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = analysisService.issueLinks(db, request);
+      auditRead('development:issue-links', { entity: 'issue_links', entityId: request.issueId ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('planning:overview', () => {
+    const db = requireDatabase();
+    try {
+      const result = planningService.overview(db);
+      auditRead('planning:overview', { entity: 'planning', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('planning:objectives', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = planningService.objectiveTree(db, request);
+      auditRead('planning:objectives', { entity: 'objectives', entityId: request.planId ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('planning:programs', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = planningService.programs(db, request);
+      auditRead('planning:programs', { entity: 'programs', entityId: request.planId ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('planning:link-project', (_event, request = {}) => {
+    const db = requireDatabase();
+    const profile = currentProfile();
+    if (profile === 'shared') throw new Error('الملف المشترك للقراءة فقط؛ لا يمكن الحفظ.');
+    try {
+      const result = planningService.linkProject(db, { ...request, actor: profile });
+      auditRead('planning:link-project', { entity: 'project_links', entityId: request.projectId ?? null, result: 'ok' });
+      invalidateSheets();
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('planning:project-progress', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = planningService.projectProgress(db, request);
+      auditRead('planning:project-progress', { entity: 'projects', entityId: request.projectId ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('planning:portfolio', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = planningService.portfolioProgress(db, request);
+      auditRead('planning:portfolio', { entity: 'projects', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('planning:beneficiaries', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = planningService.beneficiaries(db, request);
+      auditRead('planning:beneficiaries', { entity: 'beneficiaries', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('planning:geography', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = planningService.projectGeography(db, request);
+      auditRead('planning:geography', { entity: 'project_geography', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('planning:objective-coverage', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = planningService.objectiveCoverage(db, request);
+      auditRead('planning:objective-coverage', { entity: 'objective_coverage', entityId: request.planId ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('finance:overview', () => {
+    const db = requireDatabase();
+    try {
+      const result = financeService.overview(db);
+      auditRead('finance:overview', { entity: 'finance', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('finance:accounts', () => {
+    const db = requireDatabase();
+    try {
+      const result = financeService.accountsTree(db);
+      auditRead('finance:accounts', { entity: 'accounts', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('finance:budget-variance', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = financeService.budgetVariance(db, request);
+      auditRead('finance:budget-variance', { entity: 'budget_lines', entityId: request.budgetId ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('finance:ledger', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = financeService.ledger(db, request);
+      auditRead('finance:ledger', { entity: 'transactions', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('finance:record-revenue', (_event, request = {}) => {
+    const db = requireDatabase();
+    const profile = currentProfile();
+    if (profile === 'shared') throw new Error('الملف المشترك للقراءة فقط؛ لا يمكن الحفظ.');
+    try {
+      const result = financeService.recordRevenue(db, { ...request, actor: profile });
+      auditRead('finance:record-revenue', { entity: 'transactions', entityId: result?.id ?? null, result: 'ok' });
+      invalidateSheets();
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('finance:record-expenditure', (_event, request = {}) => {
+    const db = requireDatabase();
+    const profile = currentProfile();
+    if (profile === 'shared') throw new Error('الملف المشترك للقراءة فقط؛ لا يمكن الحفظ.');
+    try {
+      const result = financeService.recordExpenditure(db, { ...request, actor: profile });
+      auditRead('finance:record-expenditure', { entity: 'transactions', entityId: result?.id ?? null, result: 'ok' });
+      invalidateSheets();
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('finance:currency-summary', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = financeService.currencySummary(db, request);
+      auditRead('finance:currency-summary', { entity: 'transactions', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('finance:commitments', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = financeService.commitmentControl(db, request);
+      auditRead('finance:commitments', { entity: 'commitments', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('indicator-catalog:list', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = indicatorCatalogService.catalogue(db, request);
+      auditRead('indicator-catalog:list', { entity: 'indicators', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('indicator-catalog:detail', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = indicatorCatalogService.definitionDetail(db, request);
+      auditRead('indicator-catalog:detail', { entity: 'indicator_definitions', entityId: request.indicatorId ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('indicator-catalog:save-version', (_event, request = {}) => {
+    const db = requireDatabase();
+    const profile = currentProfile();
+    if (profile === 'shared') throw new Error('الملف المشترك للقراءة فقط؛ لا يمكن الحفظ.');
+    try {
+      const result = indicatorCatalogService.saveVersion(db, { ...request, actor: profile });
+      auditRead('indicator-catalog:save-version', { entity: 'indicator_versions', entityId: request.indicatorId ?? null, result: 'ok' });
+      invalidateSheets();
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('indicator-catalog:weight-profiles', () => {
+    const db = requireDatabase();
+    try {
+      const result = indicatorCatalogService.weightProfiles(db);
+      auditRead('indicator-catalog:weight-profiles', { entity: 'weight_profiles', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('indicator-catalog:create-weight-profile', (_event, request = {}) => {
+    const db = requireDatabase();
+    const profile = currentProfile();
+    if (profile === 'shared') throw new Error('الملف المشترك للقراءة فقط؛ لا يمكن الحفظ.');
+    try {
+      const result = indicatorCatalogService.createWeightProfile(db, { ...request, actor: profile });
+      auditRead('indicator-catalog:create-weight-profile', { entity: 'weight_profiles', entityId: result?.id ?? null, result: 'ok' });
+      invalidateSheets();
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('indicator-catalog:runs', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = indicatorCatalogService.calculationRuns(db, request);
+      auditRead('indicator-catalog:runs', { entity: 'calculation_runs', entityId: null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('indicator-catalog:run-detail', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = indicatorCatalogService.runDetail(db, request);
+      auditRead('indicator-catalog:run-detail', { entity: 'calculation_runs', entityId: request.runId ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('indicator-catalog:verify-run', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = indicatorCatalogService.verifyRun(db, request);
+      auditRead('indicator-catalog:verify-run', { entity: 'calculation_runs', entityId: request.runId ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
+  });
+  ipcMain.handle('indicator-catalog:target-coverage', (_event, request = {}) => {
+    const db = requireDatabase();
+    try {
+      const result = indicatorCatalogService.targetCoverage(db, request);
+      auditRead('indicator-catalog:target-coverage', { entity: 'targets', entityId: request.indicatorId ?? null, result: 'ok' });
+      return result;
+    } catch (error) { throw new Error(String(error?.message ?? error)); }
   });
 
   ipcMain.handle('update:status', () => ({ ...lastUpdateStatus, currentVersion: app.getVersion() }));

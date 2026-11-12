@@ -2,8 +2,8 @@
 
 const crypto = require('node:crypto');
 
-const CATALOG_VERSION = 5;
-const CATALOG_CODE = '2026-11-12-manual-entry-domain-catalog-v5';
+const CATALOG_VERSION = 6;
+const CATALOG_CODE = '2026-11-12-manual-entry-domain-catalog-v6';
 const CATALOG_SOURCE = 'المواصفة الوظيفية المقدمة في تكليف 12 نوفمبر 2026؛ تحتاج تعريفات ومصادر رسمية';
 
 const DOMAINS = [

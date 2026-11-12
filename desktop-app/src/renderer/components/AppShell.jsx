@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   Activity, Briefcase, ClipboardCheck, DatabaseZap, FileSearch, FileSpreadsheet, LayoutDashboard, ListOrdered,
-  LockKeyhole, LogOut, PenLine, RefreshCw, RotateCcw, ShieldCheck, Users, Files,
+  LockKeyhole, LogOut, PenLine, RefreshCw, RotateCcw, ShieldCheck, Users, Files, GitBranch, Target, Wallet,
 } from 'lucide-react';
 import { cx, fmtDate } from '../lib/format.js';
 import ThemeToggle from './ThemeToggle.jsx';
@@ -36,6 +36,15 @@ export const NAV_GROUPS = [
       { id: 'sources', label: 'مصادر البيانات', icon: Files },
       { id: 'correction', label: 'تصحيح البيانات', icon: PenLine },
       { id: 'database', label: 'قاعدة البيانات الشاملة', icon: DatabaseZap },
+    ],
+  },
+  {
+    caption: 'البيانات التنموية الموحدة',
+    items: [
+      { id: 'domain-records', label: 'سجلات البيانات الموحدة', icon: DatabaseZap },
+      { id: 'development-analysis', label: 'التحليل التنموي', icon: Target },
+      { id: 'planning', label: 'التخطيط والتنفيذ', icon: GitBranch },
+      { id: 'finance', label: 'المالية والموازنة', icon: Wallet },
     ],
   },
   {
