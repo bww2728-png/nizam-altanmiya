@@ -26,7 +26,7 @@ import { cx, errText } from './lib/format.js';
 /**
  * Application root.
  *
- * Owns the session state (unlocked store, access profile, field catalogue), the
+ * Owns the session state (opened store, access profile, field catalogue), the
  * route, the toast queue and the page transition. Pages are stateless with
  * respect to navigation: they receive callbacks, never a router.
  */
@@ -35,6 +35,11 @@ const PAGES_NEEDING_CATALOGUE = new Set(['correction', 'database', 'ranking', 'c
 
 /** Auto-update states that deserve a banner; idle/checking/not-available stay silent. */
 const UPDATE_BANNER_STATES = new Set(['available', 'downloading', 'downloaded', 'error']);
+
+/** Base name of a path reported by the main process, for user-facing messages. */
+function fileLabel(reportPath) {
+  return String(reportPath ?? '').split(/[\\/]/).pop() || '';
+}
 
 /** Whole percent, clamped, or null when the main process has not reported one. */
 function updatePercent(value) {
@@ -144,7 +149,17 @@ export default function App() {
     if (updateStatus?.state !== 'error') setDismissedUpdateError(null);
   }, [updateStatus?.state]);
 
-  const onOpened = useCallback(async () => {
+  const onOpened = useCallback(async (result) => {
+    // The store is a plain SQLite file. A legacy encrypted store is converted in
+    // place on the first open; the welcome screen unmounts as soon as the session
+    // is up, so the durable report has to come from here.
+    if (result?.converted) {
+      const kept = result.backupPath ? ` احتُفظ بنسخة مشفّرة في «${fileLabel(result.backupPath)}».` : '';
+      notify({
+        tone: 'ok',
+        message: `حُوّلت قاعدة البيانات عند هذا الفتح ${result.encryptedBefore ? 'من صيغة مشفّرة ' : ''}إلى SQLite غير مشفّرة، والبيانات كما هي.${kept}`,
+      });
+    }
     try {
       const next = await window.localApp.status();
       setStatus(next);
@@ -181,11 +196,16 @@ export default function App() {
     try {
       const result = await window.localApp.restoreDatabase();
       if (result?.canceled) return;
-      setStatus((current) => ({ ...current, unlocked: true, hasDatabase: true, hasKey: true }));
+      // The restored store is plaintext, so no key file is created: writing
+      // hasKey here would make a lock affordance appear out of a legacy key file.
+      setStatus((current) => ({ ...current, unlocked: true, hasDatabase: true }));
       setCatalogue(null);
       setRefreshKey((key) => key + 1);
       await loadCatalogue();
-      notify({ tone: 'ok', message: 'تمت استعادة النسخة الاحتياطية والتحقق من قاعدة البيانات. نسخة الأمان: ' + (result.safetyBackup ?? 'غير مطلوبة') });
+      const converted = result?.converted
+        ? ` حُوّلت النسخة المستعادة ${result.encryptedBefore ? 'من الصيغة المشفّرة ' : ''}إلى SQLite غير مشفّرة${result.backupPath ? ` مع الاحتفاظ بنسخة في «${fileLabel(result.backupPath)}»` : ''}.`
+        : '';
+      notify({ tone: 'ok', message: 'تمت استعادة النسخة الاحتياطية والتحقق من قاعدة البيانات. نسخة الأمان: ' + (result.safetyBackup ?? 'غير مطلوبة') + converted });
     } catch (cause) {
       notify({ tone: 'bad', message: errText(cause) || 'تعذرت استعادة النسخة الاحتياطية؛ لم يُفترض فقد البيانات الحالية.' });
       try {

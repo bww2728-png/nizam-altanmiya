@@ -10,6 +10,10 @@ const { migrate } = require('../src/main/analysis/store-schema.cjs');
 const { openEncryptedStore, backupStore, restoreBackupBundle } = require('../src/main/store.cjs');
 const manualEntryCatalog = require('../src/main/database/manual-entry-catalog.cjs');
 
+// openEncryptedStore validates its passphrase as 64 hex characters before the
+// legacy cipher is set up, so every call here uses one shared valid key.
+const TEST_STORE_KEY = 'd'.repeat(64);
+
 test('manual-entry domain catalog is versioned, idempotent, and only exposes explicitly mapped published forms', () => {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
@@ -45,12 +49,11 @@ test('manual-entry domain catalog is versioned, idempotent, and only exposes exp
 test('manual-entry catalog migration reopens an encrypted store without losing existing data or duplicating rows', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(),'ldi-entry-catalog-encrypted-'));
   const filePath = path.join(directory,'store.db');
-  const key = 'test-only-encrypted-store-key';
   try {
-    let db = openEncryptedStore(filePath,key);
+    let db = openEncryptedStore(filePath,TEST_STORE_KEY);
     db.prepare("INSERT INTO app_settings(key,value,updated_at) VALUES('catalog-migration-test','preserved','2026-01-01')").run();
     db.close();
-    db = openEncryptedStore(filePath,key);
+    db = openEncryptedStore(filePath,TEST_STORE_KEY);
     assert.equal(db.prepare("SELECT value FROM app_settings WHERE key='catalog-migration-test'").get().value,'preserved');
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM manual_entry_domains').get().count,18);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM manual_entry_groups').get().count,
@@ -66,27 +69,26 @@ test('a full encrypted store backup restores its key, schema, data and integrity
   const directory = fs.mkdtempSync(path.join(os.tmpdir(),'ldi-entry-restore-encrypted-'));
   const storePath = path.join(directory,'store.db');
   const keyPath = path.join(directory,'store.key');
-  const key = 'f'.repeat(64);
   try {
-    fs.writeFileSync(keyPath,key,{ mode:0o600 });
-    let db = openEncryptedStore(storePath,key);
+    fs.writeFileSync(keyPath,TEST_STORE_KEY,{ mode:0o600 });
+    let db = openEncryptedStore(storePath,TEST_STORE_KEY);
     db.prepare("INSERT INTO app_settings(key,value,updated_at) VALUES('manual-entry-restore','before','2026-11-12')").run();
     db.close();
     const backupPath = backupStore(storePath,{ keyPath });
     assert.ok(backupPath);
-    db = openEncryptedStore(storePath,key);
+    db = openEncryptedStore(storePath,TEST_STORE_KEY);
     db.prepare("UPDATE app_settings SET value='after' WHERE key='manual-entry-restore'").run();
     db.close();
 
     restoreBackupBundle(backupPath,storePath,keyPath);
-    db = openEncryptedStore(storePath,key);
+    db = openEncryptedStore(storePath,TEST_STORE_KEY);
     assert.equal(db.prepare("SELECT value FROM app_settings WHERE key='manual-entry-restore'").get().value,'before');
     assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM manual_entry_groups').get().count,
       manualEntryCatalog.DOMAINS.reduce((total, [, , groups]) => total + groups.length,0));
     db.close();
-    db = openEncryptedStore(storePath,key);
+    db = openEncryptedStore(storePath,TEST_STORE_KEY);
     assert.equal(db.prepare("SELECT value FROM app_settings WHERE key='manual-entry-restore'").get().value,'before');
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM manual_entry_groups').get().count,
       manualEntryCatalog.DOMAINS.reduce((total, [, , groups]) => total + groups.length,0));

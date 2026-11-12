@@ -23,13 +23,20 @@ const persist = require('../src/main/analysis/persist.cjs');
 const security = require('../src/main/security.cjs');
 const { serializeAnalysis } = require('../src/main/analysis/serialize.cjs');
 
+// openEncryptedStore validates its passphrase as 64 hex characters before the
+// value can reach a `PRAGMA key` statement, so the fixture key must have that
+// shape. It stays distinct from the keys the individual tests below declare.
+const TEST_STORE_KEY = '9'.repeat(64);
+
 
 function openTestDatabase() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-hardening-'));
   const filePath = path.join(directory, 'test.db');
-  // Use the production open path so the review/import tables exist exactly as
-  // they do in the application.
-  const database = openEncryptedStore(filePath, 'test-key-hardening');
+  // Legacy open path: openEncryptedStore now only serves an old encrypted store.
+  // Production opens through openOrConvertStore, which converts such a store to
+  // plaintext on first open and keeps a backup. It is used here only to create a
+  // schema-identical database (review/import tables) for the tests.
+  const database = openEncryptedStore(filePath, TEST_STORE_KEY);
   return { database, directory, filePath };
 }
 

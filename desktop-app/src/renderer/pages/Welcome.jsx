@@ -10,9 +10,10 @@ const TAGLINES = ['تطوير مستدام', 'تنمية محلية', 'تمكي�
 /**
  * The gate before the workspace.
  *
- * There is no account and no password: the store is encrypted with a key
- * generated on this device, so the button only proves the operator is at the
- * machine. Everything the screen promises about locality is true of the code.
+ * There is no account and no password: the store is a plain SQLite file, so the
+ * button only proves the operator is at the machine. A legacy encrypted store is
+ * converted on the first open, and the encrypted copy is kept. Everything the
+ * screen promises about locality is true of the code.
  */
 export default function Welcome({ status, onOpened }) {
   const [busy, setBusy] = useState(false);
@@ -26,9 +27,13 @@ export default function Welcome({ status, onOpened }) {
     try {
       const result = await window.localApp.open();
       if (result?.quarantined) {
-        setNotice(`وُجدت قاعدة بيانات قديمة لا تُفتح بمفتاح هذا الجهاز. لم تُحذف؛ نُقلت إلى «${result.quarantined.split(/[\\/]/).pop()}» وبدأ التطبيق بقاعدة نظيفة.`);
+        setNotice(`وُجدت قاعدة بيانات قديمة تعذّر فتحها أو تحويلها إلى صيغة غير مشفّرة. لم تُحذف؛ نُقلت إلى «${result.quarantined.split(/[\\/]/).pop()}» وبدأ التطبيق بقاعدة نظيفة.`);
+      } else if (result?.recoveredFrom === 'plaintext-staging') {
+        setNotice('أكمل التطبيق تحويلًا كان منقطعًا، وبياناتك الآن في قاعدة البيانات العادية التي فُتحت للتو. لا حاجة إلى أي إجراء، ولا يوجد ملف منفصل يُحتفظ به.');
+      } else if (result?.recoveredFrom === 'encrypted-backup') {
+        setNotice('استُعيدت النسخة المشفّرة المحفوظة وحُوّلت إلى قاعدة بيانات عادية عند بدء التشغيل. النسخة المشفّرة الأصلية محفوظة كنسخة احتياطية بجانب قاعدة البيانات.');
       } else if (result?.recoveredFrom) {
-        setNotice(`وُجدت نسخة احتياطية سابقة: «${result.recoveredFrom.split(/[\\/]/).pop()}». البيانات القديمة محفوظة في ذلك الملف.`);
+        setNotice(`وُجدت قاعدة بيانات أقدم: «${result.recoveredFrom.split(/[\\/]/).pop()}». لم يُستعدها التطبيق ولم يُحوّلها؛ أُبقيت كما هي في ذلك الملف.`);
       }
       onOpened(result);
     } catch (cause) {
@@ -48,7 +53,9 @@ export default function Welcome({ status, onOpened }) {
           <p className="muted" style={{ fontSize: '0.85rem' }}>الجمهورية اليمنية · مركز إدارة البيانات المحلية</p>
           <p className="welcome-copy">
             منظومة محلية لإدخال بيانات التنمية ومراجعتها وتحليلها. تُحفظ البيانات المعتمدة في قاعدة
-            بيانات مشفّرة على هذا الجهاز، ومنها تُبنى المؤشرات والتقارير وترتيب الأولويات.
+            بيانات SQLite غير مشفّرة على هذا الجهاز، ومنها تُبنى المؤشرات والتقارير وترتيب الأولويات.
+            وإذا وُجدت قاعدة بيانات مشفّرة من إصدار سابق حُوّلت تلقائيًا عند أول فتح، مع الاحتفاظ
+            بنسخة مشفّرة منها.
           </p>
           <ul className="welcome-taglines">
             {TAGLINES.map((tagline) => <li key={tagline}>{tagline}</li>)}
@@ -72,7 +79,7 @@ export default function Welcome({ status, onOpened }) {
 
           <div className="privacy-note">
             <ShieldCheck size={18} />
-            <span>قاعدة بيانات SQLCipher مشفّرة على جهازك · قراءة الملفات ومعالجة الأرقام محليًا · لا اتصال سحابي</span>
+            <span>قاعدة بيانات SQLite محلية غير مشفّرة على جهازك · يمكن فتح الملف ببرامج SQLite أخرى · قراءة الملفات ومعالجة الأرقام محليًا · لا اتصال سحابي</span>
           </div>
 
           <div className="row" style={{ justifyContent: 'center', opacity: 0.5 }}>

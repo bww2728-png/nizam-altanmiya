@@ -17,6 +17,10 @@ const unifiedDevelopmentModel = require('../src/main/database/unified-developmen
 const recordService = require('../src/main/database/record-service.cjs');
 const persist = require('../src/main/analysis/persist.cjs');
 
+// openEncryptedStore rejects any passphrase that is not 64 hex characters before
+// it can be interpolated into `PRAGMA key`, so this fixture key uses that shape.
+const TEST_STORE_KEY = 'a'.repeat(64);
+
 const ONE_PIXEL_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/pXcAAAAASUVORK5CYII=',
   'base64'
@@ -124,7 +128,7 @@ test('domain records are backfilled into versioned form records atomically and i
 test('workbook mirroring supports the original encrypted-store table layout', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-normalized-workbook-'));
   const filePath = path.join(directory,'legacy-layout.xlsx');
-  const database = openEncryptedStore(path.join(directory,'store.db'),'local-test-key');
+  const database = openEncryptedStore(path.join(directory,'store.db'),TEST_STORE_KEY);
   try {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('بيانات المديريات');

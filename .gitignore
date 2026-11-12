@@ -35,6 +35,12 @@ _cache/
 *.db-wal
 store.key
 
+# Backup and key material must never be committed (encrypted originals kept by
+# the plaintext conversion, plaintext/encrypted backup bundles and their keys)
+*.bak
+*.bak.key
+*.encrypted-*.bak*
+
 # OS noise
 Thumbs.db
 desktop.ini

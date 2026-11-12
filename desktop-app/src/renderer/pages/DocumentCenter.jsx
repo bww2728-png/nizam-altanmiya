@@ -92,7 +92,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
     try {
       const result = await window.localApp.stageDocument();
       if (!result?.canceled) {
-        notify?.({ tone: result?.duplicate ? 'warn' : 'ok', message: result?.duplicate ? 'هذه الوثيقة محفوظة مسبقًا؛ لم تُنشأ نسخة أخرى.' : 'حُفظ الأصل داخل قاعدة البيانات المحلية المشفرة.' });
+        notify?.({ tone: result?.duplicate ? 'warn' : 'ok', message: result?.duplicate ? 'هذه الوثيقة محفوظة مسبقًا؛ لم تُنشأ نسخة أخرى.' : 'حُفظ الأصل داخل قاعدة البيانات المحلية غير المشفّرة.' });
         setDocuments(current => ({ ...current, offset: 0 }));
         setSelected(null);
         await load();
@@ -279,7 +279,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
         </div>}
       </Card>
 
-      <Card title="الوثائق المحفوظة" subtitle="الأصل محفوظ داخل قاعدة البيانات المشفرة. يُستخرج نص Word محليًا؛ أما PDF والصور فتحتاج إلى محركات معالجة محلية إضافية." actions={<button className="btn small ghost" onClick={load} disabled={loading}><RefreshCw size={14} /> تحديث</button>}>
+      <Card title="الوثائق المحفوظة" subtitle="الأصل محفوظ داخل قاعدة البيانات المحلية، وهي ملف SQLite غير مشفّر يمكن فتحه بأي أداة SQLite. يُستخرج نص Word محليًا؛ أما PDF والصور فتحتاج إلى محركات معالجة محلية إضافية." actions={<button className="btn small ghost" onClick={load} disabled={loading}><RefreshCw size={14} /> تحديث</button>}>
         {loading && !documents.rows ? <Loading /> : rows.length === 0 ? <Empty icon={FileText} title="لا توجد وثائق بعد" hint="أضف ملف PDF أو Word بصيغة DOCX أو صورة لبدء المكتبة المحلية." /> : <div className="stack">
           {rows.map(document => <article className="quote stack tight" key={document.id}>
             <div className="row between" style={{ flexWrap: 'wrap' }}>

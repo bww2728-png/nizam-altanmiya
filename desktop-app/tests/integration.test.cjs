@@ -23,9 +23,14 @@ const { readDirectorateWorkbook } = require('../src/main/analysis/template-reade
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'template-v3.3.xlsx');
 
+// openEncryptedStore validates its passphrase as 64 hex characters before the
+// value can reach a `PRAGMA key` statement; the fixture key therefore has that
+// shape (and is constant so the test stays deterministic).
+const TEST_STORE_KEY = 'b'.repeat(64);
+
 function withDatabase(callback) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ldi-integration-'));
-  const database = openEncryptedStore(path.join(directory, 'integration.db'), `integration-key-${Date.now()}`);
+  const database = openEncryptedStore(path.join(directory, 'integration.db'), TEST_STORE_KEY);
   try {
     return callback(database);
   } finally {
