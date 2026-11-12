@@ -54,6 +54,26 @@ export function fmtMoney(value) {
   return intFormat.format(numeric);
 }
 
+/**
+ * Exact decimal text for an integer amount stored in minor units.
+ * Money is never summed in the renderer: the integer keeps full precision and
+ * BigInt keeps the decimal split exact (60 with unit 2 renders as 0.60).
+ */
+export function fmtMinor(minor, unit = 2) {
+  if (minor === null || minor === undefined || minor === "") return DASH;
+  const digits = Number.isInteger(unit) && unit >= 0 && unit <= 4 ? unit : 2;
+  const numeric = toNumber(minor);
+  if (numeric === null) return DASH;
+  const value = Math.trunc(numeric);
+  const absolute = BigInt(Math.abs(value));
+  const sign = value < 0 ? "-" : "";
+  if (digits === 0) return `${sign}${intFormat.format(Number(absolute))}`;
+  const factor = 10n ** BigInt(digits);
+  const whole = (absolute / factor).toString();
+  const fraction = (absolute % factor).toString().padStart(digits, "0");
+  return `${sign}${whole}.${fraction}`;
+}
+
 /** Value formatter driven by the field type of the catalogue. */
 export function fmtByType(value, type) {
   if (value === null || value === undefined || value === '') return DASH;
