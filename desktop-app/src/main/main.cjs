@@ -20,6 +20,7 @@ const { analyze } = require('./analysis/engine.cjs');
 const { readDirectorateWorkbook } = require('./analysis/template-reader.cjs');
 const canonicalData = require('./analysis/canonical-data.cjs');
 const dataArchitecture = require('./database/architecture.cjs');
+const manualEntryCatalog = require('./database/manual-entry-catalog.cjs');
 const documentService = require('./documents/document-service.cjs');
 const schemaDrivenDiscovery = require('./documents/schema-driven-discovery.cjs');
 const { RagflowAdapter } = require('./documents/ragflow-adapter.cjs');
@@ -1013,6 +1014,13 @@ function registerHandlers() {
     return preview;
   });
 
+  ipcMain.handle('data:entry-catalog', () => {
+    if (currentProfile() !== 'owner') throw new Error('كتالوج مجالات الإدخال متاح في وضع المالك فقط.');
+    const catalog = manualEntryCatalog.listCatalog(requireDatabase());
+    auditRead('data:entry-catalog', { entity: 'manual_entry_domains', rowCount: catalog.domains.length, detail: `version=${catalog.version}` });
+    return catalog;
+  });
+
   ipcMain.handle('data:forms', () => {
     if (currentProfile() !== 'owner') throw new Error('كتالوج النماذج متاح في وضع المالك فقط.');
     const rows = recordService.listForms(requireDatabase());
@@ -1049,6 +1057,7 @@ function registerHandlers() {
     const result = request.decision === 'submit'
       ? recordService.submitForReview(requireDatabase(), request.formRecordId, sessionId)
       : recordService.decideRecord(requireDatabase(), request.formRecordId, { ...request, actor: sessionId });
+    if (['approve','reopen'].includes(request.decision)) invalidateSheets();
     return result;
   });
 

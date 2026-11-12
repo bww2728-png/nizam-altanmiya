@@ -128,7 +128,22 @@ function resolvePeriod(db, id, requestedYear) {
   return number;
 }
 function saveRecord(db, request = {}) {
-  return saveRecordWithSource(db,request,null);
+  const definition = getFormDefinition(db,request.formVersionId);
+  const fields = new Map(definition.fields.map(field => [field.field_code,field]));
+  let sourceContext = null;
+  if (request.valueSources !== undefined) {
+    if (!request.valueSources || typeof request.valueSources !== 'object' || Array.isArray(request.valueSources)) throw new Error('صيغة توثيق مصادر القيم غير صحيحة.');
+    const suppliedValues = request.values && typeof request.values === 'object' && !Array.isArray(request.values) ? request.values : {};
+    const sourceByField = {};
+    for (const [fieldCode,locator] of Object.entries(request.valueSources)) {
+      if (!fields.has(fieldCode)) throw new Error(`حقل مصدر غير معرّف في النموذج: ${fieldCode}`);
+      if (!Object.hasOwn(suppliedValues,fieldCode)) throw new Error(`لا يمكن توثيق مصدر دون حفظ قيمة أو حالة لها: ${fieldCode}`);
+      if (typeof locator !== 'string' || locator.length > 1000) throw new Error('مرجع مصدر القيمة يجب أن يكون نصاً لا يتجاوز 1000 حرف.');
+      sourceByField[fieldCode] = { sourceLocator:locator.trim() || null };
+    }
+    sourceContext = { provenanceType:'manual_entry',sourceByField };
+  }
+  return saveRecordWithSource(db,request,sourceContext);
 }
 function saveRecordFromDocument(db, request = {}, sourceContext = {}) {
   const sourceByField = {};
@@ -295,6 +310,132 @@ function syncApprovedDirectorate(db,recordId,actor,now) {
     .run(recordId,result.id,now);
   return result;
 }
+function syncApprovedProject(db,recordId,actor,now) {
+  const record = db.prepare('SELECT form_record_id,form_version_id,geo_unit_id FROM form_records WHERE form_record_id=?').get(recordId);
+  const form = db.prepare('SELECT f.form_code FROM form_versions v JOIN form_definitions f USING(form_id) WHERE v.form_version_id=?').get(record.form_version_id);
+  if (form?.form_code !== 'project_v1') return null;
+  const scalarRows = db.prepare(`SELECT field.field_code,value.value_text,value.value_date,value.value_state
+    FROM record_field_values value JOIN form_fields field USING(form_field_id) WHERE value.form_record_id=?`).all(recordId);
+  const values = Object.fromEntries(scalarRows.filter(row => ['known','zero'].includes(row.value_state))
+    .map(row => [row.field_code,row.value_date ?? row.value_text]));
+  const measurementRows = db.prepare(`SELECT field.field_code,observation.value_integer,observation.value_real,observation.value_state
+    FROM observations observation JOIN form_fields field USING(form_field_id) WHERE observation.form_record_id=?`).all(recordId);
+  for (const row of measurementRows) {
+    if (['known','zero'].includes(row.value_state)) values[row.field_code] = row.value_integer ?? row.value_real;
+  }
+  const name = String(values.projectName ?? '').trim();
+  if (!name) throw new Error('اسم المشروع مطلوب قبل اعتماد سجل المشروع.');
+  const code = String(values.projectCode ?? '').trim() || null;
+  const description = values.description ?? null;
+  const status = String(values.projectStatus ?? '').trim() || 'draft';
+  const estimatedCost = values.estimatedCost ?? null;
+  const actualCost = values.actualCost ?? null;
+  const currency = String(values.currencyCode ?? '').trim().toUpperCase() || null;
+  if ((estimatedCost !== null || actualCost !== null) && !currency) throw new Error('أدخل رمز العملة قبل اعتماد تكاليف المشروع.');
+  if (currency && !/^[A-Z]{3}$/.test(currency)) throw new Error('رمز العملة يجب أن يتكون من ثلاثة أحرف لاتينية مثل USD.');
+  const startDate = values.startDate ?? null;
+  const endDate = values.endDate ?? null;
+  if (startDate && endDate && startDate > endDate) throw new Error('تاريخ البداية يأتي بعد تاريخ النهاية.');
+  const geography = record.geo_unit_id == null ? null : db.prepare('SELECT id FROM geographic_units WHERE geo_unit_id=?').get(record.geo_unit_id);
+  if (record.geo_unit_id != null && !geography) throw new Error('الموقع الجغرافي للمشروع غير مرتبط بالمرجع الموحد.');
+  const sectorCode = String(values.sectorCode ?? '').trim() || null;
+  const sector = sectorCode ? db.prepare('SELECT id FROM sectors WHERE code=? AND active=1').get(sectorCode) : null;
+  if (sectorCode && !sector) throw new Error('قطاع المشروع غير موجود أو غير نشط.');
+  const source = db.prepare(`SELECT revision.source_id FROM record_revisions revision WHERE revision.form_record_id=?
+    ORDER BY revision.revision_number DESC LIMIT 1`).get(recordId);
+  const sourceId = source?.source_id == null ? null : db.prepare('SELECT id FROM data_sources WHERE id=? OR source_id=? ORDER BY id LIMIT 1').get(source.source_id,source.source_id)?.id ?? null;
+  const existingLink = db.prepare("SELECT legacy_entity_id FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='project'").get(recordId);
+  const projectId = existingLink ? Number(existingLink.legacy_entity_id) : null;
+  if (code) {
+    const duplicate = db.prepare('SELECT id FROM projects WHERE code=? AND id<>coalesce(?,0)').get(code,projectId);
+    if (duplicate) throw new Error('رمز المشروع مستخدم في سجل آخر.');
+  }
+  const previous = projectId ? db.prepare('SELECT * FROM projects WHERE id=?').get(projectId) : null;
+  if (projectId && !previous) throw new Error('رابط المشروع المعتمد يشير إلى سجل غير موجود.');
+  const payload = { code,name,description,geographic_unit_id:geography?.id ?? null,sector_id:sector?.id ?? null,status,
+    estimated_cost:estimatedCost,actual_cost:actualCost,currency_code:currency,start_date:startDate,end_date:endDate,source_id:sourceId };
+  let linkedProjectId = projectId;
+  if (previous) {
+    db.prepare('INSERT INTO project_versions(project_id,action,payload_json,source_id,created_at) VALUES(?,?,?,?,?)')
+      .run(projectId,'central-record-approval-update',JSON.stringify(previous),sourceId,now);
+    db.prepare(`UPDATE projects SET code=?,name=?,description=?,geographic_unit_id=?,sector_id=?,status=?,estimated_cost=?,actual_cost=?,currency_code=?,
+      start_date=?,end_date=?,source_id=?,updated_at=? WHERE id=?`)
+      .run(code,name,description,payload.geographic_unit_id,payload.sector_id,status,estimatedCost,actualCost,currency,startDate,endDate,sourceId,now,projectId);
+  } else {
+    linkedProjectId = Number(db.prepare(`INSERT INTO projects(code,name,description,geographic_unit_id,sector_id,status,estimated_cost,actual_cost,currency_code,
+      start_date,end_date,source_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(code,name,description,payload.geographic_unit_id,payload.sector_id,status,estimatedCost,actualCost,currency,startDate,endDate,sourceId,now,now).lastInsertRowid);
+    db.prepare("INSERT INTO form_record_legacy_links(form_record_id,legacy_entity_type,legacy_entity_id,linked_at) VALUES(?,'project',?,?)")
+      .run(recordId,linkedProjectId,now);
+    db.prepare(`INSERT INTO project_versions(project_id,action,payload_json,source_id,created_at) VALUES(?,?,?,?,?)`)
+      .run(linkedProjectId,'central-record-approval-create',JSON.stringify(payload),sourceId,now);
+    db.prepare(`INSERT OR IGNORE INTO application_migration_log(migration_code,source_table,source_id,target_table,target_id,status,details,created_at)
+      VALUES('domain-records-v1','projects',?,'form_records',?,'migrated','مرتبط بسجل المشروع المركزي المعتمد.',?)`)
+      .run(String(linkedProjectId),String(recordId),now);
+  }
+  db.prepare('INSERT INTO access_log(action,entity,entity_id,fields,detail,created_at) VALUES(?,?,?,?,?,?)')
+    .run(previous ? 'central-record-update' : 'central-record-create','projects',String(linkedProjectId),'project_v1','form_record=' + recordId,now);
+  return { projectId:linkedProjectId,action:previous ? 'updated' : 'created' };
+}
+function syncApprovedIndicatorObservation(db,recordId,actor,now) {
+  const record = db.prepare('SELECT form_record_id,form_version_id,geo_unit_id FROM form_records WHERE form_record_id=?').get(recordId);
+  const form = db.prepare('SELECT f.form_code FROM form_versions v JOIN form_definitions f USING(form_id) WHERE v.form_version_id=?').get(record.form_version_id);
+  if (form?.form_code !== 'indicator_observation_v1') return null;
+  const scalarRows = db.prepare(`SELECT field.field_code,value.value_text,value.value_state
+    FROM record_field_values value JOIN form_fields field USING(form_field_id) WHERE value.form_record_id=?`).all(recordId);
+  const values = Object.fromEntries(scalarRows.filter(row => ['known','zero'].includes(row.value_state)).map(row => [row.field_code,row.value_text]));
+  const measurement = db.prepare(`SELECT observation.value_integer,observation.value_real,observation.value_state
+    FROM observations observation JOIN form_fields field USING(form_field_id)
+    WHERE observation.form_record_id=? AND field.field_code='valueNumber'`).get(recordId);
+  const indicatorCode = String(values.indicatorCode ?? '').trim();
+  const period = String(values.periodKey ?? '').trim();
+  const state = String(values.valueState ?? measurement?.value_state ?? 'known').trim();
+  if (!indicatorCode || !period || period.length > 80) throw new Error('رمز المؤشر والفترة مطلوبان قبل اعتماد القياس.');
+  if (!['known','zero','not_available','unknown','not_applicable','not_collected','not_verified'].includes(state)) throw new Error('حالة قيمة المؤشر غير معتمدة.');
+  const indicator = db.prepare('SELECT id,unit FROM indicator_definitions WHERE code=? AND active=1').get(indicatorCode);
+  if (!indicator) throw new Error('رمز المؤشر لا يطابق تعريفاً نشطاً في القاموس.');
+  const geographic = record.geo_unit_id == null ? null : db.prepare('SELECT id FROM geographic_units WHERE geo_unit_id=?').get(record.geo_unit_id);
+  if (!geographic) throw new Error('الموقع الجغرافي للقياس غير محدد أو غير مرتبط بالمرجع الموحد.');
+  const hasNumeric = measurement && ['known','zero'].includes(measurement.value_state);
+  const number = hasNumeric ? measurement.value_integer ?? measurement.value_real : null;
+  const text = values.valueText ?? null;
+  if (state === 'known' && number == null && !text) throw new Error('قيمة المؤشر المعروفة تتطلب قيمة رقمية أو نصية.');
+  if (!['known','zero'].includes(state) && (number != null || text)) throw new Error('القيمة المفقودة لا يجوز أن تحمل قيمة رقمية أو نصية فعلية.');
+  if (state === 'zero' && number !== 0) throw new Error('حالة الصفر تتطلب قيمة رقمية تساوي صفراً.');
+  if (indicator.unit === '%' && number != null && number > 100) throw new Error('قيمة النسبة المئوية تتجاوز 100.');
+  const existingLink = db.prepare("SELECT legacy_entity_id FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='indicator_observation'").get(recordId);
+  const observationId = existingLink ? Number(existingLink.legacy_entity_id) : null;
+  const previous = observationId ? db.prepare('SELECT * FROM indicator_observations WHERE id=?').get(observationId) : null;
+  if (observationId && !previous) throw new Error('رابط قياس المؤشر يشير إلى سجل غير موجود.');
+  const duplicate = db.prepare(`SELECT id FROM indicator_observations WHERE indicator_id=? AND geographic_unit_id=? AND period_key=? AND id<>coalesce(?,0)`)
+    .get(indicator.id,geographic.id,period,observationId);
+  if (duplicate) throw new Error('يوجد قياس آخر للمؤشر والموقع والفترة نفسها؛ راجع السجل الموجود قبل الاعتماد.');
+  const revision = db.prepare('SELECT source_id FROM record_revisions WHERE form_record_id=? ORDER BY revision_number DESC LIMIT 1').get(recordId);
+  const sourceId = revision?.source_id == null ? null : db.prepare('SELECT id FROM data_sources WHERE id=? OR source_id=? ORDER BY id LIMIT 1').get(revision.source_id,revision.source_id)?.id ?? null;
+  const sourceLocation = `مركز الإدخال اليدوي:form-record-${recordId}`;
+  if (previous) {
+    db.prepare('INSERT INTO indicator_observation_versions(observation_id,action,payload_json,source_id,created_at) VALUES(?,?,?,?,?)')
+      .run(observationId,'central-record-approval-update',JSON.stringify(previous),sourceId,now);
+    db.prepare(`UPDATE indicator_observations SET indicator_id=?,geographic_unit_id=?,period_key=?,value_number=?,value_text=?,value_state=?,source_id=?,source_location=? WHERE id=?`)
+      .run(indicator.id,geographic.id,period,number,text,state,sourceId,sourceLocation,observationId);
+  } else {
+    const created = db.prepare(`INSERT INTO indicator_observations(indicator_id,geographic_unit_id,period_key,value_number,value_text,value_state,source_id,source_location,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?)`).run(indicator.id,geographic.id,period,number,text,state,sourceId,sourceLocation,now);
+    const createdId = Number(created.lastInsertRowid);
+    db.prepare("INSERT INTO form_record_legacy_links(form_record_id,legacy_entity_type,legacy_entity_id,linked_at) VALUES(?,'indicator_observation',?,?)")
+      .run(recordId,createdId,now);
+    db.prepare(`INSERT OR IGNORE INTO application_migration_log(migration_code,source_table,source_id,target_table,target_id,status,details,created_at)
+      VALUES('domain-records-v1','indicator_observations',?,'form_records',?,'migrated','مرتبط بسجل قياس المؤشر المركزي المعتمد.',?)`)
+      .run(String(createdId),String(recordId),now);
+  }
+  const linkedObservationId = observationId ?? Number(db.prepare("SELECT legacy_entity_id FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='indicator_observation'").get(recordId).legacy_entity_id);
+  db.prepare(`UPDATE value_provenance SET source_locator=? WHERE observation_id=?
+    AND provenance_id=(SELECT MAX(latest.provenance_id) FROM value_provenance latest WHERE latest.observation_id=?)`)
+    .run(sourceLocation,linkedObservationId,linkedObservationId);
+  db.prepare('INSERT INTO access_log(action,entity,entity_id,fields,detail,created_at) VALUES(?,?,?,?,?,?)')
+    .run(previous ? 'central-record-update' : 'central-record-create','indicator_observations',String(linkedObservationId),'indicatorCode,periodKey,valueNumber,valueText,valueState','form_record=' + recordId,now);
+  return { observationId:linkedObservationId,action:previous ? 'updated' : 'created' };
+}
 function recordSnapshot(db,recordId) {
   const record = db.prepare('SELECT * FROM form_records WHERE form_record_id=?').get(recordId);
   const values = db.prepare(`SELECT ff.field_code,rfv.item_ordinal,rfv.value_text,rfv.value_boolean,rfv.value_date,rfv.value_reference_id,rfv.value_entity_id,rfv.value_state
@@ -312,17 +453,29 @@ function getRecord(db,recordId) {
     WHERE r.form_record_id=?`).get(id);
   if (!record) throw new Error('السجل غير موجود.');
   const values = {};
-  const stored = db.prepare(`SELECT ff.field_code,v.value_text,v.value_boolean,v.value_date,v.value_reference_id,v.value_entity_id,v.value_state
-    FROM record_field_values v JOIN form_fields ff USING(form_field_id) WHERE v.form_record_id=?`).all(id);
+  const stored = db.prepare(`SELECT ff.field_code,v.record_field_value_id,v.value_text,v.value_boolean,v.value_date,v.value_reference_id,v.value_entity_id,v.value_state,
+    provenance.source_id,provenance.source_locator,provenance.provenance_type,provenance.original_value_text,provenance.normalized_value_text,
+    provenance.entered_by,provenance.created_at AS provenance_at,source.source_type,source.document_title,source.file_name,source.organization
+    FROM record_field_values v JOIN form_fields ff USING(form_field_id)
+    LEFT JOIN value_provenance provenance ON provenance.provenance_id=(SELECT MAX(latest.provenance_id) FROM value_provenance latest WHERE latest.record_field_value_id=v.record_field_value_id)
+    LEFT JOIN data_sources source ON source.id=provenance.source_id WHERE v.form_record_id=?`).all(id);
   for (const row of stored) {
     const value = row.value_boolean == null ? row.value_text ?? row.value_date ?? row.value_reference_id ?? row.value_entity_id : String(row.value_boolean);
-    values[row.field_code] = { value: value == null ? '' : String(value),state:row.value_state };
+    values[row.field_code] = { value:value == null ? '' : String(value),state:row.value_state,sourceId:row.source_id,sourceLocator:row.source_locator,
+      provenanceType:row.provenance_type,originalValue:row.original_value_text,normalizedValue:row.normalized_value_text,enteredBy:row.entered_by,
+      provenanceAt:row.provenance_at,sourceType:row.source_type,documentTitle:row.document_title,fileName:row.file_name,organization:row.organization };
   }
-  const observations = db.prepare(`SELECT ff.field_code,o.value_integer,o.value_real,o.value_text,o.value_state FROM observations o
-    JOIN form_fields ff USING(form_field_id) WHERE o.form_record_id=?`).all(id);
+  const observations = db.prepare(`SELECT ff.field_code,o.observation_id,o.value_integer,o.value_real,o.value_text,o.value_state,
+    provenance.source_id,provenance.source_locator,provenance.provenance_type,provenance.original_value_text,provenance.normalized_value_text,
+    provenance.entered_by,provenance.created_at AS provenance_at,source.source_type,source.document_title,source.file_name,source.organization
+    FROM observations o JOIN form_fields ff USING(form_field_id)
+    LEFT JOIN value_provenance provenance ON provenance.provenance_id=(SELECT MAX(latest.provenance_id) FROM value_provenance latest WHERE latest.observation_id=o.observation_id)
+    LEFT JOIN data_sources source ON source.id=provenance.source_id WHERE o.form_record_id=?`).all(id);
   for (const row of observations) {
     const value = row.value_integer ?? row.value_real ?? row.value_text;
-    values[row.field_code] = { value:value == null ? '' : String(value),state:row.value_state };
+    values[row.field_code] = { value:value == null ? '' : String(value),state:row.value_state,sourceId:row.source_id,sourceLocator:row.source_locator,
+      provenanceType:row.provenance_type,originalValue:row.original_value_text,normalizedValue:row.normalized_value_text,enteredBy:row.entered_by,
+      provenanceAt:row.provenance_at,sourceType:row.source_type,documentTitle:row.document_title,fileName:row.file_name,organization:row.organization };
   }
   return { record,values };
 }
@@ -374,7 +527,9 @@ function decideRecord(db,recordId,request = {}) {
     const next = decisions[request.decision];
     const actor = typeof request.actor === 'string' ? request.actor.slice(0,120) : null;
     const before = recordSnapshot(db,id);
-    const legacySync = request.decision === 'approve' ? syncApprovedDirectorate(db,id,actor,now) : null;
+    const legacySync = request.decision === 'approve'
+      ? (syncApprovedDirectorate(db,id,actor,now) ?? syncApprovedProject(db,id,actor,now) ?? syncApprovedIndicatorObservation(db,id,actor,now))
+      : null;
     const revision = previous.revision_number + 1;
     db.prepare(`UPDATE form_records SET record_status=?,revision_number=?,submitted_by=CASE WHEN ?='pending_review' THEN ? ELSE submitted_by END,
       reviewed_by=CASE WHEN ? IN ('approved','rejected','draft') THEN ? ELSE reviewed_by END,

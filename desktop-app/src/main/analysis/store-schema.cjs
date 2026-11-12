@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const canonicalData = require('./canonical-data.cjs');
 const dataArchitecture = require('../database/architecture.cjs');
+const manualEntryCatalog = require('../database/manual-entry-catalog.cjs');
 const unifiedDevelopmentModel = require('../database/unified-development-model.cjs');
 const unifiedDevelopmentModelV2 = require('../database/unified-development-model-v2.cjs');
 const documentService = require('../documents/document-service.cjs');
@@ -410,7 +411,10 @@ function needsMigration(database) {
 }
 
 function migrate(database, options = {}) {
-  if (!needsMigration(database)) return { version: MIGRATION_VERSION, alreadyApplied: true };
+  if (!needsMigration(database)) {
+    manualEntryCatalog.migrate(database);
+    return { version: MIGRATION_VERSION, alreadyApplied: true };
+  }
   const sourceChecksum = checksum();
   const startedAt = Date.now();
   const now = new Date().toISOString();
@@ -452,8 +456,9 @@ function migrate(database, options = {}) {
       'ترحيل ذري موحد؛ أبقى الجداول القديمة والبيانات دون حذف.');
     return { version: MIGRATION_VERSION, alreadyApplied: false };
   });
+  let result;
   try {
-    return apply.exclusive();
+    result = apply.exclusive();
   } catch (error) {
     if (!preApplyComplete) throw error;
     database.exec(`CREATE TABLE IF NOT EXISTS store_schema_migrations(
@@ -470,6 +475,8 @@ function migrate(database, options = {}) {
       String(error.message).slice(0,4000));
     throw error;
   }
+  manualEntryCatalog.migrate(database);
+  return result;
 }
 
 module.exports = {

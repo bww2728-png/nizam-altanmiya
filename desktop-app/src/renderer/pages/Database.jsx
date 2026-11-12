@@ -6,6 +6,7 @@ import {
   Badge, Card, Empty, ErrorBanner, Loading, Modal, Switch,
 } from '../components/ui.jsx';
 import { DatabaseReportFilters } from '../components/ReportFilters.jsx';
+import DataEntry from './DataEntry.jsx';
 import { cx, errText, fmtByType, fmtDateTime, fmtNumber } from '../lib/format.js';
 
 const DEFAULT_KEYS = [
@@ -14,7 +15,7 @@ const DEFAULT_KEYS = [
 ];
 const PAGE_SIZE = 100;
 
-export default function Database({ catalogue, accessProfile, notify, refreshKey, onOpenCard }) {
+export default function Database({ catalogue, accessProfile, notify, refreshKey, onOpenCard, onDataChanged }) {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [draftFilters, setDraftFilters] = useState({ search: '', governorates: [], logic: 'and', criteria: [] });
@@ -27,6 +28,7 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
   const [error, setError] = useState('');
   const [pendingDelete, setPendingDelete] = useState(null);
   const [exporting, setExporting] = useState(false);
+  const [viewMode, setViewMode] = useState('database');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -58,6 +60,15 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
     && (accessProfile !== 'shared' || field.sensitivity === 'public')), [catalogue, accessProfile]);
   const safeReportColumns = reportColumns.filter((key) => reportColumnOptions.some((field) => field.key === key));
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  if (viewMode === 'entry') return (
+    <div className="stack">
+      <Card title="قاعدة البيانات الشاملة" subtitle="الإدخال اليدوي وإدارة السجلات يستخدمان القاموس نفسه ومحرك النماذج نفسه.">
+        <button type="button" className="btn small" onClick={() => setViewMode('database')}>العودة إلى استعراض قاعدة البيانات</button>
+      </Card>
+      <DataEntry notify={notify} refreshKey={refreshKey} onDataChanged={onDataChanged} onShowDatabase={() => setViewMode('database')} />
+    </div>
+  );
 
   async function remove(id) {
     try {
@@ -103,6 +114,10 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
         subtitle="فلاتر البيانات الجغرافية والسكانية والقطاعية والاقتصادية والجودة والمصدر تُنفّذ محليًا داخل قاعدة البيانات."
         icon={DatabaseZap}
       >
+        <div className="row between">
+          <span className="muted">استعراض السجلات والتقارير</span>
+          {accessProfile === 'owner' && <button type="button" className="btn primary small" onClick={() => setViewMode('entry')}>إدخال وإدارة السجلات</button>}
+        </div>
         <DatabaseReportFilters
           catalogue={catalogue}
           accessProfile={accessProfile}
