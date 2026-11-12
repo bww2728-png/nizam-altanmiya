@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('localApp', {
   backups: () => ipcRenderer.invoke('db:backups'),
 
   // Database-driven forms and the shared record/review write path
+  dataEntryCatalog: () => ipcRenderer.invoke('data:entry-catalog'),
   dataForms: () => ipcRenderer.invoke('data:forms'),
   dataFormDefinition: (formVersionId) => ipcRenderer.invoke('data:form-definition', formVersionId),
   dataRecords: (request) => ipcRenderer.invoke('data:records:list', request),
@@ -47,11 +48,11 @@ contextBridge.exposeInMainWorld('localApp', {
   extractDocument: (documentId) => ipcRenderer.invoke('documents:extract', documentId),
   documentFieldCandidates: (documentId) => ipcRenderer.invoke('documents:field-candidates', documentId),
   reviewDocumentFieldCandidate: (request) => ipcRenderer.invoke('documents:field-candidate:review', request),
+  promoteDocumentFieldCandidates: (request) => ipcRenderer.invoke('documents:field-candidates:promote', request),
   searchDocuments: (request) => ipcRenderer.invoke('documents:search-local', request),
   indexDocumentInRagflow: (documentId) => ipcRenderer.invoke('documents:index-ragflow', documentId),
   syncDocumentIndexStatus: (documentId) => ipcRenderer.invoke('documents:sync-index-status', documentId),
   ragflowStatus: () => ipcRenderer.invoke('ragflow:status'),
-  saveRagflowConfig: (request) => ipcRenderer.invoke('ragflow:save-config', request),
   searchKnowledge: (request) => ipcRenderer.invoke('ragflow:search', request),
   resolveDataQualityIssue: (request) => ipcRenderer.invoke('quality:resolve', request),
   saveCanonicalProject: (request) => ipcRenderer.invoke('projects:save', request),

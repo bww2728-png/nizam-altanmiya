@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Check, ClipboardList, RefreshCw, Search, Send, ShieldAlert } from 'lucide-react';
 import { Card, Field, Loading, SelectInput, TextInput } from '../components/ui.jsx';
 import { errText } from '../lib/format.js';
+import { FIELD_GROUPS, DECISION_KEY } from '../lib/fields.js';
 
 const STATUS_LABELS = {
   draft: 'مسودة', pending_review: 'قيد المراجعة', approved: 'معتمد', rejected: 'مرفوض', superseded: 'مستبدل', archived: 'مؤرشف',
@@ -11,7 +12,11 @@ const VALUE_STATE_LABELS = {
   not_applicable: 'لا ينطبق', not_collected: 'لم يُجمع', not_verified: 'غير متحقق منه',
 };
 
-export default function DataEntry({ notify, refreshKey = 0 }) {
+export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onShowDatabase }) {
+  const [catalog, setCatalog] = useState(null);
+  const [selectedDomainCode, setSelectedDomainCode] = useState('');
+  const [selectedGroupCode, setSelectedGroupCode] = useState('');
+  const [catalogSearch, setCatalogSearch] = useState('');
   const [forms, setForms] = useState([]);
   const [formVersionId, setFormVersionId] = useState('');
   const [definition, setDefinition] = useState(null);
@@ -26,6 +31,7 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
   const [recordTotal, setRecordTotal] = useState(0);
   const [values, setValues] = useState({});
   const [valueStates, setValueStates] = useState({});
+  const [valueSources, setValueSources] = useState({});
   const [recordLabel, setRecordLabel] = useState('');
   const [notes, setNotes] = useState('');
   const [geoUnitId, setGeoUnitId] = useState('');
@@ -34,22 +40,43 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editingRecord, setEditingRecord] = useState(null);
+  const [viewingRecord, setViewingRecord] = useState(null);
+  const [viewingDefinition, setViewingDefinition] = useState(null);
   const [changeReason, setChangeReason] = useState('');
   const [reviewReasons, setReviewReasons] = useState({});
 
-  const activeForms = useMemo(() => forms.filter((form) => form.is_active && form.form_version_id && form.version_status === 'published'), [forms]);
+  const domains = catalog?.domains ?? [];
+  const selectedDomain = domains.find((domain) => domain.code === selectedDomainCode) ?? domains[0] ?? null;
+  const selectedGroup = selectedDomain?.groups.find((group) => group.code === selectedGroupCode) ?? selectedDomain?.groups[0] ?? null;
+  const matchingDomains = domains.filter((domain) => {
+    const query = catalogSearch.trim().toLocaleLowerCase();
+    return !query || domain.name.toLocaleLowerCase().includes(query)
+      || domain.groups.some((group) => group.name.toLocaleLowerCase().includes(query));
+  });
+  const selectCatalogGroup = (domain, group) => {
+    if (editingRecord) return;
+    setSelectedDomainCode(domain.code);
+    setSelectedGroupCode(group.code);
+    setFormVersionId(String(group.forms.find((form) => form.versionId)?.versionId ?? ''));
+  };
 
   const loadForms = useCallback(async () => {
     setLoading(true);
     try {
-      const [formRows, geoResult, periodResult] = await Promise.all([
-        window.localApp.dataForms(), window.localApp.dataGeography(''), window.localApp.dataPeriods(),
+      const [catalogResult, formRows, geoResult, periodResult] = await Promise.all([
+        window.localApp.dataEntryCatalog(), window.localApp.dataForms(), window.localApp.dataGeography(''), window.localApp.dataPeriods(),
       ]);
+      setCatalog(catalogResult);
       setForms(formRows ?? []);
       setGeography(geoResult?.rows ?? []);
       setPeriods(periodResult?.rows ?? []);
+      const firstPublishedGroup = catalogResult?.domains.flatMap((domain) => domain.groups.map((group) => ({ domain, group })))
+        .find(({ group }) => group.forms.some((form) => form.versionId));
+      setSelectedDomainCode((current) => current || firstPublishedGroup?.domain.code || catalogResult?.domains[0]?.code || '');
+      setSelectedGroupCode((current) => current || firstPublishedGroup?.group.code || '');
       const active = (formRows ?? []).find((form) => form.is_active && form.form_version_id && form.version_status === 'published');
-      setFormVersionId((current) => current || String(active?.form_version_id ?? ''));
+      const initialFormVersionId = firstPublishedGroup?.group.forms.find((form) => form.versionId)?.versionId ?? active?.form_version_id ?? '';
+      setFormVersionId((current) => current || String(initialFormVersionId));
     } catch (cause) {
       notify({ tone: 'bad', message: errText(cause) || 'تعذر تحميل تعريفات الإدخال.' });
     } finally {
@@ -86,6 +113,7 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
         setDefinition(result);
         setValues(record ? Object.fromEntries(Object.entries(record.values).map(([code,item]) => [code,item.value])) : {});
         setValueStates(record ? Object.fromEntries(Object.entries(record.values).map(([code,item]) => [code,item.state])) : {});
+        setValueSources(record ? Object.fromEntries(Object.entries(record.values).filter(([,item]) => item.sourceLocator).map(([code,item]) => [code,item.sourceLocator])) : {});
         setRecordLabel(record?.record?.record_label ?? '');
         setNotes(record?.record?.notes ?? '');
         setGeoUnitId(record?.record?.geo_unit_id == null ? '' : String(record.record.geo_unit_id));
@@ -100,6 +128,12 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
   const beginEdit = async (formRecordId) => {
     try {
       const record = await window.localApp.dataRecord(formRecordId);
+      const location = domains.map((domain) => ({ domain, group: domain.groups.find((group) => group.forms.some((form) => Number(form.versionId) === Number(record.record.form_version_id))) }))
+        .find((item) => item.group);
+      if (location) {
+        setSelectedDomainCode(location.domain.code);
+        setSelectedGroupCode(location.group.code);
+      }
       setEditingRecord(record);
       setFormVersionId(String(record.record.form_version_id));
     } catch (cause) {
@@ -107,10 +141,22 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
     }
   };
 
+  const openRecord = async (formRecordId) => {
+    try {
+      const record = await window.localApp.dataRecord(formRecordId);
+      const form = await window.localApp.dataFormDefinition(Number(record.record.form_version_id));
+      setViewingRecord(record);
+      setViewingDefinition(form);
+    } catch (cause) {
+      notify({ tone: 'bad', message: errText(cause) || 'تعذر تحميل تفاصيل السجل ومصادر قيمه.' });
+    }
+  };
+
   const cancelEdit = () => {
     setEditingRecord(null);
     setValues({});
     setValueStates({});
+    setValueSources({});
     setRecordLabel('');
     setNotes('');
     setGeoUnitId('');
@@ -143,12 +189,13 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
       const saved = await window.localApp.saveDataRecord({
         formVersionId: Number(formVersionId), formRecordId: editingRecord?.record?.form_record_id,
         geoUnitId: geoUnitId || null, periodId: periodId || null, periodYear: periodYear.trim() || null,
-        recordLabel: recordLabel.trim() || null, notes: notes.trim() || null, values: payload, changeReason: changeReason.trim() || null,
+        recordLabel: recordLabel.trim() || null, notes: notes.trim() || null, values: payload, valueSources, changeReason: changeReason.trim() || null,
       });
       notify({ tone: 'ok', message: `${editingRecord ? 'حُدّث' : 'حُفظ'} السجل ${saved.formRecordId} كمسودة، مع توثيق مصدر الإدخال.` });
       setEditingRecord(null);
       setValues({});
       setValueStates({});
+      setValueSources({});
       setRecordLabel('');
       setNotes('');
       setGeoUnitId('');
@@ -156,6 +203,7 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
       setPeriodYear('');
       setChangeReason('');
       await loadRecords();
+      onDataChanged?.();
     } catch (cause) {
       notify({ tone: 'bad', message: errText(cause) || 'تعذر حفظ المسودة.' });
     } finally {
@@ -174,28 +222,76 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
       notify({ tone: 'ok', message: decision === 'submit' ? 'أُرسل السجل للمراجعة.' : decision === 'approve' ? 'اعتُمد السجل.' : decision === 'reopen' ? 'أُعيد فتح السجل للتصحيح.' : 'أُعيد السجل للتصحيح.' });
       setReviewReasons((current) => { const next = { ...current }; delete next[formRecordId]; return next; });
       await loadRecords();
+      onDataChanged?.();
     } catch (cause) {
       notify({ tone: 'bad', message: errText(cause) || 'تعذر تنفيذ قرار المراجعة.' });
     }
   };
 
-  const formOptions = forms.map((form) => ({
-    value: String(form.form_version_id ?? ''),
-    label: `${form.form_code} — ${form.name_ar}${form.is_active ? '' : ' (غير معرّف)'}`,
-    disabled: !form.is_active || !form.form_version_id || form.version_status !== 'published',
-  }));
+  const formOptions = (selectedGroup?.forms ?? []).map((catalogForm) => {
+    const form = forms.find((item) => Number(item.form_version_id) === Number(catalogForm.versionId));
+    return form ? {
+      value: String(form.form_version_id),
+      label: `${form.name_ar} — إصدار ${form.version_number}`,
+      disabled: !form.is_active || form.version_status !== 'published',
+    } : null;
+  }).filter(Boolean);
+  const hasGroupForm = formOptions.length > 0;
   const geoOptions = [{ value: '', label: '— دون ربط جغرافي —' }, ...geography.map((unit) => ({
     value: String(unit.geo_unit_id), label: `${unit.type_name_ar} — ${unit.name_ar}${unit.parent_name_ar ? ` / ${unit.parent_name_ar}` : ''}`,
   }))];
   const periodOptions = [{ value: '', label: '— فترة غير محددة —' }, ...periods.map((period) => ({ value: String(period.period_id), label: period.label_ar }))];
+  const entryFields = (definition?.fields ?? []).filter((field) => field.field_code.split('.').at(-1) !== DECISION_KEY);
+  const groupedFields = FIELD_GROUPS.map((group) => ({
+    ...group,
+    fields: entryFields.filter((field) => group.fields.includes(field.field_code.split('.').at(-1))),
+  })).filter((group) => group.fields.length);
+  const groupedFieldCodes = new Set(groupedFields.flatMap((group) => group.fields.map((field) => field.field_code)));
+  const additionalFields = entryFields.filter((field) => !groupedFieldCodes.has(field.field_code));
+  if (additionalFields.length) groupedFields.push({ id: 'other', title: 'حقول إضافية في النموذج', hint: '', fields: additionalFields });
+  const hasKnownMeasurements = entryFields.some((field) => field.storage_class === 'measurement'
+    && ['known','zero'].includes(valueStates[field.field_code] ?? 'known')
+    && ((values[field.field_code] !== '' && values[field.field_code] !== null && values[field.field_code] !== undefined)
+      || valueStates[field.field_code] === 'zero'));
 
   if (loading && forms.length === 0) return <Card><Loading label="جارٍ تحميل كتالوج البيانات..." /></Card>;
 
   return (
     <div className="stack">
-      <Card title="الإدخال اليدوي المركزي" subtitle="تعريفات النماذج والحقول تُقرأ من قاعدة البيانات؛ الحفظ ينشئ مسودة ومصدراً وسجل تغيير لكل تعديل.">
-        {activeForms.length === 0 ? (
-          <div className="notice warn"><ShieldAlert size={17} /><span>لا يوجد نموذج منشور قابل للإدخال. النموذج المتاح حالياً للمديريات يستلزم تعريفاً موثوقاً قبل نشره؛ لن نُفعّل الحقول الوصفية غير المحسومة تلقائياً.</span></div>
+      <Card title="مركز إدارة وإدخال البيانات التنموية الموحد" subtitle="ابدأ باختيار مجال ومجموعة؛ لا تُفتح إلا النماذج المنشورة التي لها تعريف موثق في النظام.">
+        <div className="row between">
+          <span className="muted">إدخال ومراجعة السجلات وفق قاموس النماذج المركزي.</span>
+          {onShowDatabase && <button type="button" className="btn small" onClick={onShowDatabase}>عرض قاعدة البيانات الشاملة</button>}
+        </div>
+        <div className="stack tight">
+          <div className="quote"><strong>نطاق الكتالوج:</strong> يعرض {domains.length} مجالاً من المواصفة. أسماء المجموعات تنظيمية أولية؛ الأنواع والوحدات والأبعاد وقواعد التحقق والمصادر لا تُعامل كتعريف رسمي ما لم تُنشر في نموذج معتمد.</div>
+          <Field label="ابحث عن مجال أو مجموعة">
+            <TextInput value={catalogSearch} onChange={setCatalogSearch} placeholder="مثال: السكان، المدارس، الإيرادات" />
+          </Field>
+          <div className="row" role="group" aria-label="المجالات التنموية">
+            {matchingDomains.map((domain) => <button key={domain.code} type="button" className={`btn small ${selectedDomain?.code === domain.code ? 'primary' : 'ghost'}`} aria-pressed={selectedDomain?.code === domain.code} onClick={() => {
+              setSelectedDomainCode(domain.code);
+              const nextGroup = domain.groups.find((group) => group.forms.some((form) => form.versionId)) ?? domain.groups[0];
+              setSelectedGroupCode(nextGroup?.code ?? '');
+              setFormVersionId(String(nextGroup?.forms.find((form) => form.versionId)?.versionId ?? ''));
+            }}>{domain.name}<span className="dim"> · {domain.groups.length}</span></button>)}
+          </div>
+          {selectedDomain && <section className="stack tight" aria-label="المجموعات الفرعية">
+            <strong>{selectedDomain.name}</strong>
+            <div className="row">
+              {selectedDomain.groups.map((group) => <button key={group.code} type="button" className={`btn small ${selectedGroup?.code === group.code ? 'primary' : 'ghost'}`} aria-pressed={selectedGroup?.code === group.code} disabled={Boolean(editingRecord)} onClick={() => selectCatalogGroup(selectedDomain, group)}>
+                {group.name}<span className="dim"> · {group.forms.length ? 'نموذج جزئي' : 'قيد التعريف'}</span>
+              </button>)}
+            </div>
+          </section>}
+          {selectedGroup && <div className="quote">
+            <strong>{selectedGroup.forms.length ? 'التغطية المنشورة جزئية:' : 'مجموعة بانتظار التعريف:'}</strong>{' '}{selectedGroup.forms.length ? `توجد ${selectedGroup.forms.length} نماذج منشورة مرتبطة بهذه المجموعة؛ نطاقها لا يغطي عناصر المجال كاملة.` : 'لا يوجد نموذج منشور لهذه المجموعة؛ لا يسمح النظام بإدخال قيم قبل حسم التعريف والوحدة والأبعاد والمصدر.'}
+          </div>}
+        </div>
+      </Card>
+      <Card title={selectedGroup ? `إدخال البيانات — ${selectedGroup.name}` : 'الإدخال اليدوي'} subtitle="تعريفات النماذج والحقول تُقرأ من قاعدة البيانات؛ الحفظ ينشئ مسودة ومصدراً وسجل تغيير لكل تعديل.">
+        {!hasGroupForm ? (
+          <div className="quote"><ShieldAlert size={17} /> لا يوجد نموذج منشور قابل للإدخال في المجموعة المختارة. اختر مجموعة أخرى، أو انتظر اعتماد تعريف موثوق للنموذج.</div>
         ) : (
           <form className="stack" onSubmit={submit}>
             <div className="form-grid">
@@ -205,31 +301,28 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
               <Field label="الوحدة الجغرافية">
                 <SelectInput value={geoUnitId} onChange={setGeoUnitId} options={geoOptions} />
               </Field>
-              <Field label="الفترة المرجعية">
-                <SelectInput value={periodId} onChange={(value) => { setPeriodId(value); setPeriodYear(''); }} options={periodOptions} />
+              <Field label="الفترة المرجعية" required={hasKnownMeasurements}>
+                <SelectInput required={hasKnownMeasurements && !periodYear} value={periodId} onChange={(value) => { setPeriodId(value); setPeriodYear(''); }} options={periodOptions} />
               </Field>
-              <Field label="أو سنة ميلادية جديدة" hint="تُضاف كفترة مرجعية للسنة التي أدخلتها.">
-                <TextInput type="number" min="1900" max="2200" step="1" value={periodYear} onChange={(value) => { setPeriodYear(value); setPeriodId(''); }} placeholder="2025" />
+              <Field label="أو سنة ميلادية جديدة" required={hasKnownMeasurements} hint="تُضاف كفترة مرجعية للسنة التي أدخلتها.">
+                <TextInput type="number" min="1900" max="2200" step="1" required={hasKnownMeasurements && !periodId} value={periodYear} onChange={(value) => { setPeriodYear(value); setPeriodId(''); }} placeholder="2025" />
               </Field>
               <Field label="عنوان السجل">
                 <TextInput value={recordLabel} onChange={setRecordLabel} />
               </Field>
             </div>
-            {definition?.sections?.map((section) => {
-              const sectionFields = definition.fields.filter((field) => field.section_id === section.section_id);
-              if (!sectionFields.length) return null;
-              return (
-                <section className="card data-entry-section" key={section.section_id}>
-                  <header className="card-head"><div className="head-text"><h2>{section.name_ar}</h2></div></header>
-                  <div className="card-body"><div className="form-grid">
-                    {sectionFields.map((field) => <DefinitionField key={field.form_field_id} field={field} value={values[field.field_code] ?? ''} state={valueStates[field.field_code] ?? 'known'} editingRecord={Boolean(editingRecord)} onChange={(value) => setValues((current) => ({ ...current, [field.field_code]: value }))} onStateChange={(state) => {
-                      setValueStates((current) => ({ ...current, [field.field_code]: state }));
-                      if (state === 'zero') setValues((current) => ({ ...current, [field.field_code]: '0' }));
-                    }} />)}
-                  </div></div>
-                </section>
-              );
-            })}
+            <div className="quote">يشمل هذا النموذج {fmtNumber(entryFields.length, 0)} حقلًا موزعًا على مجموعات موضوعية. تُدخل القيم المعروفة يدويًا، وتُترك الحقول غير المتاحة أو غير المتحقق منها بحالتها المناسبة.</div>
+            {groupedFields.map((group) => (
+              <section className="card data-entry-section" key={group.id}>
+                <header className="card-head"><div className="head-text"><h2>{group.title}</h2>{group.hint && <p>{group.hint}</p>}</div></header>
+                <div className="card-body"><div className="form-grid">
+                  {group.fields.map((field) => <DefinitionField key={field.form_field_id} field={field} value={values[field.field_code] ?? ''} state={valueStates[field.field_code] ?? 'known'} sourceLocator={valueSources[field.field_code] ?? ''} editingRecord={Boolean(editingRecord)} onChange={(value) => setValues((current) => ({ ...current, [field.field_code]: value }))} onSourceChange={(sourceLocator) => setValueSources((current) => ({ ...current,[field.field_code]:sourceLocator }))} onStateChange={(state) => {
+                    setValueStates((current) => ({ ...current, [field.field_code]: state }));
+                    if (state === 'zero') setValues((current) => ({ ...current, [field.field_code]: '0' }));
+                  }} />)}
+                </div></div>
+              </section>
+            ))}
             <Field label="ملاحظات السجل"><textarea className="textarea" value={notes} onChange={(event) => setNotes(event.target.value)} /></Field>
             {(editingRecord || Object.values(valueStates).includes('clear')) && <Field label="سبب التعديل أو الحذف الصريح" required><TextInput required value={changeReason} onChange={setChangeReason} placeholder="اذكر سبب التغيير أو حذف القيمة" /></Field>}
             <div className="btn-row"><button type="submit" className="btn primary" disabled={saving}><Check size={15} />{saving ? 'جارٍ الحفظ...' : editingRecord ? 'حفظ التعديلات' : 'حفظ كمسودة'}</button>
@@ -259,6 +352,7 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
               <td>{STATUS_LABELS[record.record_status] ?? record.record_status}</td><td className="num">{record.value_count}</td>
               <td><div className="cell-actions">
                 {['draft','rejected'].includes(record.record_status) && <button className="btn small" onClick={() => beginEdit(record.form_record_id)}>تعديل المسودة</button>}
+                <button className="btn small" onClick={() => openRecord(record.form_record_id)}>تفاصيل ومصادر</button>
                 {record.record_status === 'draft' && <button className="btn small" onClick={() => review(record.form_record_id,'submit')}><Send size={13} />إرسال</button>}
                 {['pending_review','approved'].includes(record.record_status) && <TextInput value={reviewReasons[record.form_record_id] ?? ''} onChange={(value) => setReviewReasons((current) => ({ ...current,[record.form_record_id]:value }))} placeholder={record.record_status === 'approved' ? 'سبب إعادة الفتح' : 'سبب الإعادة'} />}
                 {record.record_status === 'pending_review' && <><button className="btn small primary" onClick={() => review(record.form_record_id,'approve')}><Check size={13} />اعتماد</button><button className="btn small" onClick={() => review(record.form_record_id,'return')}>إعادة</button></>}
@@ -267,6 +361,22 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
             </tr>
           ))}</tbody>
         </table></div>
+        {viewingRecord && viewingDefinition && <Card title={`تفاصيل السجل — ${viewingRecord.record.record_label || viewingRecord.record.form_record_id}`} subtitle="القيمة المسجلة وحالتها، والقيمة الخام والمعيارية، ومصدرها وموضعها، ومن أدخلها وتاريخ الإدخال.">
+          <div className="row between"><span className="muted">{STATUS_LABELS[viewingRecord.record.record_status] ?? viewingRecord.record.record_status} · {viewingRecord.record.geo_name || 'دون موقع'} · {viewingRecord.record.period_label || 'دون فترة'}</span><button type="button" className="btn small" onClick={() => { setViewingRecord(null); setViewingDefinition(null); }}>إغلاق التفاصيل</button></div>
+          <div className="table-wrap"><table className="data"><thead><tr><th>الحقل</th><th>القيمة / الحالة</th><th>القيمة الخام</th><th>القيمة المعيارية</th><th>المصدر وموضعه</th><th>الإدخال والتوقيت</th></tr></thead>
+            <tbody>{viewingDefinition.fields.map((field) => {
+              const item = viewingRecord.values[field.field_code];
+              if (!item) return <tr key={field.form_field_id}><th>{field.label_ar}</th><td colSpan="5">غير مدخل</td></tr>;
+              const sourceParts = [item.documentTitle,item.fileName,item.organization,item.sourceLocator].filter(Boolean);
+              return <tr key={field.form_field_id}><th>{field.label_ar}</th>
+                <td>{['known','zero'].includes(item.state) ? (item.value === '' ? '—' : item.value) : VALUE_STATE_LABELS[item.state] ?? item.state}</td>
+                <td>{item.originalValue ?? '—'}</td><td>{item.normalizedValue ?? '—'}</td>
+                <td>{sourceParts.length ? sourceParts.join(' · ') : 'مصدر إدخال عام على مستوى السجل'}</td>
+                <td>{[item.enteredBy,item.provenanceAt].filter(Boolean).join(' · ') || '—'}</td>
+              </tr>;
+            })}</tbody>
+          </table></div>
+        </Card>}
         {records.length === 0 && <div className="empty-state"><ClipboardList size={22} /><strong>لا توجد سجلات ضمن المرشحات</strong><span>جرّب تغيير النموذج أو الحالة أو عبارة البحث.</span></div>}
         <div className="row between" style={{ marginTop: 12 }}><span className="muted">{recordTotal} سجلًا · صفحة {Math.floor(recordOffset / 30) + 1} من {Math.max(1,Math.ceil(recordTotal / 30))}</span><div className="btn-row"><button type="button" className="btn ghost small" onClick={() => setRecordOffset(Math.max(0,recordOffset-30))} disabled={recordOffset === 0}>السابق</button><button type="button" className="btn ghost small" onClick={() => setRecordOffset(recordOffset+30)} disabled={recordOffset+records.length>=recordTotal}>التالي</button><button type="button" className="btn ghost small" onClick={loadRecords}><RefreshCw size={13} /> تحديث</button></div></div>
       </Card>
@@ -274,7 +384,7 @@ export default function DataEntry({ notify, refreshKey = 0 }) {
   );
 }
 
-function DefinitionField({ field, value, state, editingRecord, onChange, onStateChange }) {
+function DefinitionField({ field, value, state, sourceLocator, editingRecord, onChange, onStateChange, onSourceChange }) {
   const type = field.data_type_override ?? field.data_type ?? 'text';
   const disabled = !field.is_importable || field.is_derived || field.storage_class === 'ignored_derived';
   const numeric = ['integer','decimal'].includes(type) || field.storage_class === 'measurement';
@@ -301,6 +411,7 @@ function DefinitionField({ field, value, state, editingRecord, onChange, onState
     <div className="stack tight">
       <SelectInput disabled={disabled} value={state} onChange={onStateChange} options={stateOptions} />
       {input}
+      <TextInput disabled={disabled} value={sourceLocator} onChange={onSourceChange} maxLength={1000} placeholder="موضع المصدر أو طريقة الجمع: الصفحة، ورقة/خلية Excel، أو الجهة" />
     </div>
   </Field>;
 }

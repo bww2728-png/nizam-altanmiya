@@ -32,17 +32,30 @@ function completeValues(districtName, overrides = {}) {
 
 function addDynamicField(database, key, label, sensitivity = 'public') {
   const now = new Date().toISOString();
-  return Number(database.prepare(`INSERT INTO data_field_definitions
+  database.prepare(`INSERT INTO data_field_definitions
     (entity_type,field_key,label_ar,data_type,sensitivity,field_class,temporal_behavior,validation_json,description,created_at,updated_at)
     VALUES('directorate',?,?,'number',?,'temporal_measure','periodic','{}','حقل تجريبي للاختبار',?,?)`)
-    .run(key,label,sensitivity,now,now).lastInsertRowid);
+    .run(key,label,sensitivity,now,now);
+  const formVersionId = database.prepare("SELECT version.form_version_id FROM form_versions version JOIN form_definitions form USING(form_id) WHERE form.form_code='legacy_directorate_v1' ORDER BY version.version_number DESC LIMIT 1").get().form_version_id;
+  const sectionId = database.prepare("SELECT section_id FROM form_sections WHERE form_version_id=? AND section_type='record' ORDER BY sort_order LIMIT 1").get(formVersionId).section_id;
+  const fieldCode = `directorate.${key}`;
+  database.prepare(`INSERT INTO field_definitions(field_code,canonical_name_ar,description,semantic_type,data_type,is_active,created_at,updated_at)
+    VALUES(?,?,'حقل تجريبي للاختبار','measurement','decimal',1,?,?)`).run(fieldCode,label,now,now);
+  const fieldDefinitionId = database.prepare('SELECT field_definition_id FROM field_definitions WHERE field_code=?').get(fieldCode).field_definition_id;
+  database.prepare(`INSERT INTO form_fields(form_version_id,section_id,field_definition_id,field_code,label_ar,data_type_override,storage_class,axis_role,is_required,allow_null,is_importable,sort_order,created_at)
+    VALUES(?,?,?,?,?,'decimal','measurement','column',0,1,1,100,?)`).run(formVersionId,sectionId,fieldDefinitionId,fieldCode,label,now);
+  return Number(database.prepare('SELECT form_field_id FROM form_fields WHERE form_version_id=? AND field_code=?').get(formVersionId,fieldCode).form_field_id);
 }
 
 function setDynamicValue(database, recordId, fieldId, periodKey, value) {
   const now = new Date().toISOString();
-  database.prepare(`INSERT INTO entity_field_values
-    (record_id,field_definition_id,period_key,value_number,value_state,created_at,updated_at)
-    VALUES(?,?,?,?, 'known',?,?)`).run(recordId,fieldId,periodKey,value,now,now);
+  const year = Number(periodKey);
+  database.prepare(`INSERT OR IGNORE INTO periods(period_code,period_type,calendar_type,label_ar,year_gregorian,created_at)
+    VALUES(?,'annual','gregorian',?,?,?)`).run(periodKey,periodKey,year,now);
+  const periodId = database.prepare("SELECT period_id FROM periods WHERE period_code=? AND calendar_type='gregorian'").get(periodKey).period_id;
+  const fieldDefinitionId = database.prepare('SELECT field_definition_id FROM form_fields WHERE form_field_id=?').get(fieldId).field_definition_id;
+  database.prepare(`INSERT INTO observations(form_record_id,form_field_id,field_definition_id,period_id,value_integer,value_state,observation_role,quality_status,created_by,created_at,updated_at)
+    VALUES(?,?,?,?,?,'known','observed','unverified','test',?,?)`).run(recordId,fieldId,fieldDefinitionId,periodId,value,now,now);
 }
 
 test('dynamic report filters use the selected period and honor missing-value semantics', () => {
@@ -51,8 +64,8 @@ test('dynamic report filters use the selected period and honor missing-value sem
     const first = persist.upsertDirectorate(database,{ governorate:'إب',districtName:'مديرية أ',values:completeValues('مديرية أ') });
     const second = persist.upsertDirectorate(database,{ governorate:'إب',districtName:'مديرية ب',values:completeValues('مديرية ب',{ population:undefined }) });
     const fieldId = addDynamicField(database,'health_centres','عدد المراكز الصحية');
-    const firstRecord = database.prepare("SELECT id FROM entity_records WHERE external_key=?").get(`legacy-directorate:${first.id}`).id;
-    const secondRecord = database.prepare("SELECT id FROM entity_records WHERE external_key=?").get(`legacy-directorate:${second.id}`).id;
+    const firstRecord = database.prepare("SELECT form_record_id FROM form_record_legacy_links WHERE legacy_entity_type='directorate' AND legacy_entity_id=?").get(first.id).form_record_id;
+    const secondRecord = database.prepare("SELECT form_record_id FROM form_record_legacy_links WHERE legacy_entity_type='directorate' AND legacy_entity_id=?").get(second.id).form_record_id;
     setDynamicValue(database,firstRecord,fieldId,'2025',12);
     setDynamicValue(database,secondRecord,fieldId,'2026',4);
 

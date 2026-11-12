@@ -18,6 +18,39 @@ const { buildDirectorateWhere } = require('./report-filters.cjs');
 
 const FIELD_BY_KEY = new Map(INPUT_FIELDS.map((field) => [field.key, field]));
 const COLUMN_ENTRIES = Object.entries(DIRECTORATE_COLUMNS);
+const CANONICAL_DIRECTORATE_CTES = `WITH ranked_directorate_records AS (
+  SELECT record.form_record_id,record.geo_unit_id,record.record_status,record.created_at,record.updated_at,link.legacy_entity_id,
+    ROW_NUMBER() OVER(PARTITION BY link.legacy_entity_id ORDER BY coalesce(record.approved_at,record.updated_at) DESC,record.form_record_id DESC) AS rank_number
+  FROM form_records record
+  JOIN form_versions version USING(form_version_id)
+  JOIN form_definitions form USING(form_id)
+  JOIN form_record_legacy_links link ON link.form_record_id=record.form_record_id AND link.legacy_entity_type='directorate'
+  WHERE form.form_code='legacy_directorate_v1' AND record.record_status='approved'
+), entity_records AS (
+  SELECT record.form_record_id AS id,'directorate' AS entity_type,record.geo_unit_id AS geographic_unit_id,
+    'legacy-directorate:' || record.legacy_entity_id AS external_key,record.record_status AS status,record.created_at,record.updated_at
+  FROM ranked_directorate_records record WHERE record.rank_number=1
+), data_field_definitions AS (
+  SELECT definition.field_definition_id AS id,'directorate' AS entity_type,substr(field.field_code,13) AS field_key,
+    CASE WHEN coalesce(field.data_type_override,definition.data_type) IN ('integer','decimal') THEN 'number'
+      WHEN coalesce(field.data_type_override,definition.data_type)='boolean' THEN 'boolean'
+      ELSE coalesce(field.data_type_override,definition.data_type) END AS data_type
+  FROM form_fields field JOIN field_definitions definition USING(field_definition_id)
+  JOIN form_versions version USING(form_version_id) JOIN form_definitions form USING(form_id)
+  WHERE form.form_code='legacy_directorate_v1'
+), entity_field_values AS (
+  SELECT value.form_record_id AS record_id,field.field_definition_id,
+    coalesce(CAST(period.year_gregorian AS TEXT),period.period_code,'') AS period_key,
+    value.value_text,NULL AS value_number,value.value_boolean,value.value_date,value.value_state
+  FROM record_field_values value JOIN form_fields field USING(form_field_id)
+  JOIN form_records record USING(form_record_id) LEFT JOIN periods period USING(period_id)
+  UNION ALL
+  SELECT observation.form_record_id AS record_id,observation.field_definition_id,
+    coalesce(CAST(period.year_gregorian AS TEXT),period.period_code,'') AS period_key,
+    observation.value_text,coalesce(observation.value_integer,observation.value_real) AS value_number,NULL AS value_boolean,NULL AS value_date,observation.value_state
+  FROM observations observation JOIN form_fields field USING(form_field_id)
+  JOIN form_records record USING(form_record_id) LEFT JOIN periods period ON period.period_id=observation.period_id
+)`;
 
 /** Provenance label for every value typed on the manual-entry screen. */
 const MANUAL_SOURCE = 'إدخال يدوي';
@@ -144,6 +177,7 @@ function upsertDirectorate(database, record, meta = {}) {
     database.prepare(`UPDATE directorates SET ${assignments.join(', ')} WHERE id = ?`).run(...updateParams, existing.id);
     saveProvenance(database, existing.id, record, rawValues, sources, meta);
     canonicalData.syncLegacyDirectorate(database, existing.id);
+    if (!meta.skipNormalizedRecordSync) require('../database/architecture.cjs').syncLegacyDirectorateRecord(database,existing.id);
     return { id: existing.id, created: false };
   }
 
@@ -156,6 +190,7 @@ function upsertDirectorate(database, record, meta = {}) {
   const id = Number(info.lastInsertRowid);
   saveProvenance(database, id, record, rawValues, sources, meta);
   canonicalData.syncLegacyDirectorate(database,id);
+  if (!meta.skipNormalizedRecordSync) require('../database/architecture.cjs').syncLegacyDirectorateRecord(database,id);
   return { id, created: true };
 }
 
@@ -249,16 +284,17 @@ function canonicalDirectorateRows(database, filter = {}, limit = 50000, options 
   const { clauses, params } = buildDirectorateWhere(filter, options);
   const sortKey = String(filter.sortKey ?? '');
   const sortField = INPUT_FIELDS.find((field) => field.key === sortKey) ?? (DECISION_FIELD.key === sortKey ? DECISION_FIELD : null);
-  const sortColumn = sortField ? DIRECTORATE_COLUMNS[sortField.key] : null;
   const periodKey = typeof filter.periodKey === 'string' ? filter.periodKey.trim().slice(0,80) : '';
   let orderBy = 'governorate.name,unit.name';
-  if (sortColumn) orderBy = `legacy.${sortColumn} ${filter.sortDirection === 'desc' ? 'DESC' : 'ASC'},governorate.name,unit.name`;
-  else if (sortKey && options.allowedKeys?.has(sortKey)) {
+  if (sortField) {
+    orderBy = `(SELECT CASE sd.data_type WHEN 'number' THEN sv.value_number WHEN 'boolean' THEN sv.value_boolean ELSE coalesce(sv.value_text,sv.value_date) END FROM entity_field_values sv JOIN data_field_definitions sd ON sd.id=sv.field_definition_id WHERE sv.record_id=er.id AND sv.period_key=? AND sd.entity_type='directorate' AND sd.field_key=? LIMIT 1) ${filter.sortDirection === 'desc' ? 'DESC' : 'ASC'},governorate.name,unit.name`;
+    params.push(periodKey,sortKey);
+  } else if (sortKey && options.allowedKeys?.has(sortKey)) {
     orderBy = `(SELECT CASE sv.data_type WHEN 'number' THEN sv.value_number WHEN 'boolean' THEN sv.value_boolean ELSE sv.value_text END FROM entity_field_values sv JOIN data_field_definitions sd ON sd.id=sv.field_definition_id WHERE sv.record_id=er.id AND sv.period_key=? AND sd.entity_type='directorate' AND sd.field_key=? LIMIT 1) ${filter.sortDirection === 'desc' ? 'DESC' : 'ASC'},governorate.name,unit.name`;
     params.push(periodKey,sortKey);
   } else if (['updated_at','created_at'].includes(sortKey)) orderBy = `er.${sortKey} ${filter.sortDirection === 'asc' ? 'ASC' : 'DESC'},governorate.name,unit.name`;
   params.push(bounded,offset);
-  const records = database.prepare(`SELECT er.id AS entity_id,er.external_key,er.created_at,er.updated_at,unit.name AS district,governorate.name AS governorate FROM entity_records er JOIN geographic_units unit ON unit.id=er.geographic_unit_id LEFT JOIN geographic_units governorate ON governorate.id=unit.parent_id LEFT JOIN directorates legacy ON legacy.id=CAST(substr(er.external_key,20) AS INTEGER) WHERE ${clauses.join(' AND ')} ORDER BY ${orderBy} LIMIT ? OFFSET ?`).all(...params);
+  const records = database.prepare(`${CANONICAL_DIRECTORATE_CTES} SELECT er.id AS entity_id,er.external_key,er.created_at,er.updated_at,unit.name AS district,governorate.name AS governorate FROM entity_records er JOIN geographic_units unit ON unit.geo_unit_id=er.geographic_unit_id LEFT JOIN geographic_units governorate ON governorate.geo_unit_id=unit.parent_geo_unit_id LEFT JOIN directorates legacy ON legacy.id=CAST(substr(er.external_key,20) AS INTEGER) WHERE ${clauses.join(' AND ')} ORDER BY ${orderBy} LIMIT ? OFFSET ?`).all(...params);
   if (!records.length) return [];
   const parsed = records.map(record => ({
     ...record,
@@ -267,7 +303,7 @@ function canonicalDirectorateRows(database, filter = {}, limit = 50000, options 
   if (!parsed.length) return [];
   const ids = parsed.map(record => record.entity_id);
   const placeholders = ids.map(() => '?').join(',');
-  const values = database.prepare(`SELECT value.record_id,definition.field_key,definition.data_type,value.value_text,value.value_number,value.value_boolean,value.value_state FROM entity_field_values value JOIN data_field_definitions definition ON definition.id=value.field_definition_id WHERE definition.entity_type='directorate' AND value.record_id IN (${placeholders}) AND value.period_key=?`).all(...ids,periodKey);
+  const values = database.prepare(`${CANONICAL_DIRECTORATE_CTES} SELECT value.record_id,definition.field_key,definition.data_type,value.value_text,value.value_number,value.value_boolean,value.value_state FROM entity_field_values value JOIN data_field_definitions definition ON definition.id=value.field_definition_id WHERE definition.entity_type='directorate' AND value.record_id IN (${placeholders}) AND value.period_key=?`).all(...ids,periodKey);
   const valuesByRecord = new Map(parsed.map(record => [record.entity_id,{}]));
   for (const value of values) {
     if (value.value_state === 'unknown') continue;
@@ -308,7 +344,7 @@ function listDirectorateFilterOptions(database, key, options = {}) {
   if (!allowedKeys.has(key)) return [];
   const field = [...INPUT_FIELDS,DECISION_FIELD].find((item) => item.key === key) ?? options.dynamicFields?.get(key);
   if (!field || field.type !== 'text') return [];
-  return database.prepare("SELECT DISTINCT value.value_text AS value FROM entity_field_values value JOIN data_field_definitions definition ON definition.id=value.field_definition_id WHERE definition.entity_type='directorate' AND definition.field_key=? AND value.value_state<>'unknown' AND value.value_text IS NOT NULL AND TRIM(value.value_text)<>'' ORDER BY value.value_text COLLATE NOCASE LIMIT 200").all(key).map((row) => row.value);
+  return database.prepare(`${CANONICAL_DIRECTORATE_CTES} SELECT DISTINCT value.value_text AS value FROM entity_field_values value JOIN data_field_definitions definition ON definition.id=value.field_definition_id WHERE definition.entity_type='directorate' AND definition.field_key=? AND value.value_state<>'unknown' AND value.value_text IS NOT NULL AND TRIM(value.value_text)<>'' ORDER BY value.value_text COLLATE NOCASE LIMIT 200`).all(key).map((row) => row.value);
 }
 
 function listDirectorates(database, filter = {}, options = {}) {
@@ -318,7 +354,7 @@ function listDirectorates(database, filter = {}, options = {}) {
 
 function countDirectorates(database, filter = {}, options = {}) {
   const { clauses, params } = buildDirectorateWhere(filter, options);
-  return database.prepare(`SELECT COUNT(DISTINCT er.id) AS count FROM entity_records er JOIN geographic_units unit ON unit.id=er.geographic_unit_id LEFT JOIN geographic_units governorate ON governorate.id=unit.parent_id LEFT JOIN directorates legacy ON legacy.id=CAST(substr(er.external_key,20) AS INTEGER) WHERE ${clauses.join(' AND ')}`).get(...params).count;
+  return database.prepare(`${CANONICAL_DIRECTORATE_CTES} SELECT COUNT(DISTINCT er.id) AS count FROM entity_records er JOIN geographic_units unit ON unit.geo_unit_id=er.geographic_unit_id LEFT JOIN geographic_units governorate ON governorate.geo_unit_id=unit.parent_geo_unit_id LEFT JOIN directorates legacy ON legacy.id=CAST(substr(er.external_key,20) AS INTEGER) WHERE ${clauses.join(' AND ')}`).get(...params).count;
 }
 
 /** Convert a stored directorate row back into the engine's input shape. */
@@ -670,6 +706,7 @@ function restoreDirectorateVersion(database, versionId) {
       insert.run(record.id, source.field_key, source.value_text ?? null, source.source_file ?? null, source.source_location ?? null, source.data_value_id ?? null, nowIso());
     }
     canonicalData.syncLegacyDirectorate(database,record.id,{ force: true });
+    require('../database/architecture.cjs').syncLegacyDirectorateRecord(database,record.id);
 
     logAccess(database, {
       action: 'directorate-restore',
@@ -964,6 +1001,7 @@ function saveManualDirectorate(database, request = {}) {
       );
 
     canonicalData.syncLegacyDirectorate(database,targetId);
+    require('../database/architecture.cjs').syncLegacyDirectorateRecord(database,targetId);
     return { id: targetId, created };
   });
 
@@ -986,6 +1024,7 @@ function deleteDirectorate(database, id) {
     // Keep the row recoverable: deleting is a deliberate act, but not an
     // irreversible one.
     snapshotDirectorate(database, numeric, 'snapshot-before-delete');
+    require('../database/record-service.cjs').archiveLinkedDirectorate(database,numeric,'manual-delete',nowIso());
 
     // SQLite may reuse a deleted rowid. Detach historical results first so a new
     // directorate that later gets the same id cannot inherit an old report.

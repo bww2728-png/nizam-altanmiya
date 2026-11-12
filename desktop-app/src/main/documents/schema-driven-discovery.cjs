@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const { normalizeSearchText } = require('./document-service.cjs');
+const recordService = require('../database/record-service.cjs');
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS field_discovery_runs (
@@ -54,6 +55,16 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS document_field_candidates_review_idx ON document_field_candidates(review_status, created_at DESC);
   CREATE INDEX IF NOT EXISTS document_field_candidates_run_idx ON document_field_candidates(run_id, field_code);
+  CREATE TABLE IF NOT EXISTS document_candidate_promotions (
+    candidate_id TEXT PRIMARY KEY REFERENCES document_field_candidates(id),
+    form_record_id INTEGER NOT NULL REFERENCES form_records(form_record_id),
+    form_field_id INTEGER NOT NULL REFERENCES form_fields(form_field_id),
+    source_id INTEGER NOT NULL REFERENCES data_sources(source_id),
+    promoted_by TEXT,
+    promoted_at TEXT NOT NULL,
+    UNIQUE(form_record_id,form_field_id)
+  );
+  CREATE INDEX IF NOT EXISTS document_candidate_promotions_record_idx ON document_candidate_promotions(form_record_id,form_field_id);
 `;
 
 const MAX_LOCAL_EVIDENCE_PER_FIELD = 8;
@@ -64,6 +75,21 @@ const RAGFLOW_FIELD_BATCH_LIMIT = 40;
 
 function migrate(database) {
   database.exec(SCHEMA);
+}
+
+function normalizeDataType(value) {
+  const type = String(value ?? '').trim().toLowerCase();
+  if (['string','str','varchar','textual'].includes(type)) return 'text';
+  if (['number','numeric','float','double','real'].includes(type)) return 'decimal';
+  if (['int','long'].includes(type)) return 'integer';
+  if (['bool'].includes(type)) return 'boolean';
+  return type;
+}
+
+function compatibleDataTypes(left, right) {
+  const leftType = normalizeDataType(left);
+  const rightType = normalizeDataType(right);
+  return leftType === rightType || ['integer','decimal'].includes(leftType) && ['integer','decimal'].includes(rightType);
 }
 
 function parseJson(value, fallback) {
@@ -295,10 +321,12 @@ function listCandidates(database, documentId) {
   const run = database.prepare(`SELECT id,trigger_document_id,trigger_sha256,status,field_count,searched_count,evidence_count,ragflow_queries,error_text,started_at,completed_at
     FROM field_discovery_runs WHERE trigger_document_id=? ORDER BY started_at DESC LIMIT 1`).get(String(documentId));
   if (!run) return { run: null, rows: [] };
-  const rows = database.prepare(`SELECT id,field_code,entity_type,field_key,field_label_ar,data_type,unit,field_class,
-    source_document_id,source_file_name,source_sha256,page_number,source_location_json,search_terms_json,retrieval_method,
-    retrieval_reference_json,evidence_text,raw_value,validation_status,review_status,reviewed_value_json,review_note,created_at,updated_at
-    FROM document_field_candidates WHERE run_id=? ORDER BY entity_type,field_class,field_label_ar,source_file_name`).all(run.id).map((row) => ({
+  const rows = database.prepare(`SELECT candidate.id,candidate.field_code,candidate.entity_type,candidate.field_key,candidate.field_label_ar,candidate.data_type,candidate.unit,candidate.field_class,
+    candidate.source_document_id,candidate.source_file_name,candidate.source_sha256,candidate.page_number,candidate.source_location_json,candidate.search_terms_json,candidate.retrieval_method,
+    candidate.retrieval_reference_json,candidate.evidence_text,candidate.raw_value,candidate.validation_status,candidate.review_status,candidate.reviewed_value_json,candidate.review_note,candidate.reviewed_by,candidate.reviewed_at,candidate.created_at,candidate.updated_at,
+    promotion.form_record_id AS promoted_form_record_id
+    FROM document_field_candidates candidate LEFT JOIN document_candidate_promotions promotion ON promotion.candidate_id=candidate.id
+    WHERE candidate.run_id=? ORDER BY candidate.entity_type,candidate.field_class,candidate.field_label_ar,candidate.source_file_name`).all(run.id).map((row) => ({
     ...row,
     sourceLocation: parseJson(row.source_location_json, {}),
     searchTerms: parseJson(row.search_terms_json, []),
@@ -313,6 +341,7 @@ function reviewCandidate(database, request = {}) {
   const status = String(request.status ?? '');
   if (!candidateId || !['reviewed','rejected'].includes(status)) throw new Error('قرار مراجعة المرشح غير صالح.');
   const value = request.value === undefined || request.value === null ? null : String(request.value).slice(0, 1000);
+  if (status === 'reviewed' && !String(value ?? '').trim()) throw new Error('أدخل القيمة التي تحققت منها قبل تسجيل المراجعة.');
   const note = String(request.note ?? '').trim().slice(0, 1000);
   if (!note) throw new Error('اكتب سبب قرار مراجعة المرشح.');
   const reviewedBy = String(request.reviewedBy ?? 'local-owner').slice(0, 100);
@@ -331,6 +360,96 @@ function reviewCandidate(database, request = {}) {
   return { candidateId, status, reviewedBy, reviewedAt: now, officialDataChanged: false, updatedAt: now };
 }
 
+function promoteReviewedCandidates(database, request = {}, options = {}) {
+  const documentId = String(request.documentId ?? '');
+  const formVersionId = Number(request.formVersionId);
+  const candidateIds = [...new Set((Array.isArray(request.candidateIds) ? request.candidateIds : []).map((id) => String(id)).filter(Boolean))];
+  if (!documentId || !Number.isSafeInteger(formVersionId) || formVersionId <= 0 || candidateIds.length === 0 || candidateIds.length > 100) {
+    throw new Error('حدد الوثيقة والنموذج وحقولًا مراجعة صالحة لإرسالها للاعتماد.');
+  }
+  const actor = typeof options.actor === 'string' ? options.actor.slice(0,120) : null;
+  const now = new Date().toISOString();
+  return database.transaction(() => {
+    const trigger = database.prepare('SELECT id FROM document_records WHERE id=?').get(documentId);
+    if (!trigger) throw new Error('الوثيقة غير موجودة.');
+    const placeholders = candidateIds.map(() => '?').join(',');
+    const candidates = database.prepare(`SELECT candidate.*,source_document.source_id AS source_database_id,source_document.file_name AS original_file_name,
+      promotion.form_record_id AS promoted_form_record_id
+      FROM document_field_candidates candidate
+      LEFT JOIN document_records source_document ON source_document.id=candidate.source_document_id
+      LEFT JOIN document_candidate_promotions promotion ON promotion.candidate_id=candidate.id
+      WHERE candidate.id IN (${placeholders}) AND candidate.run_id IN (
+        SELECT id FROM field_discovery_runs WHERE trigger_document_id=?
+      ) ORDER BY candidate.field_code`).all(...candidateIds,documentId);
+    if (candidates.length !== candidateIds.length) throw new Error('بعض المرشحين لا ينتمون إلى هذه الوثيقة أو لم يعودوا موجودين.');
+    if (candidates.some((candidate) => candidate.review_status !== 'reviewed' || candidate.promoted_form_record_id)) {
+      throw new Error('لا يمكن ترحيل إلا المرشحين المراجَعين وغير المرحّلين سابقًا.');
+    }
+    if (new Set(candidates.map((candidate) => candidate.field_code)).size !== candidates.length) {
+      throw new Error('اختر مرشحًا واحدًا فقط لكل حقل في السجل.');
+    }
+    const definition = recordService.getFormDefinition(database,formVersionId);
+    const fields = new Map(definition.fields.map((field) => [field.field_code,field]));
+    const mappings = request.fieldMappings && typeof request.fieldMappings === 'object' && !Array.isArray(request.fieldMappings) ? request.fieldMappings : {};
+    const values = {};
+    const sourceByField = {};
+    const targetFields = new Map();
+    const candidateTargets = new Map();
+    for (const candidate of candidates) {
+      const targetCode = String(mappings[candidate.id] ?? candidate.field_code);
+      const field = fields.get(targetCode);
+      if (!field) throw new Error(`اربط الحقل «${candidate.field_label_ar}» بحقل موجود في النموذج المحدد.`);
+      const targetType = field.data_type_override ?? field.data_type;
+      if (!compatibleDataTypes(targetType,candidate.data_type)) throw new Error(`نوع الحقل «${field.label_ar}» لا يطابق نوع الحقل المستخرج «${candidate.data_type}».`);
+      if (!field.is_importable || field.is_derived || field.storage_class === 'ignored_derived') {
+        throw new Error(`الحقل «${field.label_ar}» مشتق أو غير قابل للإدخال.`);
+      }
+      if (!candidate.source_database_id) throw new Error(`مصدر الدليل للحقل «${candidate.field_label_ar}» غير موجود.`);
+      const reviewedValue = parseJson(candidate.reviewed_value_json,null)?.value;
+      if (reviewedValue === undefined || reviewedValue === null || String(reviewedValue).trim() === '') {
+        throw new Error(`أدخل قيمة مؤكدة للحقل «${candidate.field_label_ar}» قبل الترحيل.`);
+      }
+      if (targetFields.has(field.form_field_id)) throw new Error(`تم ربط أكثر من مرشح بالحقل «${field.label_ar}».`);
+      targetFields.set(field.form_field_id,field);
+      candidateTargets.set(candidate.id,field);
+      values[targetCode] = { value:String(reviewedValue),state:'known' };
+      sourceByField[targetCode] = {
+        dataSourceId:candidate.source_database_id,
+        sourceLocator:JSON.stringify({
+          documentId:candidate.source_document_id,
+          fileName:candidate.original_file_name,
+          sha256:candidate.source_sha256,
+          pageNumber:candidate.page_number,
+          elementId:candidate.source_element_id,
+          retrievalMethod:candidate.retrieval_method,
+          retrievalReference:parseJson(candidate.retrieval_reference_json,{}),
+          candidateId:candidate.id,
+        }),
+      };
+    }
+    const saved = recordService.saveRecordFromDocument(database,{
+      formVersionId,
+      geoUnitId:request.geoUnitId ?? null,
+      periodId:request.periodId ?? null,
+      periodYear:request.periodYear ?? null,
+      recordLabel:String(request.recordLabel ?? '').trim().slice(0,240) || null,
+      notes:String(request.notes ?? 'قِيَم مرشحة من وثائق؛ يلزم اعتماد السجل قبل ظهورها ضمن البيانات الرسمية.').trim().slice(0,1000),
+      values,
+      actor,
+    },{ sourceByField });
+    const submitted = recordService.submitForReview(database,saved.formRecordId,actor);
+    const insertPromotion = database.prepare(`INSERT INTO document_candidate_promotions(candidate_id,form_record_id,form_field_id,source_id,promoted_by,promoted_at)
+      VALUES(?,?,?,?,?,?)`);
+    for (const candidate of candidates) {
+      const target = candidateTargets.get(candidate.id);
+      const sourceId = database.prepare('SELECT source_id FROM data_sources WHERE id=?').get(candidate.source_database_id)?.source_id;
+      if (!sourceId) throw new Error('تعذر ربط مصدر الدليل بالسجل المعياري.');
+      insertPromotion.run(candidate.id,saved.formRecordId,target.form_field_id,sourceId,actor,now);
+    }
+    return { formRecordId:saved.formRecordId,status:submitted.status,candidateIds,fieldCount:candidates.length,sourceId:saved.sourceId };
+  })();
+}
+
 module.exports = {
   SCHEMA,
   migrate,
@@ -340,4 +459,5 @@ module.exports = {
   discoverFields,
   listCandidates,
   reviewCandidate,
+  promoteReviewedCandidates,
 };

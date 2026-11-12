@@ -1,9 +1,21 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { FileSearch, FileText, HardDrive, RefreshCw, Search, Upload } from 'lucide-react';
+import { Check, FileSearch, FileText, HardDrive, RefreshCw, Search, Upload } from 'lucide-react';
 import { Badge, Card, Empty, ErrorBanner, Loading } from '../components/ui.jsx';
 import { errText, fmtDateTime, fmtNumber } from '../lib/format.js';
 
 const PAGE_SIZE = 30;
+
+function compatibleFieldType(sourceType, targetType) {
+  const normalize = type => {
+    const value = String(type ?? '').trim().toLowerCase();
+    if (['string','str','varchar','textual'].includes(value)) return 'text';
+    if (['number','numeric','float','double','real'].includes(value)) return 'decimal';
+    if (['int','long'].includes(value)) return 'integer';
+    if (['bool'].includes(value)) return 'boolean';
+    return value;
+  };
+  return normalize(sourceType) === normalize(targetType);
+}
 
 function statusLabel(status) {
   return ({ staged: 'محفوظ للمراجعة', processing: 'جارٍ الاستخراج', extracted: 'مستخرج', review: 'بانتظار المراجعة', failed: 'فشل الاستخراج', unavailable: 'المحرك غير جاهز' })[status] ?? status;
@@ -30,20 +42,37 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
   const [query, setQuery] = useState('');
   const [searchMode, setSearchMode] = useState('knowledge');
   const [results, setResults] = useState(null);
-  const [apiKey, setApiKey] = useState('');
-  const [datasetIds, setDatasetIds] = useState('');
   const [candidateValues, setCandidateValues] = useState({});
   const [candidateNotes, setCandidateNotes] = useState({});
-  const [savingConfig, setSavingConfig] = useState(false);
+  const [forms, setForms] = useState([]);
+  const [geography, setGeography] = useState([]);
+  const [periods, setPeriods] = useState([]);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState({});
+  const [candidateMappings, setCandidateMappings] = useState({});
+  const [promotionFormVersionId, setPromotionFormVersionId] = useState('');
+  const [promotionDefinition, setPromotionDefinition] = useState(null);
+  const [promotionGeoUnitId, setPromotionGeoUnitId] = useState('');
+  const [promotionPeriodId, setPromotionPeriodId] = useState('');
+  const [promotionPeriodYear, setPromotionPeriodYear] = useState('');
+  const [promotionRecordLabel, setPromotionRecordLabel] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const [page, service] = await Promise.all([window.localApp.documents({ offset: documents.offset, limit: PAGE_SIZE }), window.localApp.ragflowStatus()]);
+      const [page, service, formRows, geographyResult, periodResult] = await Promise.all([
+        window.localApp.documents({ offset: documents.offset, limit: PAGE_SIZE }),
+        window.localApp.ragflowStatus(),
+        window.localApp.dataForms(),
+        window.localApp.dataGeography(''),
+        window.localApp.dataPeriods(),
+      ]);
       if (page?.restricted || service?.restricted) throw new Error('مركز الوثائق متاح في وضع المالك فقط.');
       setDocuments(page);
       setRagflow(service);
+      setForms((formRows ?? []).filter(form => form.is_active && form.form_version_id && form.version_status === 'published'));
+      setGeography(geographyResult?.rows ?? []);
+      setPeriods(periodResult?.rows ?? []);
       if (selected?.document?.id) {
         const details = await window.localApp.document(selected.document.id);
         details.fieldReview = await window.localApp.documentFieldCandidates(selected.document.id);
@@ -73,6 +102,14 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
 
   const openDocument = async (documentId) => {
     setError('');
+    setSelectedCandidateIds({});
+    setCandidateMappings({});
+    setPromotionFormVersionId('');
+    setPromotionDefinition(null);
+    setPromotionGeoUnitId('');
+    setPromotionPeriodId('');
+    setPromotionPeriodYear('');
+    setPromotionRecordLabel('');
     try {
       const details = await window.localApp.document(documentId);
       details.fieldReview = await window.localApp.documentFieldCandidates(documentId);
@@ -94,6 +131,50 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
       setSelected(current => ({ ...current, fieldReview }));
       notify?.({ tone: 'ok', message: status === 'reviewed' ? 'حُفظت نتيجة المراجعة كمرشح فقط؛ لم تتغير البيانات الرسمية.' : 'رُفض المرشح؛ لم تتغير البيانات الرسمية.' });
     } catch (cause) { setError(errText(cause) || 'تعذرت مراجعة المرشح.'); }
+    finally { setBusyId(''); }
+  };
+
+  const choosePromotionForm = async (value) => {
+    setPromotionFormVersionId(value);
+    setPromotionDefinition(null);
+    setCandidateMappings({});
+    if (!value) return;
+    try {
+      const definition = await window.localApp.dataFormDefinition(Number(value));
+      setPromotionDefinition(definition);
+      const fields = new Map((definition.fields ?? []).map(field => [field.field_code,field]));
+      const defaults = Object.fromEntries((selected?.fieldReview?.rows ?? [])
+        .filter(candidate => candidate.review_status === 'reviewed' && !candidate.promoted_form_record_id)
+        .filter(candidate => {
+          const field = fields.get(candidate.field_code);
+          return field && compatibleFieldType(candidate.data_type,field.data_type_override ?? field.data_type) && field.is_importable && !field.is_derived;
+        })
+        .map(candidate => [candidate.id,candidate.field_code]));
+      setCandidateMappings(defaults);
+    } catch (cause) { setError(errText(cause) || 'تعذر تحميل النموذج المستهدف.'); }
+  };
+
+  const promoteReviewedCandidates = async () => {
+    const candidateIds = Object.entries(selectedCandidateIds).filter(([,checked]) => checked).map(([id]) => id);
+    if (!selected?.document?.id || !promotionFormVersionId || candidateIds.length === 0) return;
+    setBusyId(selected.document.id);
+    setError('');
+    try {
+      const result = await window.localApp.promoteDocumentFieldCandidates({
+        documentId:selected.document.id,
+        formVersionId:Number(promotionFormVersionId),
+        candidateIds,
+        fieldMappings:Object.fromEntries(candidateIds.map(id => [id,candidateMappings[id] ?? ''])),
+        geoUnitId:promotionGeoUnitId || null,
+        periodId:promotionPeriodId || null,
+        periodYear:promotionPeriodYear.trim() || null,
+        recordLabel:promotionRecordLabel.trim() || selected.document.file_name,
+      });
+      notify?.({ tone:'ok',message:`أُنشئ السجل المعياري ${fmtNumber(result.formRecordId,0)} وأُرسل للمراجعة والاعتماد؛ لم يصبح معتمدًا بعد.` });
+      setSelectedCandidateIds({});
+      setPromotionRecordLabel('');
+      await load();
+    } catch (cause) { setError(errText(cause) || 'تعذر إنشاء السجل المعياري من المرشحين.'); }
     finally { setBusyId(''); }
   };
 
@@ -133,20 +214,6 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
     finally { setBusyId(''); }
   };
 
-  const saveConfig = async (event) => {
-    event.preventDefault();
-    setSavingConfig(true);
-    setError('');
-    try {
-      const ids = datasetIds.split(/[\s,،]+/).map(value => value.trim()).filter(Boolean);
-      await window.localApp.saveRagflowConfig({ apiKey, datasetIds: ids });
-      setApiKey('');
-      await load();
-      notify?.({ tone: 'ok', message: 'حُفظ مفتاح الاتصال مشفرًا بواسطة نظام التشغيل.' });
-    } catch (cause) { setError(errText(cause) || 'تعذر حفظ إعدادات البحث.'); }
-    finally { setSavingConfig(false); }
-  };
-
   const search = async (event) => {
     event.preventDefault();
     setError('');
@@ -160,6 +227,13 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
   };
 
   const rows = documents.rows ?? [];
+  const reviewedCandidates = (selected?.fieldReview?.rows ?? []).filter(candidate => candidate.review_status === 'reviewed' && !candidate.promoted_form_record_id);
+  const selectedPromotionCandidates = reviewedCandidates.filter(candidate => selectedCandidateIds[candidate.id]);
+  const selectedTargetCodes = selectedPromotionCandidates.map(candidate => candidateMappings[candidate.id]).filter(Boolean);
+  const missingRequiredFields = (promotionDefinition?.fields ?? []).filter(field => field.is_required && !selectedTargetCodes.includes(field.field_code));
+  const selectedRequiresPeriod = selectedPromotionCandidates.some(candidate => promotionDefinition?.fields?.find(field => field.field_code === candidateMappings[candidate.id])?.storage_class === 'measurement');
+  const hasPromotionPeriod = Boolean(promotionPeriodId || promotionPeriodYear);
+  const hasUnmappedSelectedCandidates = selectedPromotionCandidates.some(candidate => !candidateMappings[candidate.id]);
   const totalPages = Math.max(1, Math.ceil((documents.total ?? 0) / PAGE_SIZE));
   const page = Math.floor((documents.offset ?? 0) / PAGE_SIZE) + 1;
 
@@ -167,31 +241,30 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
 
   return (
     <>
-      <Card title="مركز الوثائق والبحث المعرفي" subtitle="احفظ الوثائق محليًا، واستخرج محتواها للمراجعة، أو ابحث عن أدلة نصية داخل خدمة RAGFlow المحلية. لا تُرحّل مخرجات الاستخراج تلقائيًا إلى بيانات التنمية المعتمدة." icon={FileSearch}
+      <Card title="مركز الوثائق والبحث المعرفي" subtitle="احفظ الوثائق محليًا، واستخرج محتواها للمراجعة، أو ابحث عن أدلة نصية داخل محرك المعرفة المحلي. لا تُرحّل مخرجات الاستخراج تلقائيًا إلى بيانات التنمية المعتمدة." icon={FileSearch}
         actions={<button className="btn small primary" onClick={stage}><Upload size={15} /> إضافة وثيقة</button>}>
         <div className="stat-strip">
           <div className="mini-stat"><strong>{fmtNumber(documents.total ?? 0, 0)}</strong><span>وثيقة أصلية محفوظة</span></div>
-          <div className="mini-stat"><strong>{ragflow?.available ? 'متصلة محليًا' : 'غير متاحة'}</strong><span>خدمة RAGFlow · لا اتصال سحابي</span></div>
+          <div className="mini-stat"><strong>{ragflow?.available ? 'متصلة محليًا' : 'غير متاحة'}</strong><span>محرك المعرفة · اتصال محلي فقط</span></div>
           <div className="mini-stat"><strong>{ragflow?.generation === 'disabled' ? 'متوقف' : '—'}</strong><span>توليد إجابات بالنموذج اللغوي</span></div>
         </div>
-        {ragflow?.error && <div className="quote" role="status">خدمة البحث المحلية غير متاحة حاليًا: {ragflow.error}</div>}
       </Card>
 
       {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
 
-      <Card title="تهيئة البحث المحلي" subtitle="أدخل مفتاح API ومعرّف مجموعة RAGFlow تعمل على هذا الجهاز. يُحفظ المفتاح مشفرًا، ولا ترسل الوثائق إلى خدمة خارج الجهاز." icon={HardDrive}>
-        <form className="grid-2" onSubmit={saveConfig}>
-          <label className="stack tight"><span>مفتاح API المحلي</span><input className="input" type="password" autoComplete="new-password" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={ragflow?.configured ? 'مفتاح محفوظ؛ أدخل مفتاحًا جديدًا للاستبدال' : 'Bearer API key من خدمة RAGFlow المحلية'} /></label>
-          <label className="stack tight"><span>معرّف مجموعة المستندات (32 خانة hex)</span><input className="input" value={datasetIds} onChange={event => setDatasetIds(event.target.value)} placeholder="معرف المجموعة المحلية" /></label>
-          <div className="row" style={{ gridColumn: '1 / -1' }}><button className="btn small primary" type="submit" disabled={savingConfig || !apiKey.trim() || !datasetIds.trim()}>{savingConfig ? 'جارٍ الحفظ...' : 'حفظ إعدادات البحث'}</button><button className="btn small ghost" type="button" onClick={load} disabled={loading}><RefreshCw size={14} /> فحص الخدمة</button></div>
-        </form>
+      <Card title="حالة محرك البحث المحلي" subtitle="تعرض الشاشة حالة الاتصال فقط، ولا تطلب مفاتيح أو معرّفات تقنية من المستخدم." icon={HardDrive}>
+        <div className="row between" style={{ flexWrap: 'wrap' }}>
+          <div className="stack tight"><strong>{ragflow?.available ? 'متصل محليًا' : 'غير متاح حاليًا'}</strong><span className="muted">{ragflow?.configured ? 'الخدمة مهيأة على هذا الجهاز.' : 'لم يجهّز مسؤول النظام خدمة البحث بعد.'}</span></div>
+          <button className="btn small ghost" type="button" onClick={load} disabled={loading}><RefreshCw size={14} /> فحص الخدمة</button>
+        </div>
+        {ragflow?.configured && !ragflow?.available && <div className="quote" role="status">تعذر الوصول إلى محرك البحث المحلي. يمكنك متابعة حفظ الوثائق واستخراجها والبحث النصي؛ لا يؤثر ذلك على قاعدة البيانات الأساسية.</div>}
       </Card>
 
       <Card title="البحث في الوثائق" subtitle="تظهر مقتطفات المصدر التي أعادها محرك البحث؛ لا ينشئ النظام إجابات أو استشهادات من عنده." icon={Search}>
         <form className="stack" onSubmit={search}>
           <div className="grid-2" style={{ alignItems: 'end' }}>
             <label className="stack tight"><span>سؤال أو عبارة للبحث</span><input className="input" value={query} onChange={event => setQuery(event.target.value)} maxLength={500} placeholder="مثال: معوقات مشاريع المياه في مديرية معينة" /></label>
-            <label className="stack tight"><span>مصدر البحث</span><select className="input" value={searchMode} onChange={event => setSearchMode(event.target.value)}><option value="knowledge">بحث RAGFlow المحلي</option><option value="literal">مطابقة نصية حرفية محلية</option></select></label>
+            <label className="stack tight"><span>مصدر البحث</span><select className="input" value={searchMode} onChange={event => setSearchMode(event.target.value)}><option value="knowledge">بحث المعرفة الدلالي المحلي</option><option value="literal">مطابقة نصية حرفية محلية</option></select></label>
           </div>
           <div className="row"><button className="btn small primary" type="submit" disabled={query.trim().length < 2 || (searchMode === 'knowledge' && !ragflow?.configured)}><Search size={14} /> بحث</button>{searchMode === 'literal' && <span className="muted">مطابقة حرفية للنص المستخرج فقط؛ ليست بحثًا دلاليًا.</span>}</div>
         </form>
@@ -206,7 +279,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
         </div>}
       </Card>
 
-      <Card title="الوثائق المحفوظة" subtitle="الأصل محفوظ داخل قاعدة البيانات المشفرة. معالجة PDF/Word والصور اختيارية وتتطلب تجهيز محركاتها المحلية." actions={<button className="btn small ghost" onClick={load} disabled={loading}><RefreshCw size={14} /> تحديث</button>}>
+      <Card title="الوثائق المحفوظة" subtitle="الأصل محفوظ داخل قاعدة البيانات المشفرة. يُستخرج نص Word محليًا؛ أما PDF والصور فتحتاج إلى محركات معالجة محلية إضافية." actions={<button className="btn small ghost" onClick={load} disabled={loading}><RefreshCw size={14} /> تحديث</button>}>
         {loading && !documents.rows ? <Loading /> : rows.length === 0 ? <Empty icon={FileText} title="لا توجد وثائق بعد" hint="أضف ملف PDF أو Word بصيغة DOCX أو صورة لبدء المكتبة المحلية." /> : <div className="stack">
           {rows.map(document => <article className="quote stack tight" key={document.id}>
             <div className="row between" style={{ flexWrap: 'wrap' }}>
@@ -234,17 +307,40 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
             <div className="row between" style={{ flexWrap: 'wrap' }}><strong>{candidate.field_label_ar}</strong><Badge>{candidateStatusLabel(candidate.review_status)}</Badge></div>
             <div className="chip-row"><Badge>{candidate.entity_type} · {candidate.field_key}</Badge>{candidate.source_file_name && <Badge>{candidate.source_file_name}</Badge>}{candidate.page_number && <Badge>صفحة {fmtNumber(candidate.page_number, 0)}</Badge>}</div>
             {candidate.evidence_text && <p>{candidate.evidence_text}</p>}
-            {candidate.raw_value && <label className="stack tight"><span>القيمة المستخرجة — راجعها قبل حفظ نتيجة المراجعة</span><input className="input" value={candidateValues[candidate.id] ?? candidate.raw_value} onChange={event => setCandidateValues(current => ({ ...current, [candidate.id]: event.target.value }))} maxLength={1000} /></label>}
+            <label className="stack tight"><span>القيمة بعد التحقق من الدليل</span><input className="input" value={candidateValues[candidate.id] ?? candidate.raw_value ?? ''} onChange={event => setCandidateValues(current => ({ ...current, [candidate.id]: event.target.value }))} maxLength={1000} /></label>
             <label className="stack tight"><span>سبب قرار المراجعة (مطلوب)</span><input className="input" value={candidateNotes[candidate.id] ?? ''} onChange={event => setCandidateNotes(current => ({ ...current, [candidate.id]: event.target.value }))} maxLength={1000} /></label>
             <div className="row"><button className="btn small primary" onClick={() => reviewCandidate(candidate, 'reviewed')} disabled={busyId === selected.document.id || !(candidateNotes[candidate.id] ?? '').trim()}>تسجيل المراجعة</button><button className="btn small ghost" onClick={() => reviewCandidate(candidate, 'rejected')} disabled={busyId === selected.document.id || !(candidateNotes[candidate.id] ?? '').trim()}>رفض المرشح</button><span className="muted">لا يُرحّل إلى البيانات الرسمية تلقائيًا.</span></div>
           </article>)}
-          {(selected.fieldReview.rows ?? []).some(candidate => ['reviewed','rejected'].includes(candidate.review_status)) && <details><summary>قرارات المراجعة السابقة ({fmtNumber((selected.fieldReview.rows ?? []).filter(candidate => ['reviewed','rejected'].includes(candidate.review_status)).length, 0)})</summary><div className="stack" style={{ marginTop: 10 }}>{(selected.fieldReview.rows ?? []).filter(candidate => ['reviewed','rejected'].includes(candidate.review_status)).map(candidate => <article className="quote stack tight" key={candidate.id}><div className="row between"><strong>{candidate.field_label_ar}</strong><Badge>{candidateStatusLabel(candidate.review_status)}</Badge></div>{candidate.reviewedValue?.value && <span>القيمة التي راجعها المستخدم: {candidate.reviewedValue.value}</span>}<span>السبب: {candidate.review_note}</span><span className="muted">المراجع: {candidate.reviewed_by ?? 'غير مسجل'} · {fmtDateTime(candidate.reviewed_at)}</span></article>)}</div></details>}
+          {reviewedCandidates.length > 0 && <section className="stack" style={{ marginBottom: 18 }}>
+            <div><h3>إنشاء سجل معياري من القيم المراجَعة</h3><p className="muted">اختر الحقول بعد التحقق من قيمها واربطها بنموذج منشور. سيُنشأ سجل «قيد المراجعة» فقط؛ لا تصبح القيم رسمية حتى يعتمدها المراجع في شاشة الإدخال المركزي.</p></div>
+            <label className="stack tight"><span>النموذج المستهدف</span><select className="input" value={promotionFormVersionId} onChange={event => choosePromotionForm(event.target.value)}><option value="">— اختر نموذجًا منشورًا —</option>{forms.map(form => <option key={form.form_version_id} value={form.form_version_id}>{form.form_code} — {form.name_ar}</option>)}</select></label>
+            {promotionFormVersionId && <form className="stack" onSubmit={event => { event.preventDefault(); promoteReviewedCandidates(); }}>
+              {reviewedCandidates.map(candidate => {
+                const compatibleFields = (promotionDefinition?.fields ?? []).filter(field => compatibleFieldType(candidate.data_type,field.data_type_override ?? field.data_type) && field.is_importable && !field.is_derived && field.storage_class !== 'ignored_derived');
+                return <article className="quote stack tight" key={candidate.id}>
+                  <label className="row"><input type="checkbox" checked={Boolean(selectedCandidateIds[candidate.id])} onChange={event => setSelectedCandidateIds(current => ({ ...current,[candidate.id]:event.target.checked }))} /><strong>{candidate.field_label_ar}</strong><Badge>{candidate.data_type}</Badge></label>
+                  <label className="stack tight"><span>العمود/الحقل المعياري المطابق</span><select className="input" value={candidateMappings[candidate.id] ?? ''} onChange={event => setCandidateMappings(current => ({ ...current,[candidate.id]:event.target.value }))}><option value="">— اختر الحقل المطابق —</option>{compatibleFields.map(field => <option key={field.form_field_id} value={field.field_code}>{field.label_ar} · {field.field_code}</option>)}</select></label>
+                  <div><span className="muted">القيمة المؤكدة: </span><strong>{candidate.reviewedValue?.value ?? '—'}</strong>{candidate.source_file_name && <span className="muted"> · المصدر: {candidate.source_file_name}{candidate.page_number ? `، صفحة ${fmtNumber(candidate.page_number,0)}` : ''}</span>}</div>
+                </article>;
+              })}
+              <div className="grid-2" style={{ alignItems:'end' }}>
+                <label className="stack tight"><span>الوحدة الجغرافية</span><select className="input" value={promotionGeoUnitId} onChange={event => setPromotionGeoUnitId(event.target.value)}><option value="">— دون ربط جغرافي —</option>{geography.filter(unit => unit.is_active).map(unit => <option key={unit.geo_unit_id} value={unit.geo_unit_id}>{unit.type_name_ar} — {unit.name_ar}{unit.parent_name_ar ? ` / ${unit.parent_name_ar}` : ''}</option>)}</select></label>
+                <label className="stack tight"><span>الفترة المرجعية</span><select className="input" value={promotionPeriodId} onChange={event => { setPromotionPeriodId(event.target.value); setPromotionPeriodYear(''); }}><option value="">— فترة غير محددة —</option>{periods.map(period => <option key={period.period_id} value={period.period_id}>{period.label_ar}</option>)}</select></label>
+                <label className="stack tight"><span>أو سنة ميلادية جديدة</span><input className="input" type="number" min="1900" max="2200" step="1" value={promotionPeriodYear} onChange={event => { setPromotionPeriodYear(event.target.value); setPromotionPeriodId(''); }} placeholder="2025" /></label>
+                <label className="stack tight"><span>عنوان السجل</span><input className="input" value={promotionRecordLabel} onChange={event => setPromotionRecordLabel(event.target.value)} maxLength={240} placeholder={selected.document.file_name} /></label>
+              </div>
+              {selectedPromotionCandidates.length > 0 && missingRequiredFields.length > 0 && <div className="quote">النموذج يتطلب حقولًا لم تُربط بمرشحين مراجَعين: {missingRequiredFields.map(field => field.label_ar).join('، ')}.</div>}
+              {selectedRequiresPeriod && !hasPromotionPeriod && <div className="quote">اختر فترة مرجعية أو سنة للقياسات المختارة.</div>}
+              <button className="btn small primary" type="submit" disabled={busyId === selected.document.id || selectedPromotionCandidates.length === 0 || hasUnmappedSelectedCandidates || missingRequiredFields.length > 0 || (selectedRequiresPeriod && !hasPromotionPeriod)}><Check size={14} /> إنشاء السجل وإرساله للمراجعة ({fmtNumber(selectedPromotionCandidates.length,0)})</button>
+            </form>}
+          </section>}
+          {(selected.fieldReview.rows ?? []).some(candidate => ['reviewed','rejected'].includes(candidate.review_status)) && <details><summary>قرارات المراجعة السابقة ({fmtNumber((selected.fieldReview.rows ?? []).filter(candidate => ['reviewed','rejected'].includes(candidate.review_status)).length, 0)})</summary><div className="stack" style={{ marginTop: 10 }}>{(selected.fieldReview.rows ?? []).filter(candidate => ['reviewed','rejected'].includes(candidate.review_status)).map(candidate => <article className="quote stack tight" key={candidate.id}><div className="row between"><strong>{candidate.field_label_ar}</strong><Badge>{candidateStatusLabel(candidate.review_status)}</Badge></div>{candidate.promoted_form_record_id && <Badge tone="ok">مرتبطة بالسجل المعياري {fmtNumber(candidate.promoted_form_record_id,0)}</Badge>}{candidate.reviewedValue?.value && <span>القيمة التي راجعها المستخدم: {candidate.reviewedValue.value}</span>}<span>السبب: {candidate.review_note}</span><span className="muted">المراجع: {candidate.reviewed_by ?? 'غير مسجل'} · {fmtDateTime(candidate.reviewed_at)}</span></article>)}</div></details>}
           {(selected.fieldReview.rows ?? []).some(candidate => candidate.review_status === 'no_evidence') && <details><summary>الحقول التي لم يظهر لها دليل ({fmtNumber((selected.fieldReview.rows ?? []).filter(candidate => candidate.review_status === 'no_evidence').length, 0)})</summary><div className="chip-row" style={{ marginTop: 10 }}>{(selected.fieldReview.rows ?? []).filter(candidate => candidate.review_status === 'no_evidence').map(candidate => <Badge key={candidate.id}>{candidate.field_label_ar}</Badge>)}</div></details>}
         </section>}
         {selected.fieldReview?.run?.status === 'failed' && <div className="quote">تعذر إنشاء قائمة المرشحين: {selected.fieldReview.run.error_text}</div>}
         {(selected.artifacts ?? []).map(artifact => artifact.artifact_type === 'markdown' ? <details key={artifact.artifact_type}><summary>النص Markdown المستخرج (للمراجعة فقط)</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 500, overflow: 'auto' }}>{artifact.content}</pre></details> : <details key={artifact.artifact_type}><summary>بيانات {artifact.artifact_type}</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 500, overflow: 'auto' }}>{artifact.content.slice(0, 20000)}</pre></details>)}
         <div className="stack" style={{ marginTop: 16 }}>{(selected.elements ?? []).map(element => <article className="quote" key={element.id}><div className="chip-row"><Badge>{element.element_type}</Badge>{element.page_number && <Badge>صفحة {element.page_number}</Badge>}{element.confidence !== null && <Badge>ثقة OCR {Number(element.confidence).toFixed(3)}</Badge>}</div>{element.heading && <strong>{element.heading}</strong>}<p>{element.content}</p><span className="muted">مصدر العنصر: {element.source_json}</span></article>)}</div>
-        {(selected.ragflowReferences ?? []).map(reference => <div className="muted" key={reference.dataset_id}>RAGFlow {reference.dataset_id}: {reference.status} · {fmtDateTime(reference.updated_at)}</div>)}
+        {(selected.ragflowReferences ?? []).map(reference => <div className="muted" key={reference.dataset_id}>حالة الفهرسة في محرك المعرفة: {reference.status} · {fmtDateTime(reference.updated_at)}</div>)}
       </Card>}
     </>
   );

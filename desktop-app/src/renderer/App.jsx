@@ -316,7 +316,7 @@ export default function App() {
       case 'documents':
         return <DocumentCenter notify={notify} accessProfile={status?.accessProfile ?? 'owner'} />;
       case 'data-entry':
-        return <DataEntry notify={notify} refreshKey={refreshKey} />;
+        return <DataEntry notify={notify} refreshKey={refreshKey} onDataChanged={refresh} onShowDatabase={() => navigate('database')} />;
       case 'correction':
         return <Correction catalogue={catalogue ?? []} notify={notify} refreshKey={refreshKey} focusId={params.focusId ?? null} />;
       case 'indicators':
@@ -324,7 +324,7 @@ export default function App() {
       case 'ranking':
         return <Ranking catalogue={catalogue ?? []} notify={notify} onOpenCard={(id) => navigate('card', { id })} />;
       case 'database':
-        return <Database catalogue={catalogue ?? []} accessProfile={status?.accessProfile ?? 'owner'} notify={notify} refreshKey={refreshKey} onOpenCard={(id) => navigate('card', { id })} />;
+        return <Database catalogue={catalogue ?? []} accessProfile={status?.accessProfile ?? 'owner'} notify={notify} refreshKey={refreshKey} onDataChanged={refresh} onOpenCard={(id) => navigate('card', { id })} />;
       case 'card':
         return <DirectorateCard id={params.id ?? null} catalogue={catalogue ?? []} notify={notify} refreshKey={refreshKey} onNavigate={navigate} />;
       case 'dashboard':

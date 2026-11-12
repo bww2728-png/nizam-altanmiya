@@ -187,11 +187,16 @@ function installOfflineNetworkGuards(options = {}) {
 }
 
 /** Cancel all renderer-originated external protocols in one place. */
-function installOfflineSessionGuard(electronSession) {
+function installOfflineSessionGuard(electronSession, options = {}) {
   if (!electronSession?.webRequest?.onBeforeRequest) return false;
+  const allowMainRequest = typeof options.allowMainRequest === 'function' ? options.allowMainRequest : () => false;
   electronSession.webRequest.onBeforeRequest(
     { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] },
     (details, callback) => {
+      if (details.webContentsId === -1 && allowMainRequest(details)) {
+        callback({ cancel: false });
+        return;
+      }
       recordBlockedAttempt('renderer', details.resourceType ?? 'renderer-request');
       callback({ cancel: true });
     }

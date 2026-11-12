@@ -2,6 +2,7 @@
 
 const canonicalData = require('./canonical-data.cjs');
 const dataArchitecture = require('../database/architecture.cjs');
+const manualEntryCatalog = require('../database/manual-entry-catalog.cjs');
 const documentService = require('../documents/document-service.cjs');
 const schemaDrivenDiscovery = require('../documents/schema-driven-discovery.cjs');
 
@@ -337,6 +338,7 @@ function migrate(database) {
   // Additive normalized model + raw workbook staging; never drops legacy tables.
   canonicalData.migrateCanonicalData(database);
   dataArchitecture.migrate(database);
+  manualEntryCatalog.migrate(database);
   documentService.migrate(database);
   schemaDrivenDiscovery.migrate(database);
   for (const index of EXTRA_INDEXES) {

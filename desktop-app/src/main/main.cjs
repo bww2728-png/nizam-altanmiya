@@ -20,6 +20,7 @@ const { analyze } = require('./analysis/engine.cjs');
 const { readDirectorateWorkbook } = require('./analysis/template-reader.cjs');
 const canonicalData = require('./analysis/canonical-data.cjs');
 const dataArchitecture = require('./database/architecture.cjs');
+const manualEntryCatalog = require('./database/manual-entry-catalog.cjs');
 const documentService = require('./documents/document-service.cjs');
 const schemaDrivenDiscovery = require('./documents/schema-driven-discovery.cjs');
 const { RagflowAdapter } = require('./documents/ragflow-adapter.cjs');
@@ -93,25 +94,6 @@ function readRagflowConfig() {
   } catch {
     return { apiKey: '', datasetIds: [] };
   }
-}
-
-function saveRagflowConfig(request = {}) {
-  if (!safeStorage.isEncryptionAvailable()) throw new Error('التخزين المشفر لمفتاح RAGFlow غير متاح في نظام التشغيل.');
-  const apiKey = String(request.apiKey ?? '').trim();
-  const datasetIds = [...new Set((Array.isArray(request.datasetIds) ? request.datasetIds : [])
-    .map((value) => String(value).trim()).filter((value) => /^[a-f0-9]{32}$/i.test(value)))].slice(0, 20);
-  if (apiKey.length < 8 || apiKey.length > 1000 || datasetIds.length === 0) throw new Error('أدخل مفتاح API محليًا ومعرّف مجموعة واحدة على الأقل (32 خانة hex).');
-  const configPath = getRagflowConfigPath();
-  const temporaryPath = `${configPath}.${crypto.randomUUID()}.tmp`;
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  try {
-    fs.writeFileSync(temporaryPath, safeStorage.encryptString(JSON.stringify({ apiKey, datasetIds })), { flag: 'wx', mode: 0o600 });
-    fs.renameSync(temporaryPath, configPath);
-    if (process.platform !== 'win32') fs.chmodSync(configPath, 0o600);
-  } finally {
-    try { fs.rmSync(temporaryPath, { force: true }); } catch {}
-  }
-  return { configured: true, datasetIds };
 }
 
 function getRagflowAdapter() {
@@ -691,8 +673,19 @@ function registerHandlers() {
 
   ipcMain.handle('documents:field-candidate:review', (_event, request = {}) => {
     if (currentProfile() !== 'owner') throw new Error('مراجعة القيم المرشحة تتطلب وضع المالك.');
-    const result = schemaDrivenDiscovery.reviewCandidate(requireDatabase(),request);
+    const result = schemaDrivenDiscovery.reviewCandidate(requireDatabase(),{ ...request,reviewedBy:sessionId });
     auditRead('documents:field-candidate:review', { entity: 'document_field_candidates', entityId: result.candidateId, result: result.status, detail: 'officialDataChanged=false' });
+    return result;
+  });
+
+  ipcMain.handle('documents:field-candidates:promote', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('ترحيل القيم المراجَعة يتطلب وضع المالك.');
+    const result = schemaDrivenDiscovery.promoteReviewedCandidates(requireDatabase(),request,{ actor:sessionId });
+    invalidateSheets();
+    auditRead('documents:field-candidates:promote', {
+      entity:'form_records',entityId:result.formRecordId,result:result.status,
+      detail:`document=${String(request.documentId ?? '').slice(0,80)};candidates=${result.candidateIds.length};fields=${result.fieldCount}`,
+    });
     return result;
   });
 
@@ -739,11 +732,6 @@ function registerHandlers() {
   ipcMain.handle('ragflow:status', async () => {
     if (currentProfile() !== 'owner') return { restricted: true };
     return getRagflowAdapter().health();
-  });
-
-  ipcMain.handle('ragflow:save-config', (_event, request = {}) => {
-    if (currentProfile() !== 'owner') throw new Error('تهيئة البحث المعرفي تتطلب وضع المالك.');
-    return saveRagflowConfig(request);
   });
 
   ipcMain.handle('ragflow:search', async (_event, request = {}) => {
@@ -1021,6 +1009,13 @@ function registerHandlers() {
     return preview;
   });
 
+  ipcMain.handle('data:entry-catalog', () => {
+    if (currentProfile() !== 'owner') throw new Error('كتالوج مجالات الإدخال متاح في وضع المالك فقط.');
+    const catalog = manualEntryCatalog.listCatalog(requireDatabase());
+    auditRead('data:entry-catalog', { entity: 'manual_entry_domains', rowCount: catalog.domains.length, detail: `version=${catalog.version}` });
+    return catalog;
+  });
+
   ipcMain.handle('data:forms', () => {
     if (currentProfile() !== 'owner') throw new Error('كتالوج النماذج متاح في وضع المالك فقط.');
     const rows = recordService.listForms(requireDatabase());
@@ -1057,6 +1052,7 @@ function registerHandlers() {
     const result = request.decision === 'submit'
       ? recordService.submitForReview(requireDatabase(), request.formRecordId, sessionId)
       : recordService.decideRecord(requireDatabase(), request.formRecordId, { ...request, actor: sessionId });
+    if (['approve','reopen'].includes(request.decision)) invalidateSheets();
     return result;
   });
 
@@ -1823,7 +1819,7 @@ if (!gotSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
-    installOfflineSessionGuard(session.defaultSession);
+    installOfflineSessionGuard(session.defaultSession, { allowMainRequest: (details) => isAllowedRagflowRequest(details) });
     // A packaged build has no menu: the default menu exposes DevTools and file
     // dialogs that bypass the field policy.
     if (app.isPackaged) Menu.setApplicationMenu(null);
