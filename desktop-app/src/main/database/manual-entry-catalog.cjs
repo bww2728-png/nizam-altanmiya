@@ -83,6 +83,124 @@ const DOMAINS = [
   ]],
 ];
 
+const FIELD_CANDIDATE_LINKS = Object.freeze({
+  'administrative-geography.administrative-units': ['geography.administrative'],
+  'administrative-geography.representation-and-constituencies': ['geography.boundaries', 'governance.local_government'],
+  'population-households.population': ['population.population'],
+  'population-households.age-groups': ['population.population'],
+  'population-households.households-and-housing': ['population.households'],
+  'poverty-livelihoods.poverty': ['poverty.poverty'],
+  'poverty-livelihoods.social-and-occupational-groups': ['poverty.livelihoods'],
+  'poverty-livelihoods.income-and-livelihoods': ['poverty.livelihoods'],
+  'poverty-livelihoods.assets-and-ownership': ['poverty.assets'],
+  'target-groups-protection.persons-with-disabilities': ['protection.disability'],
+  'target-groups-protection.displacement': ['protection.displacement'],
+  'target-groups-protection.assistance-and-social-protection': ['protection.assistance'],
+  'natural-resources-environment.terrain': ['environment.terrain'],
+  'natural-resources-environment.climate': ['environment.climate'],
+  'natural-resources-environment.soil-and-land': ['environment.soil_land'],
+  'natural-resources-environment.water-resources': ['environment.water'],
+  'natural-resources-environment.vegetation': ['environment.biodiversity'],
+  'natural-resources-environment.wildlife-and-marine-life': ['environment.biodiversity'],
+  'natural-resources-environment.environmental-degradation': ['environment.degradation'],
+  'society-culture-heritage.social-structure': ['society_culture.cohesion'],
+  'society-culture-heritage.customs-and-traditions': ['society_culture.customs'],
+  'society-culture-heritage.cultural-heritage': ['society_culture.heritage'],
+  'society-culture-heritage.social-influencers': ['society_culture.figures'],
+  'local-governance-institutions.local-representation': ['governance.local_government'],
+  'local-governance-institutions.executive-administration': ['governance.executive'],
+  'local-governance-institutions.community-institutions': ['governance.institutions'],
+  'local-governance-institutions.associations-and-cooperatives': ['governance.organizations'],
+  'local-governance-institutions.partners-and-actors': ['governance.partners'],
+  'education-literacy.kindergartens': ['education.kindergarten'],
+  'education-literacy.schools-and-facilities': ['education.schools'],
+  'education-literacy.enrollment-and-students': ['education.enrollment'],
+  'education-literacy.dropout': ['education.enrollment'],
+  'education-literacy.education-workforce': ['education.staff'],
+  'education-literacy.education-specializations': ['education.staff'],
+  'education-literacy.literacy': ['education.literacy'],
+  'health-population-services.health-facilities': ['health.facilities'],
+  'health-population-services.health-coverage': ['health.coverage'],
+  'health-population-services.diseases': ['health.diseases'],
+  'health-population-services.maternal-child-and-immunization': ['health.maternal_child'],
+  'health-population-services.health-workforce': ['health.workforce'],
+  'culture-youth-sports.culture-youth-and-sports-facilities': ['youth_sports.culture', 'youth_sports.sports'],
+  'infrastructure-basic-services.water-supply': ['infrastructure.water'],
+  'infrastructure-basic-services.sanitation-environmental-health': ['infrastructure.sanitation'],
+  'infrastructure-basic-services.electricity-and-energy': ['infrastructure.energy'],
+  'infrastructure-basic-services.roads': ['infrastructure.roads'],
+  'infrastructure-basic-services.telecommunications': ['infrastructure.telecom'],
+  'agriculture-irrigation-livestock-fisheries.water-harvesting-and-irrigation': ['agriculture.irrigation'],
+  'agriculture-irrigation-livestock-fisheries.agricultural-land-and-holdings': ['agriculture.land'],
+  'agriculture-irrigation-livestock-fisheries.livestock': ['agriculture.livestock'],
+  'agriculture-irrigation-livestock-fisheries.poultry': ['agriculture.livestock'],
+  'agriculture-irrigation-livestock-fisheries.beekeeping-and-honey': ['agriculture.livestock'],
+  'agriculture-irrigation-livestock-fisheries.crops': ['agriculture.crops'],
+  'agriculture-irrigation-livestock-fisheries.agricultural-services': ['agriculture.markets'],
+  'agriculture-irrigation-livestock-fisheries.product-marketing': ['agriculture.markets'],
+  'agriculture-irrigation-livestock-fisheries.fisheries-and-fishing': ['agriculture.fisheries'],
+  'industry-private-sector-tourism.industry': ['economy.industry'],
+  'industry-private-sector-tourism.commercial-and-service-establishments': ['economy.establishments'],
+  'industry-private-sector-tourism.tourism': ['economy.tourism'],
+  'projects-finance-revenues.projects': ['finance.projects'],
+  'projects-finance-revenues.project-funding': ['finance.projects'],
+  'projects-finance-revenues.budgets-and-expenses': ['finance.budgets'],
+  'projects-finance-revenues.revenues': ['finance.revenues'],
+  'development-indicators.indicator-definitions': ['indicators.definitions'],
+  'development-indicators.indicator-results': ['indicators.targets'],
+  'development-indicators.targets': ['indicators.targets'],
+  'development-analysis-priorities.swot': ['analysis.swot'],
+  'development-analysis-priorities.pestle': ['analysis.pestle'],
+  'development-analysis-priorities.development-issues': ['analysis.issues'],
+  'development-analysis-priorities.comparisons': ['analysis.comparisons'],
+  'development-analysis-priorities.prioritization': ['analysis.priorities'],
+  'strategic-planning.objectives-and-outcomes': ['planning.objectives'],
+  'strategic-planning.programs-and-initiatives': ['planning.programs'],
+  'strategic-planning.monitoring': ['planning.monitoring'],
+  'crosscutting-documentation-quality.identifiers-and-classifications': ['metadata.identifiers'],
+  'crosscutting-documentation-quality.source-and-provenance': ['metadata.source'],
+  'crosscutting-documentation-quality.data-quality': ['metadata.quality'],
+  'crosscutting-documentation-quality.entry-and-approval': ['metadata.quality'],
+});
+
+const FIELD_CANDIDATE_FIELD_FILTERS = Object.freeze({
+  'population-households.age-groups': { population: ['population.age_sex'] },
+  'poverty-livelihoods.social-and-occupational-groups': { livelihoods: ['livelihood.group_size','livelihood.occupation','livelihood.social_group'] },
+  'poverty-livelihoods.income-and-livelihoods': { livelihoods: ['household.expenditure','household.income','household.inputs','household.outputs'] },
+  'natural-resources-environment.vegetation': { biodiversity: ['environment.plants.economic','environment.plants.shrubs','environment.plants.trees'] },
+  'natural-resources-environment.wildlife-and-marine-life': { biodiversity: ['environment.marine.species','environment.marine.stock','environment.wildlife.animals','environment.wildlife.birds'] },
+  'education-literacy.enrollment-and-students': { enrollment: ['directorate.enrolledStudents','education.enrollment.rate','education.population_school_age'] },
+  'education-literacy.dropout': { enrollment: ['education.dropout.count','education.dropout.rate'] },
+  'education-literacy.education-workforce': { staff: ['education.staff.deputies','education.staff.principals','education.staff.qualification','education.staff.teachers'] },
+  'education-literacy.education-specializations': { staff: ['education.staff.specialty'] },
+  'agriculture-irrigation-livestock-fisheries.livestock': { livestock: ['agriculture.livestock.breeders','agriculture.livestock.disease','agriculture.livestock.infection','agriculture.livestock.species','directorate.livestockHeads'] },
+  'agriculture-irrigation-livestock-fisheries.poultry': { livestock: ['agriculture.poultry.farms'] },
+  'agriculture-irrigation-livestock-fisheries.beekeeping-and-honey': { livestock: ['agriculture.honey.hives','agriculture.honey.price','agriculture.honey.production'] },
+  'agriculture-irrigation-livestock-fisheries.agricultural-services': { markets: ['agriculture.service.beneficiaries','agriculture.service.centers'] },
+  'agriculture-irrigation-livestock-fisheries.product-marketing': { markets: ['agriculture.marketing.cold_storage','agriculture.marketing.product','agriculture.marketing.quantity'] },
+  'projects-finance-revenues.project-funding': { projects: ['directorate.projectCost','projects.authority_contribution','projects.community_contribution','projects.completion'] },
+  'development-indicators.indicator-results': { targets: ['indicator.value'] },
+  'development-indicators.targets': { targets: ['indicator.baseline','indicator.benchmark','indicator.rank','indicator.target','indicator.target_year'] },
+  'crosscutting-documentation-quality.data-quality': { quality: ['metadata.completeness','metadata.quality_note','metadata.quality_status','metadata.review','metadata.verification'] },
+  'crosscutting-documentation-quality.entry-and-approval': { quality: ['metadata.approved_at','metadata.approved_by','metadata.created_at','metadata.created_by','metadata.updated_at','metadata.updated_by'] },
+});
+
+const FIELD_CANDIDATE_VERSION = 7;
+const FIELD_CANDIDATE_CODE = '2026-11-12-manual-entry-field-candidates-v7';
+const FIELD_CANDIDATE_NOTE = 'اقتراح ربط من قاموس النموذج الموحد الحالي؛ يحتاج مراجعة دلالية واعتماد مصدر ووحدة ونطاق قبل إتاحته للإدخال.';
+const FIELD_CANDIDATE_DDL = `
+  CREATE TABLE IF NOT EXISTS manual_entry_group_field_candidates (
+    group_id INTEGER NOT NULL REFERENCES manual_entry_groups(group_id),
+    field_definition_id INTEGER NOT NULL REFERENCES field_definitions(field_definition_id),
+    source_group_code TEXT NOT NULL REFERENCES field_groups(group_code),
+    mapping_state TEXT NOT NULL CHECK(mapping_state = 'needs_domain_review'),
+    mapping_note TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(group_id,field_definition_id,source_group_code)
+  );
+  CREATE INDEX IF NOT EXISTS idx_manual_entry_field_candidates_group ON manual_entry_group_field_candidates(group_id,field_definition_id);
+`;
+
 const DDL = `
   CREATE TABLE IF NOT EXISTS manual_entry_domains (
     domain_id INTEGER PRIMARY KEY,
@@ -124,7 +242,7 @@ function migrate(db) {
     if (existing.checksum !== expectedChecksum || existing.migration_code !== CATALOG_CODE) {
       throw new Error('عُدّل كتالوج مجالات الإدخال بعد تطبيق إصداره؛ أضف ترحيلاً جديداً بدلاً من تغيير التعريف المنشور.');
     }
-    return { version: CATALOG_VERSION, alreadyApplied: true };
+    return { version: CATALOG_VERSION, alreadyApplied: true, fieldCandidates: migrateFieldCandidates(db) };
   }
   if (existing) db.prepare('DELETE FROM schema_migrations WHERE version=? AND success=0').run(CATALOG_VERSION);
 
@@ -163,7 +281,71 @@ function migrate(db) {
         new Date().toISOString(),Date.now()-startedAt,String(error.message).slice(0,4000));
     throw error;
   }
-  return { version: CATALOG_VERSION, alreadyApplied: false };
+  const fieldCandidates = migrateFieldCandidates(db);
+  return { version: CATALOG_VERSION, alreadyApplied: false, fieldCandidates };
+}
+
+function fieldCandidateChecksum() {
+  return crypto.createHash('sha256').update(FIELD_CANDIDATE_DDL).update(JSON.stringify({ links: FIELD_CANDIDATE_LINKS, filters: FIELD_CANDIDATE_FIELD_FILTERS })).update(FIELD_CANDIDATE_NOTE).digest('hex');
+}
+
+function migrateFieldCandidates(db) {
+  const expectedChecksum = fieldCandidateChecksum();
+  const existing = db.prepare('SELECT * FROM schema_migrations WHERE version=?').get(FIELD_CANDIDATE_VERSION);
+  if (existing?.success === 1) {
+    if (existing.checksum !== expectedChecksum || existing.migration_code !== FIELD_CANDIDATE_CODE) {
+      throw new Error('عُدّلت روابط الحقول المرشحة بعد تطبيقها؛ أضف ترحيلاً جديداً بدلاً من تغيير التعريف المنشور.');
+    }
+    return { version: FIELD_CANDIDATE_VERSION, alreadyApplied: true };
+  }
+  if (existing) db.prepare('DELETE FROM schema_migrations WHERE version=? AND success=0').run(FIELD_CANDIDATE_VERSION);
+
+  const now = new Date().toISOString();
+  const startedAt = Date.now();
+  try {
+    db.transaction(() => {
+      db.exec(FIELD_CANDIDATE_DDL);
+      const groups = new Map(db.prepare('SELECT group_id,group_code FROM manual_entry_groups').all().map(row => [row.group_code,row.group_id]));
+      const sourceGroups = new Set(db.prepare("SELECT group_code FROM field_groups WHERE group_level='subdomain'").all().map(row => row.group_code));
+      const fieldsBySource = db.prepare(`SELECT field.field_definition_id,field.field_code
+        FROM field_group_fields link JOIN field_definitions field USING(field_definition_id)
+        WHERE link.group_id=(SELECT group_id FROM field_groups WHERE group_code=? AND group_level='subdomain')
+        ORDER BY link.sort_order,field.field_code`);
+      const insert = db.prepare(`INSERT OR IGNORE INTO manual_entry_group_field_candidates
+        (group_id,field_definition_id,source_group_code,mapping_state,mapping_note,created_at)
+        VALUES(?,?,?,'needs_domain_review',?,?)`);
+      let candidateCount = 0;
+      for (const [targetGroupCode,sourceGroupCodes] of Object.entries(FIELD_CANDIDATE_LINKS)) {
+        const targetGroupId = groups.get(targetGroupCode);
+        if (!targetGroupId) throw new Error(`مجموعة قاموس الإدخال غير موجودة: ${targetGroupCode}`);
+        for (const sourceGroupCode of sourceGroupCodes) {
+          if (!sourceGroups.has(sourceGroupCode)) throw new Error(`مجموعة قاموس الحقول غير موجودة: ${sourceGroupCode}`);
+          const sourceFields = fieldsBySource.all(sourceGroupCode);
+          const requiredCodes = FIELD_CANDIDATE_FIELD_FILTERS[targetGroupCode]?.[sourceGroupCode.split('.').at(-1)];
+          let eligibleFields = sourceFields;
+          if (requiredCodes) {
+            const fieldsByCode = new Map(sourceFields.map(field => [field.field_code,field]));
+            const missingCodes = requiredCodes.filter(code => !fieldsByCode.has(code));
+            if (missingCodes.length) throw new Error(`تعريفات الحقول المرشحة غير موجودة للمجموعة ${targetGroupCode}: ${missingCodes.join(', ')}`);
+            eligibleFields = requiredCodes.map(code => fieldsByCode.get(code));
+          }
+          for (const field of eligibleFields) {
+            candidateCount += insert.run(targetGroupId,field.field_definition_id,sourceGroupCode,FIELD_CANDIDATE_NOTE,now).changes;
+          }
+        }
+      }
+      db.prepare(`INSERT INTO schema_migrations(version,migration_code,migration_name,checksum,applied_at,execution_ms,success,details)
+        VALUES(?,?,?,?,?,?,1,?)`).run(FIELD_CANDIDATE_VERSION,FIELD_CANDIDATE_CODE,'ربط الحقول الموجودة بمجموعات الإدخال كمرشحات غير منشورة',expectedChecksum,now,
+          Date.now()-startedAt,`أُضيف ${candidateCount} ربطاً مرشحاً؛ لا يتيح هذا الترحيل نموذجاً أو اعتماداً تلقائياً.`);
+    })();
+  } catch (error) {
+    db.prepare(`INSERT OR REPLACE INTO schema_migrations(version,migration_code,migration_name,checksum,applied_at,execution_ms,success,details)
+      VALUES(?,?,?,?,?,?,0,?)`).run(FIELD_CANDIDATE_VERSION,FIELD_CANDIDATE_CODE,'ربط الحقول الموجودة بمجموعات الإدخال كمرشحات غير منشورة',expectedChecksum,
+        new Date().toISOString(),Date.now()-startedAt,String(error.message).slice(0,4000));
+    throw error;
+  }
+  return { version: FIELD_CANDIDATE_VERSION, alreadyApplied: false,
+    count: db.prepare('SELECT COUNT(*) AS count FROM manual_entry_group_field_candidates').get().count };
 }
 
 function listCatalog(db) {
@@ -188,14 +370,54 @@ function listCatalog(db) {
     if (!row.group_code) continue;
     let group = domain.groups.at(-1);
     if (!group || group.code !== row.group_code) {
-      group = { id: row.group_id, code: row.group_code, name: row.group_name_ar, order: row.group_order, definitionState: row.group_state, forms: [] };
+      group = { id: row.group_id, code: row.group_code, name: row.group_name_ar, order: row.group_order, definitionState: row.group_state,
+        fieldCoverageState: 'no_existing_field_mapping', forms: [], fields: [], publishedFields: [] };
       domain.groups.push(group);
     }
     if (row.form_code && row.form_version_id && row.form_status === 'published') {
       group.forms.push({ code: row.form_code, name: row.form_name_ar, versionId: row.form_version_id });
     }
   }
-  return { version: CATALOG_VERSION, sourceNote: CATALOG_SOURCE, domains };
+  const candidateRows = db.prepare(`SELECT group_catalog.group_code AS target_group_code,field.field_code,field.canonical_name_ar,
+      field.semantic_type,field.data_type,unit.name_ar AS unit_name_ar,candidate.source_group_code,candidate.mapping_state,candidate.mapping_note
+    FROM manual_entry_group_field_candidates candidate
+    JOIN manual_entry_groups group_catalog ON group_catalog.group_id=candidate.group_id
+    JOIN field_definitions field ON field.field_definition_id=candidate.field_definition_id
+    LEFT JOIN measurement_units unit ON unit.unit_id=field.default_unit_id
+    ORDER BY group_catalog.group_code,field.field_code,candidate.source_group_code`).all();
+  const groupByCode = new Map(domains.flatMap(domain => domain.groups).map(group => [group.code,group]));
+  for (const row of candidateRows) {
+    const group = groupByCode.get(row.target_group_code);
+    group.fieldCoverageState = 'needs_domain_review';
+    let field = group.fields.find(item => item.code === row.field_code);
+    if (!field) {
+      field = { code: row.field_code, name: row.canonical_name_ar, semanticType: row.semantic_type, dataType: row.data_type,
+        unit: row.unit_name_ar, mappingState: row.mapping_state, sourceGroupCodes: [] };
+      group.fields.push(field);
+    }
+    if (!field.sourceGroupCodes.includes(row.source_group_code)) field.sourceGroupCodes.push(row.source_group_code);
+  }
+  const publishedFieldRows = db.prepare(`SELECT group_catalog.group_code AS target_group_code,form.form_code,field.field_code,
+      field.canonical_name_ar,field.semantic_type,field.data_type,unit.name_ar AS unit_name_ar
+    FROM manual_entry_group_forms mapping
+    JOIN manual_entry_groups group_catalog ON group_catalog.group_id=mapping.group_id
+    JOIN form_definitions form ON form.form_code=mapping.form_code AND form.is_active=1
+    JOIN form_versions version ON version.form_id=form.form_id AND version.status='published'
+    JOIN form_fields form_field ON form_field.form_version_id=version.form_version_id
+    JOIN field_definitions field ON field.field_definition_id=form_field.field_definition_id
+    LEFT JOIN measurement_units unit ON unit.unit_id=coalesce(form_field.unit_id,field.default_unit_id)
+    ORDER BY group_catalog.group_code,form.form_code,field.field_code`).all();
+  for (const row of publishedFieldRows) {
+    const group = groupByCode.get(row.target_group_code);
+    if (group.fieldCoverageState === 'no_existing_field_mapping') group.fieldCoverageState = 'published_fields_available';
+    if (!group.publishedFields.some(field => field.code === row.field_code)) {
+      group.publishedFields.push({ code: row.field_code, name: row.canonical_name_ar, semanticType: row.semantic_type,
+        dataType: row.data_type, unit: row.unit_name_ar, formCodes: [] });
+    }
+    const field = group.publishedFields.find(item => item.code === row.field_code);
+    if (!field.formCodes.includes(row.form_code)) field.formCodes.push(row.form_code);
+  }
+  return { version: CATALOG_VERSION, sourceNote: CATALOG_SOURCE, domains, fieldMappingNote: FIELD_CANDIDATE_NOTE };
 }
 
-module.exports = { CATALOG_VERSION, CATALOG_CODE, DOMAINS, migrate, listCatalog };
+module.exports = { CATALOG_VERSION, CATALOG_CODE, FIELD_CANDIDATE_VERSION, FIELD_CANDIDATE_LINKS, DOMAINS, migrate, listCatalog };

@@ -51,7 +51,9 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   const matchingDomains = domains.filter((domain) => {
     const query = catalogSearch.trim().toLocaleLowerCase();
     return !query || domain.name.toLocaleLowerCase().includes(query)
-      || domain.groups.some((group) => group.name.toLocaleLowerCase().includes(query));
+      || domain.groups.some((group) => group.name.toLocaleLowerCase().includes(query)
+        || group.fields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query)))
+      || domain.groups.some((group) => group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query)));
   });
   const selectCatalogGroup = (domain, group) => {
     if (editingRecord) return;
@@ -271,7 +273,13 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
           <div className="row" role="group" aria-label="المجالات التنموية">
             {matchingDomains.map((domain) => <button key={domain.code} type="button" className={`btn small ${selectedDomain?.code === domain.code ? 'primary' : 'ghost'}`} aria-pressed={selectedDomain?.code === domain.code} onClick={() => {
               setSelectedDomainCode(domain.code);
-              const nextGroup = domain.groups.find((group) => group.forms.some((form) => form.versionId)) ?? domain.groups[0];
+              const query = catalogSearch.trim().toLocaleLowerCase();
+              const nextGroup = query
+                ? domain.groups.find((group) => group.name.toLocaleLowerCase().includes(query)
+                  || group.fields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
+                  || group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query)))
+                  ?? domain.groups.find((group) => group.forms.some((form) => form.versionId)) ?? domain.groups[0]
+                : domain.groups.find((group) => group.forms.some((form) => form.versionId)) ?? domain.groups[0];
               setSelectedGroupCode(nextGroup?.code ?? '');
               setFormVersionId(String(nextGroup?.forms.find((form) => form.versionId)?.versionId ?? ''));
             }}>{domain.name}<span className="dim"> · {domain.groups.length}</span></button>)}
@@ -279,13 +287,30 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
           {selectedDomain && <section className="stack tight" aria-label="المجموعات الفرعية">
             <strong>{selectedDomain.name}</strong>
             <div className="row">
-              {selectedDomain.groups.map((group) => <button key={group.code} type="button" className={`btn small ${selectedGroup?.code === group.code ? 'primary' : 'ghost'}`} aria-pressed={selectedGroup?.code === group.code} disabled={Boolean(editingRecord)} onClick={() => selectCatalogGroup(selectedDomain, group)}>
+              {selectedDomain.groups.filter((group) => {
+                const query = catalogSearch.trim().toLocaleLowerCase();
+                return !query || selectedDomain.name.toLocaleLowerCase().includes(query) || group.name.toLocaleLowerCase().includes(query)
+                  || group.fields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
+                  || group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query));
+              }).map((group) => <button key={group.code} type="button" className={`btn small ${selectedGroup?.code === group.code ? 'primary' : 'ghost'}`} aria-pressed={selectedGroup?.code === group.code} disabled={Boolean(editingRecord)} onClick={() => selectCatalogGroup(selectedDomain, group)}>
                 {group.name}<span className="dim"> · {group.forms.length ? 'نموذج جزئي' : 'قيد التعريف'}</span>
               </button>)}
             </div>
           </section>}
-          {selectedGroup && <div className="quote">
-            <strong>{selectedGroup.forms.length ? 'التغطية المنشورة جزئية:' : 'مجموعة بانتظار التعريف:'}</strong>{' '}{selectedGroup.forms.length ? `توجد ${selectedGroup.forms.length} نماذج منشورة مرتبطة بهذه المجموعة؛ نطاقها لا يغطي عناصر المجال كاملة.` : 'لا يوجد نموذج منشور لهذه المجموعة؛ لا يسمح النظام بإدخال قيم قبل حسم التعريف والوحدة والأبعاد والمصدر.'}
+          {selectedGroup && <div className="stack tight">
+            <div className="quote">
+              <strong>{selectedGroup.forms.length ? 'التغطية المنشورة جزئية:' : 'مجموعة بانتظار التعريف:'}</strong>{' '}{selectedGroup.forms.length ? `توجد ${selectedGroup.forms.length} نماذج منشورة مرتبطة بهذه المجموعة؛ نطاقها لا يغطي عناصر المجال كاملة.` : 'لا يوجد نموذج منشور لهذه المجموعة؛ لا يسمح النظام بإدخال قيم قبل حسم التعريف والوحدة والأبعاد والمصدر.'}
+              {!selectedGroup.forms.length && <p>{selectedGroup.fieldCoverageState === 'needs_domain_review'
+                ? `عُثر على ${selectedGroup.fields.length} تعريفات موجودة، لكنها تحتاج مراجعة دلالية قبل اعتمادها.`
+                : 'لا توجد تعريفات حقول حالية مرتبطة بهذه المجموعة؛ يجب إكمال قاموسها من المواصفة قبل إتاحة الإدخال.'}</p>}
+            </div>
+            {selectedGroup.fields?.length > 0 && <div className="quote">
+              <strong>حقول موجودة تحتاج مراجعة دلالية ({selectedGroup.fields.length}):</strong>
+              <p>هذه روابط مرشحة من قاموس النظام، وليست حقول إدخال معتمدة ولا تظهر في التحليلات قبل مراجعتها ونشر نموذج موثق.</p>
+              <div className="row">{selectedGroup.fields.map((field) => <span className="chip" key={field.code} title={`${field.code} · ${field.semanticType} · ${field.dataType}`}>
+                {field.name}{field.unit ? ` (${field.unit})` : ''}
+              </span>)}</div>
+            </div>}
           </div>}
         </div>
       </Card>
