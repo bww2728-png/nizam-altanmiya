@@ -4,11 +4,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { INPUT_FIELDS, DECISION_FIELD, DIRECTORATE_FIELD_CLASS_BY_KEY } = require('../analysis/schema.cjs');
+const migrationIntegrity = require('./migration-integrity.cjs');
 
 const VERSION = 4;
 const CODE = '2026-11-11-domain-record-backfill-v4';
 const SCHEMA_FILE = path.join(__dirname, 'architecture-v1.sql');
-const SCHEMA_SQL = fs.readFileSync(SCHEMA_FILE, 'utf8');
+// Raw bytes of the schema file. The digest helpers below canonicalise the text so
+// a Windows (CRLF) checkout and an LF checkout produce the same migration checksum.
+const SCHEMA_SQL_RAW = fs.readFileSync(SCHEMA_FILE, 'utf8');
+const SCHEMA_SQL = migrationIntegrity.canonicalText(SCHEMA_SQL_RAW);
 const TABLE_COLUMNS = {
   sectors: [['sector_id','INTEGER'],['parent_sector_id','INTEGER'],['sector_code','TEXT'],['name_en','TEXT'],['sort_order','INTEGER NOT NULL DEFAULT 0'],['is_active','INTEGER NOT NULL DEFAULT 1'],['updated_at','TEXT']],
   geographic_units: [['geo_unit_id','INTEGER'],['geo_unit_type_id','INTEGER'],['parent_geo_unit_id','INTEGER'],['name_ar','TEXT'],['name_en','TEXT'],['valid_from','TEXT'],['valid_to','TEXT'],['is_active','INTEGER NOT NULL DEFAULT 1'],['source_id','INTEGER']],
@@ -30,6 +34,7 @@ function normalize(value) {
     .replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
     .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ').toLowerCase();
 }
+const SCHEMA_CHECKSUMS = migrationIntegrity.migrationChecksums({ text: SCHEMA_SQL_RAW, definition: JSON.stringify(TABLE_COLUMNS) });
 function tableExists(db, table) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table));
 }
@@ -924,14 +929,14 @@ function mirrorWorkbookImport(db, workbookBatchId) {
   return syncWorkbookImportStatus(db,id);
 }
 function checksum() {
-  return crypto.createHash('sha256').update(SCHEMA_SQL + JSON.stringify(TABLE_COLUMNS)).digest('hex');
+  return SCHEMA_CHECKSUMS.canonical;
 }
 function migrateV4(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,migration_code TEXT NOT NULL UNIQUE,migration_name TEXT NOT NULL,checksum TEXT NOT NULL,applied_at TEXT NOT NULL,execution_ms INTEGER,success INTEGER NOT NULL CHECK(success IN (0,1)),details TEXT)`);
   const sourceChecksum = checksum();
   const existing = db.prepare('SELECT * FROM schema_migrations WHERE version=?').get(VERSION);
   if (existing?.success === 1) {
-    if (existing.checksum !== sourceChecksum) throw new Error(`ترحيل ${CODE} عُدّل بعد تطبيقه. أنشئ إصدار ترحيل جديداً.`);
+    migrationIntegrity.verifyAppliedMigration(db, { table: 'schema_migrations', version: VERSION, recorded: existing.checksum, checksums: SCHEMA_CHECKSUMS, label: CODE });
     db.transaction(() => {
       const now = new Date().toISOString();
       backfillLegacy(db,now);
@@ -968,10 +973,11 @@ function migrateV5(db) {
   const migrationVersion = 5;
   const migrationCode = '2026-11-11-remove-unresolved-placeholder-forms-v5';
   const cleanupPolicy = 'unresolved-only;retain-records-imports-profiles-sections-fields-rows;retain-referenced-sectors';
-  const migrationChecksum = crypto.createHash('sha256').update(checksum() + migrationCode + cleanupPolicy).digest('hex');
+  const V5_CHECKSUMS = migrationIntegrity.migrationChecksums({ text: SCHEMA_SQL_RAW, definition: JSON.stringify(TABLE_COLUMNS), suffix: migrationCode + cleanupPolicy });
+  const migrationChecksum = V5_CHECKSUMS.canonical;
   const existing = db.prepare('SELECT * FROM schema_migrations WHERE version=?').get(migrationVersion);
   if (existing?.success === 1) {
-    if (existing.checksum !== migrationChecksum) throw new Error(`ترحيل ${migrationCode} عُدّل بعد تطبيقه. أنشئ إصدار ترحيل جديداً.`);
+    migrationIntegrity.verifyAppliedMigration(db, { table: 'schema_migrations', version: migrationVersion, recorded: existing.checksum, checksums: V5_CHECKSUMS, label: migrationCode });
     return { version:migrationVersion,alreadyApplied:true };
   }
   if (existing) db.prepare('DELETE FROM schema_migrations WHERE version=? AND success=0').run(migrationVersion);

@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const migrationIntegrity = require('./migration-integrity.cjs');
 
 const VERSION = 1;
 const CODE = 'unified-development-model-v1';
@@ -301,9 +302,14 @@ function seedPriority(db,now) {
   const insert=db.prepare('INSERT OR IGNORE INTO priority_criteria(criterion_code,name_ar,default_weight,direction,is_active,created_at,updated_at) VALUES(?,?,?,\'higher_is_higher\',1,?,?)');
   rows.forEach(x=>insert.run(...x,now,now));
 }
+function modelDefinitionJson() {
+  return JSON.stringify({CATALOG,LEGACY,UNITS,DIMS,REFS,ENTITY_TYPES});
+}
+function checksums() {
+  return migrationIntegrity.migrationChecksums({ text: fs.readFileSync(SQL_FILE, 'utf8'), definition: modelDefinitionJson() });
+}
 function checksum() {
-  const sql=fs.readFileSync(SQL_FILE,'utf8');
-  return crypto.createHash('sha256').update(sql+JSON.stringify({CATALOG,LEGACY,UNITS,DIMS,REFS,ENTITY_TYPES})).digest('hex');
+  return checksums().canonical;
 }
 function migrateSeedPolicy(db) {
   const version=2;
@@ -311,9 +317,13 @@ function migrateSeedPolicy(db) {
   const seededWeights=[['severity',0.25],['scale',0.20],['urgency',0.20],['affected_population',0.15],['feasibility',0.10],['equity',0.10]];
   const catalogAliases=[...new Set(CATALOG.flatMap(([, ,children])=>children.flatMap(([, ,fields])=>fields.map(entry=>norm(entry.split('|')[1])))))];
   const provenanceRule='only-rows-created-by-development-model-migration-v1';
-  const hash=crypto.createHash('sha256').update(checksum()+code+JSON.stringify(seededWeights)+JSON.stringify(catalogAliases)+provenanceRule).digest('hex');
+  const seedChecksums=migrationIntegrity.migrationChecksums({text:fs.readFileSync(SQL_FILE,'utf8'),definition:modelDefinitionJson(),suffix:code+JSON.stringify(seededWeights)+JSON.stringify(catalogAliases)+provenanceRule});
+  const hash=seedChecksums.canonical;
   const previous=db.prepare('SELECT * FROM development_model_migrations WHERE version=?').get(version);
-  if(previous?.success===1){if(previous.checksum!==hash)throw new Error('تم تعديل ترحيل سياسة بذور نموذج البيانات بعد تطبيقه؛ أنشئ إصداراً جديداً.');return {version,alreadyApplied:true};}
+  if(previous?.success===1){
+    migrationIntegrity.verifyAppliedMigration(db,{table:'development_model_migrations',version,recorded:previous.checksum,checksums:seedChecksums,label:code});
+    return {version,alreadyApplied:true};
+  }
   if(previous)db.prepare('DELETE FROM development_model_migrations WHERE version=? AND success=0').run(version);
   const now=new Date().toISOString();
   const seedTimestamp=db.prepare('SELECT applied_at FROM development_model_migrations WHERE version=1 AND success=1').get()?.applied_at;
@@ -347,7 +357,8 @@ function migrate(db) {
   db.exec('CREATE TABLE IF NOT EXISTS development_model_migrations(version INTEGER PRIMARY KEY,migration_code TEXT NOT NULL UNIQUE,checksum TEXT NOT NULL,applied_at TEXT NOT NULL,success INTEGER NOT NULL CHECK(success IN (0,1)),details TEXT)');
   const hash=checksum();
   const previous=db.prepare('SELECT * FROM development_model_migrations WHERE version=?').get(VERSION);
-  if(previous?.success===1){if(previous.checksum!==hash)throw new Error('تم تعديل ترحيل نموذج البيانات بعد تطبيقه؛ أنشئ إصداراً جديداً.');}
+  const sourceChecksums=checksums();
+  if(previous?.success===1){migrationIntegrity.verifyAppliedMigration(db,{table:'development_model_migrations',version:VERSION,recorded:previous.checksum,checksums:sourceChecksums,label:CODE});}
   else {
     if(previous)db.prepare('DELETE FROM development_model_migrations WHERE version=? AND success=0').run(VERSION);
     const now=new Date().toISOString();

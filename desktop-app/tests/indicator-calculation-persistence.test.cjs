@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const Database = require('better-sqlite3-multiple-ciphers');
-const { migrate, needsMigration } = require('../src/main/analysis/store-schema.cjs');
+const { MIGRATION_VERSION, migrate, needsMigration } = require('../src/main/analysis/store-schema.cjs');
 const persist = require('../src/main/analysis/persist.cjs');
 const { analyze } = require('../src/main/analysis/engine.cjs');
 const security = require('../src/main/security.cjs');
@@ -99,12 +99,12 @@ test('a v2 installation upgrades calculation lineage transactionally without los
   try {
     database.prepare(`INSERT INTO analysis_runs(mode,k_threshold,deprivation_line,row_count,weights_json,created_at)
       VALUES('both',0.5,0.4,0,'{}','2026-01-01T00:00:00.000Z')`).run();
-    database.prepare('DELETE FROM store_schema_migrations WHERE version=3').run();
+    database.prepare('DELETE FROM store_schema_migrations WHERE version=?').run(MIGRATION_VERSION);
     database.exec('DROP TABLE analysis_calculation_result_links; DROP TABLE analysis_calculation_run_links; DROP TABLE indicator_calculation_schema_migrations;');
 
     assert.equal(needsMigration(database), true);
     const upgraded = migrate(database);
-    assert.equal(upgraded.version, 3);
+    assert.equal(upgraded.version, MIGRATION_VERSION);
     assert.equal(database.prepare('SELECT COUNT(*) AS count FROM analysis_runs').get().count, 1);
     assert.equal(database.prepare('SELECT COUNT(*) AS count FROM indicator_calculation_schema_migrations WHERE success=1').get().count, 1);
     assert.equal(needsMigration(database), false);

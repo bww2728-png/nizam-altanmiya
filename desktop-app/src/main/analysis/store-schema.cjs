@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const canonicalData = require('./canonical-data.cjs');
 const dataArchitecture = require('../database/architecture.cjs');
 const unifiedDevelopmentModel = require('../database/unified-development-model.cjs');
+const unifiedDevelopmentModelV2 = require('../database/unified-development-model-v2.cjs');
 const documentService = require('../documents/document-service.cjs');
 const schemaDrivenDiscovery = require('../documents/schema-driven-discovery.cjs');
 const indicatorCalculationPersistence = require('./indicator-calculation-persistence.cjs');
@@ -376,8 +377,8 @@ function applyColumnMigrations(database, table, migrations) {
   }
 }
 
-const MIGRATION_VERSION = 3;
-const MIGRATION_CODE = 'unified-store-schema-v3';
+const MIGRATION_VERSION = 4;
+const MIGRATION_CODE = 'unified-store-schema-v4';
 
 function checksum() {
   return crypto.createHash('sha256').update(JSON.stringify({
@@ -390,6 +391,7 @@ function checksum() {
     canonicalData: canonicalData.checksum(),
     dataArchitecture: dataArchitecture.checksum(),
     unifiedDevelopmentModel: unifiedDevelopmentModel.checksum(),
+    unifiedDevelopmentModelV2: unifiedDevelopmentModelV2.checksum(),
     indicatorCalculationPersistence: indicatorCalculationPersistence.checksum(),
     documentService: documentService.checksum(),
     schemaDrivenDiscovery: schemaDrivenDiscovery.checksum(),
@@ -425,12 +427,14 @@ function migrate(database, options = {}) {
       success INTEGER NOT NULL CHECK(success IN (0,1)),
       details TEXT
     )`);
+    database.prepare('DELETE FROM store_schema_migrations WHERE version=? AND success=0').run(MIGRATION_VERSION);
     database.exec(SQL);
     applyColumnMigrations(database, 'analysis_results', RESULT_COLUMN_MIGRATIONS);
     applyColumnMigrations(database, 'directorates', DIRECTORATE_COLUMN_MIGRATIONS);
     canonicalData.migrateCanonicalData(database);
     dataArchitecture.migrate(database);
     unifiedDevelopmentModel.migrate(database);
+    unifiedDevelopmentModelV2.migrate(database);
     indicatorCalculationPersistence.migrate(database);
     documentService.migrate(database);
     schemaDrivenDiscovery.migrate(database);
