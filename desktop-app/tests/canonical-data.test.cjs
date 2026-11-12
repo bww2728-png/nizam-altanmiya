@@ -162,18 +162,26 @@ test('central record writes validate values and keep revisions, provenance and r
       'directorate.population': { value:'٥٬٠٠٠' },
     };
     assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,values:{ ...values,'directorate.population':{ value:'-2' } } }),/الحد الأدنى/);
-    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,periodYear:'2025',values,actor:'tester' });
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,values:{},valueSources:{ 'directorate.population':'مصدر بلا قيمة' } }),/دون حفظ قيمة أو حالة/);
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,values,valueSources:{ 'directorate.unknown':'مصدر مجهول' } }),/حقل مصدر غير معرّف/);
+    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,periodYear:'2025',values,actor:'tester',valueSources:{ 'directorate.population':'استمارة حصر 2025، ورقة السكان، الخلية C4' } });
     const firstObservation = db.prepare("SELECT value_integer,value_real FROM observations WHERE form_record_id=? AND form_field_id=(SELECT form_field_id FROM form_fields WHERE field_code='directorate.population')").get(created.formRecordId);
     assert.equal(firstObservation.value_integer,5000);
+    assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].sourceLocator,'استمارة حصر 2025، ورقة السكان، الخلية C4');
+    assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].sourceType,'manual_entry');
+    assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].provenanceType,'manual_entry');
+    assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].enteredBy,'tester');
     recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,periodYear:'2025',values:{
       'directorate.districtName':{ value:'المعافر' },
       'directorate.governorate':{ value:'تعز' },
       'directorate.population':{ value:'6500' },
-    },changeReason:'تحديث يدوي',actor:'tester' });
+    },changeReason:'تحديث يدوي',actor:'tester',valueSources:{ 'directorate.population':'إفادة مكتب الإحصاء، الصفحة 2' } });
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM observations WHERE form_record_id=?').get(created.formRecordId).n,1);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM value_provenance WHERE observation_id IN (SELECT observation_id FROM observations WHERE form_record_id=?)').get(created.formRecordId).n,2);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM record_revisions WHERE form_record_id=?').get(created.formRecordId).n,2);
     assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].value,'6500');
+    assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].sourceLocator,'إفادة مكتب الإحصاء، الصفحة 2');
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM value_provenance WHERE observation_id IN (SELECT observation_id FROM observations WHERE form_record_id=?) AND source_locator IN ('استمارة حصر 2025، ورقة السكان، الخلية C4','إفادة مكتب الإحصاء، الصفحة 2')").get(created.formRecordId).n,2);
     assert.equal(recordService.submitForReview(db,created.formRecordId,'reviewer').status,'pending_review');
     assert.equal(recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' }).status,'approved');
     const normalizedDirectorates = persist.listDirectorates(db,{ periodKey:'2025',limit:20 });
@@ -607,6 +615,88 @@ test('manual canonical project edits validate values, preserve linked funding an
     assert.equal(canonical.listCanonicalReferences(db).sectors.length, 1);
     assert.throws(() => canonical.saveCanonicalProject(db, { name: 'بلا عملة', estimated_cost: 10 }), /رمز عملة/);
     assert.throws(() => canonical.saveCanonicalProject(db, { id: created.id, name: 'تاريخ غير متسق', start_date: '2026-12-01', end_date: '2026-01-01' }), /تاريخ البداية/);
+  } finally {
+    db.close();
+  }
+});
+
+test('approved central project records are mirrored transactionally into canonical project analysis reads', () => {
+  const db = openDatabase();
+  try {
+    dataArchitecture.migrate(db);
+    db.prepare("INSERT INTO sectors(code,name_ar,created_at) VALUES('water','المياه','2026-01-01')").run();
+    const form = recordService.listForms(db).find(item => item.form_code === 'project_v1');
+    assert.ok(form?.form_version_id);
+    const values = {
+      projectCode:{ value:'CENTRAL-P-1' },
+      projectName:{ value:'تأهيل شبكة مياه مركزية' },
+      description:{ value:'سجل مشروع معتمد من مركز الإدخال.' },
+      projectStatus:{ value:'مقترح' },
+      estimatedCost:{ value:'١٬٢٥٠' },
+      currencyCode:{ value:'YER' },
+      startDate:{ value:'2025-01-01' },
+      sectorCode:{ value:'water' },
+    };
+    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,periodYear:'2025',values,actor:'operator' });
+    assert.equal(recordService.submitForReview(db,created.formRecordId,'reviewer').status,'pending_review');
+    assert.equal(recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' }).status,'approved');
+    const link = db.prepare("SELECT legacy_entity_id FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='project'").get(created.formRecordId);
+    assert.ok(link);
+    const project = db.prepare('SELECT code,name,estimated_cost,currency_code FROM projects WHERE id=?').get(link.legacy_entity_id);
+    assert.deepEqual(project,{ code:'CENTRAL-P-1',name:'تأهيل شبكة مياه مركزية',estimated_cost:1250,currency_code:'YER' });
+    assert.equal(canonical.listCanonicalProjects(db,{ search:'CENTRAL-P-1' }).total,1);
+    assert.equal(canonical.getCanonicalProject(db,link.legacy_entity_id).project.form_record_id,created.formRecordId);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM application_migration_log WHERE migration_code='domain-records-v1' AND source_table='projects' AND source_id=? AND target_id=?").get(String(link.legacy_entity_id),String(created.formRecordId)).n,1);
+
+    recordService.decideRecord(db,created.formRecordId,{ decision:'reopen',actor:'reviewer',reason:'تحديث البيانات.' });
+    recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,periodYear:'2025',changeReason:'تحديث اسم المشروع.',actor:'operator',values:{
+      ...values,projectName:{ value:'تأهيل شبكة مياه مطور' },estimatedCost:{ value:'1,500' },
+    } });
+    recordService.submitForReview(db,created.formRecordId,'reviewer');
+    recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' });
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM projects').get().n,1);
+    assert.equal(db.prepare('SELECT name,estimated_cost FROM projects WHERE id=?').get(link.legacy_entity_id).name,'تأهيل شبكة مياه مطور');
+    assert.equal(db.prepare('SELECT estimated_cost FROM projects WHERE id=?').get(link.legacy_entity_id).estimated_cost,1500);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM project_versions WHERE project_id=? AND action='central-record-approval-update'").get(link.legacy_entity_id).n,1);
+    assert.equal(canonical.listCanonicalProjects(db,{ search:'مطور' }).total,1);
+  } finally {
+    db.close();
+  }
+});
+
+test('approved central indicator observations feed the canonical indicator reads and reject duplicates', () => {
+  const db = openDatabase();
+  try {
+    dataArchitecture.migrate(db);
+    const form = recordService.listForms(db).find(item => item.form_code === 'indicator_observation_v1');
+    const indicator = db.prepare("SELECT id,code FROM indicator_definitions WHERE code='waterDeficit'").get();
+    const geoType = db.prepare("SELECT geo_unit_type_id FROM geo_unit_types WHERE type_code='directorate'").get().geo_unit_type_id;
+    const now = '2026-01-01T00:00:00.000Z';
+    const geoUnitId = Number(db.prepare(`INSERT INTO geographic_units(unit_type,name,normalized_name,created_at,updated_at,geo_unit_type_id,name_ar,is_active)
+      VALUES('district','مديرية اختبار','مديرية اختبار',?,?,?,'مديرية اختبار',1)`).run(now,now,geoType).lastInsertRowid);
+    db.prepare('UPDATE geographic_units SET geo_unit_id=id WHERE id=?').run(geoUnitId);
+    const values = {
+      indicatorCode:{ value:indicator.code },
+      indicatorLabel:{ value:'عجز المياه' },
+      periodKey:{ value:'2025' },
+      valueNumber:{ value:'17' },
+      valueState:{ value:'known' },
+    };
+    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,geoUnitId,periodYear:'2025',values,actor:'operator' });
+    recordService.submitForReview(db,created.formRecordId,'reviewer');
+    recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' });
+    const listed = canonical.listIndicatorObservations(db,{ indicatorId:indicator.id });
+    assert.equal(listed.total,1);
+    assert.equal(listed.rows[0].value_number,17);
+    assert.equal(listed.rows[0].value_state,'known');
+    assert.equal(listed.rows[0].source_location,`مركز الإدخال اليدوي:form-record-${created.formRecordId}`);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='indicator_observation'").get(created.formRecordId).n,1);
+
+    const duplicate = recordService.saveRecord(db,{ formVersionId:form.form_version_id,geoUnitId,periodYear:'2025',values,actor:'operator' });
+    recordService.submitForReview(db,duplicate.formRecordId,'reviewer');
+    assert.throws(() => recordService.decideRecord(db,duplicate.formRecordId,{ decision:'approve',actor:'reviewer' }),/يوجد قياس آخر/);
+    assert.equal(recordService.getRecord(db,duplicate.formRecordId).record.record_status,'pending_review');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM indicator_observations').get().n,1);
   } finally {
     db.close();
   }

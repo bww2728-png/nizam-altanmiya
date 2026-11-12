@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('localApp', {
   backups: () => ipcRenderer.invoke('db:backups'),
 
   // Database-driven forms and the shared record/review write path
+  dataEntryCatalog: () => ipcRenderer.invoke('data:entry-catalog'),
   dataForms: () => ipcRenderer.invoke('data:forms'),
   dataFormDefinition: (formVersionId) => ipcRenderer.invoke('data:form-definition', formVersionId),
   dataRecords: (request) => ipcRenderer.invoke('data:records:list', request),
