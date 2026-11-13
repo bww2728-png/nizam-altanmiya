@@ -470,19 +470,20 @@ app.whenReady().then(async () => {
     // Exercise non-directorate review, explicit row selection and canonical
     // project promotion with a real Electron pointer click.
     const projectReviewDiagnostics = await window.webContents.executeJavaScript(`(async () => {
-      const batches = await window.localApp.importHistory({ limit: 5 });
-      const latest = batches[0];
+      const sourceRows = await window.localApp.dataSources({ limit: 50, sort: 'newest' });
+      const latest = (sourceRows.rows ?? []).find(row => row.resource_type === 'workbook_import');
       if (!latest) return { batches: [], reason: 'no-import-batch' };
-      const inventory = await window.localApp.importRegions({ batchId: latest.id });
+      const batchId = Number(latest.resource_id);
+      const inventory = await window.localApp.importRegions({ batchId });
       const projectRegions = (inventory.regions ?? []).filter(region => region.candidateType === 'project-candidate');
       const previews = [];
       for (const region of projectRegions) {
         previews.push(await window.localApp.importRegionPreview({
-          batchId: latest.id, regionId: region.id, offset: 0, limit: 5,
+          batchId, regionId: region.id, offset: 0, limit: 5,
         }));
       }
       return {
-        latestBatchId: latest.id,
+        latestBatchId: batchId,
         regions: (inventory.regions ?? []).map(region => ({
           id: region.id, sheetName: region.sheetName, candidateType: region.candidateType,
           headerRow: region.headerRow, totalRows: region.totalRows, headers: region.headers,
