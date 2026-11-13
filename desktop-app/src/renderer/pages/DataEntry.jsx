@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Check, ClipboardList, RefreshCw, Search, Send, ShieldAlert } from 'lucide-react';
 import { Card, Field, Loading, SelectInput, TextInput } from '../components/ui.jsx';
-import { errText } from '../lib/format.js';
+import { errText, fmtNumber } from '../lib/format.js';
 import { FIELD_GROUPS, DECISION_KEY } from '../lib/fields.js';
 
 const STATUS_LABELS = {
