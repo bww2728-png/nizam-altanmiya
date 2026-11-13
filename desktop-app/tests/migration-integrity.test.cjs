@@ -167,8 +167,8 @@ test('a previously failed migration row does not block the next attempt', () => 
 });
 
 test('the store schema migration keeps a single version and code identity', () => {
-  assert.equal(storeSchema.MIGRATION_VERSION, 4);
-  assert.equal(storeSchema.MIGRATION_CODE, 'unified-store-schema-v4');
+  assert.equal(storeSchema.MIGRATION_VERSION, 5);
+  assert.equal(storeSchema.MIGRATION_CODE, 'unified-store-schema-v5');
   const database = freshStore();
   try {
     const rows = database.prepare('SELECT version, migration_code FROM store_schema_migrations').all();

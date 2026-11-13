@@ -232,7 +232,7 @@ function datasetFields(dataset, real) {
       physicalType: column.type,
       present: true,
       nullable: column.notnull === 0 && column.pk === 0,
-      readOnly: isAutoKey || MANAGED_COLUMNS.has(column.name)
+      readOnly: Boolean(base.readOnly || isAutoKey || MANAGED_COLUMNS.has(column.name) || base.inferred)
     });
   }
   return fields;
@@ -637,6 +637,10 @@ function validateValues(db, dataset, real, rawValues, context) {
     if (dataset.autoPk && name === dataset.primaryKey[0]) continue; // generated key
     if (name.endsWith('_minor') && real.has(name.slice(0, -6))) {
       errors.push({ field: name, message: `الحقل «${name}» محسوب تلقائياً من العملة ولا يُدخل يدوياً.` });
+      continue;
+    }
+    if (!declared.has(name)) {
+      errors.push({ field:name,message:`الحقل «${name}» موجود في قاعدة البيانات لكنه غير موثق في سجل المجموعة؛ لا يقبل الكتابة.` });
       continue;
     }
     provided.set(name, value);

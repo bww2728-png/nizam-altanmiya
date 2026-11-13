@@ -90,6 +90,20 @@ test('the dataset browser contract keeps its documented shape', () => {
   }
 });
 
+test('physical columns without dataset metadata are visible but cannot be edited', () => {
+  const database = freshStore();
+  try {
+    database.exec('ALTER TABLE development_issues ADD COLUMN provisional_field TEXT');
+    const field = domain.describe(database,'developmentIssues').fields.find(item => item.name === 'provisional_field');
+    assert.equal(field.inferred,true);
+    assert.equal(field.readOnly,true);
+    assert.equal(domain.validateRow(database,'developmentIssues',{ provisional_field:'unreviewed' }).valid,false);
+    assert.throws(() => domain.save(database,{ dataset:'developmentIssues',values:{ provisional_field:'unreviewed' } }),/غير موثق/);
+  } finally {
+    database.close();
+  }
+});
+
 test('a missing value is never stored as a zero value', () => {
   const database = freshStore();
   try {
@@ -109,6 +123,28 @@ test('a missing value is never stored as a zero value', () => {
     assert.throws(() => add(null, null, 'known'), /CHECK/);
     assert.throws(() => add(1, 2, 'known'), /CHECK/);
     assert.throws(() => add(null, null, 'assumed'), /CHECK/);
+  } finally {
+    database.close();
+  }
+});
+
+test('all seven value states are distinct in storage and are named in manual entry', () => {
+  const database = freshStore();
+  try {
+    const fieldDefinitionId = Number(database.prepare('SELECT field_definition_id FROM field_definitions LIMIT 1').get().field_definition_id);
+    const states = ['known','zero','not_available','unknown','not_applicable','not_collected','not_verified'];
+    const insert = database.prepare(`INSERT INTO observations(field_definition_id,value_integer,value_real,value_text,value_state,dimension_signature,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?)`);
+    for (const [index, state] of states.entries()) {
+      const number = state === 'known' ? 5 : state === 'zero' ? 0 : null;
+      insert.run(fieldDefinitionId, number, null, null, state, `value-state-${index}`, NOW, NOW);
+    }
+    const storedStates = database.prepare('SELECT value_state FROM observations WHERE dimension_signature LIKE ? ORDER BY observation_id').all('value-state-%').map(row => row.value_state);
+    assert.deepEqual(storedStates, states);
+    assert.throws(() => insert.run(fieldDefinitionId, null, null, null, 'missing', 'value-state-invalid', NOW, NOW), /CHECK/);
+
+    const renderer = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'pages', 'DataEntry.jsx'), 'utf8');
+    for (const state of states) assert.match(renderer, new RegExp(`${state}:`));
   } finally {
     database.close();
   }

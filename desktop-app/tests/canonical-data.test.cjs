@@ -198,6 +198,136 @@ test('central record writes validate values and keep revisions, provenance and r
   }
 });
 
+test('primary collection forms persist dimensions, provenance and review revisions without entering official analysis', () => {
+  const db = openDatabase();
+  try {
+    dataArchitecture.migrate(db);
+    const populationForm = recordService.listForms(db).find(item => item.form_code === 'population_age_sex_collection_v1');
+    const schoolForm = recordService.listForms(db).find(item => item.form_code === 'education_school_collection_v1');
+    assert.ok(populationForm?.form_version_id);
+    assert.ok(schoolForm?.form_version_id);
+    assert.equal(populationForm.collection_mode,'primary_collection');
+    assert.equal(populationForm.analysis_eligible,0);
+    assert.equal(populationForm.methodology_status,'not_defined');
+    const population = recordService.getFormDefinition(db,populationForm.form_version_id);
+    const populationField = population.fields.find(field => field.field_code === 'population.age_sex');
+    assert.deepEqual(populationField.dimensions.map(dimension => dimension.code).sort(),['age_group','sex']);
+    assert.ok(populationField.dimensions.every(dimension => dimension.required && dimension.values.length > 0));
+    const officialIndicatorCount = db.prepare('SELECT COUNT(*) AS count FROM indicator_observations').get().count;
+    const populationValues = { 'population.age_sex':{ value:'37',state:'known' } };
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,periodYear:'2025',values:populationValues }),/اختر/);
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,periodYear:'2025',values:populationValues,
+      dimensionValues:{ 'population.age_sex':{ sex:'6_14',age_group:'male' } } }),/قيمة البعد/);
+    const created = recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,periodYear:'2025',actor:'collector',
+      values:populationValues,dimensionValues:{ 'population.age_sex':{ sex:'female',age_group:'6_14' } },
+      valueSources:{ 'population.age_sex':'استمارة السكان، ورقة العمر والجنس، الخلية B7' } });
+    const observation = db.prepare("SELECT observation_id,dimension_signature FROM observations WHERE form_record_id=? AND form_field_id=(SELECT form_field_id FROM form_fields WHERE field_code='population.age_sex')")
+      .get(created.formRecordId);
+    assert.equal(observation.dimension_signature,'age_group=6_14|sex=female');
+    assert.deepEqual(db.prepare(`SELECT definition.dimension_code,value.value_code FROM observation_dimensions mapping
+      JOIN dimension_definitions definition USING(dimension_id) JOIN dimension_values value USING(dimension_value_id)
+      WHERE mapping.observation_id=? ORDER BY definition.dimension_code`).all(observation.observation_id),[
+      { dimension_code:'age_group',value_code:'6_14' },{ dimension_code:'sex',value_code:'female' },
+    ]);
+    let reread = recordService.getRecord(db,created.formRecordId);
+    assert.equal(reread.values['population.age_sex'].value,'37');
+    assert.deepEqual(reread.values['population.age_sex'].dimensions,{ age_group:{ code:'6_14',label:'6–14 سنة' },sex:{ code:'female',label:'أنثى' } });
+    assert.equal(reread.values['population.age_sex'].sourceLocator,'استمارة السكان، ورقة العمر والجنس، الخلية B7');
+    assert.equal(recordService.submitForReview(db,created.formRecordId,'reviewer').status,'pending_review');
+    assert.equal(recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' }).status,'approved');
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM form_record_legacy_links WHERE form_record_id=?').get(created.formRecordId).count,0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM indicator_observations').get().count,officialIndicatorCount);
+
+    recordService.decideRecord(db,created.formRecordId,{ decision:'reopen',actor:'reviewer',reason:'استكمال التصنيف.' });
+    recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,formRecordId:created.formRecordId,periodYear:'2025',actor:'collector',
+      changeReason:'تصحيح الفئة العمرية والقيمة.',values:{ 'population.age_sex':{ value:'39',state:'known' } },
+      dimensionValues:{ 'population.age_sex':{ sex:'female',age_group:'15_17' } },
+      valueSources:{ 'population.age_sex':'تحديث الاستمارة، الخلية B8' } });
+    reread = recordService.getRecord(db,created.formRecordId);
+    assert.equal(reread.values['population.age_sex'].value,'39');
+    assert.equal(reread.values['population.age_sex'].dimensions.age_group.code,'15_17');
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM observations WHERE form_record_id=?').get(created.formRecordId).count,1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM observation_dimensions WHERE observation_id=?').get(observation.observation_id).count,2);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM value_provenance WHERE observation_id=?').get(observation.observation_id).count,2);
+    assert.equal(reread.values['population.age_sex'].sourceLocator,'تحديث الاستمارة، الخلية B8');
+
+    const school = recordService.getFormDefinition(db,schoolForm.form_version_id);
+    const schoolType = school.fields.find(field => field.field_code === 'education.school.type');
+    assert.equal(schoolType.referenceValues.length,2);
+    const schoolTypeId = schoolType.referenceValues.find(option => option.code === 'school').id;
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:schoolForm.form_version_id,values:{
+      'education.school.name':{ value:'مدرسة اختبار' },'education.school.type':{ value:999999 },
+    } }),/قيمة التصنيف غير صالحة/);
+    const schoolRecord = recordService.saveRecord(db,{ formVersionId:schoolForm.form_version_id,periodYear:'2025',actor:'collector',values:{
+      'education.school.name':{ value:'مدرسة اختبار' },'education.school.type':{ value:schoolTypeId },
+      'education.school.gender_reported':{ value:'بنين كما ورد في الاستمارة' },'education.school.classrooms':{ value:'6' },
+    },valueSources:{ 'education.school.name':'سجل المدارس، الصفحة 4','education.school.gender_reported':'سجل المدارس، الصفحة 4' } });
+    assert.equal(recordService.getRecord(db,schoolRecord.formRecordId).values['education.school.name'].value,'مدرسة اختبار');
+    assert.equal(recordService.getRecord(db,schoolRecord.formRecordId).values['education.school.type'].value,String(schoolTypeId));
+    assert.equal(db.prepare('SELECT entity_id FROM form_records WHERE form_record_id=?').get(schoolRecord.formRecordId).entity_id,null);
+    assert.equal(recordService.submitForReview(db,schoolRecord.formRecordId,'reviewer').status,'pending_review');
+    assert.equal(recordService.decideRecord(db,schoolRecord.formRecordId,{ decision:'approve',actor:'reviewer' }).status,'approved');
+    const linkedSchool = db.prepare(`SELECT entity.entity_id,entity_type.entity_type_code,entity.name_ar,school.school_type_id
+      FROM form_records record JOIN entities entity USING(entity_id) JOIN entity_types entity_type USING(entity_type_id)
+      JOIN schools school USING(entity_id) WHERE record.form_record_id=?`).get(schoolRecord.formRecordId);
+    assert.equal(linkedSchool.entity_type_code,'education_facility');
+    assert.equal(linkedSchool.name_ar,'مدرسة اختبار');
+    assert.equal(linkedSchool.school_type_id,schoolTypeId);
+    assert.ok(linkedSchool.entity_id > 0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM observations WHERE form_record_id=? AND entity_id=?').get(schoolRecord.formRecordId,linkedSchool.entity_id).count,1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_code='education_facility_sync' AND resource_id=?").get(String(linkedSchool.entity_id)).count,1);
+    recordService.decideRecord(db,schoolRecord.formRecordId,{ decision:'reopen',actor:'reviewer',reason:'تدقيق اسم المنشأة.' });
+    assert.deepEqual(db.prepare('SELECT entity.status,school.is_active FROM entities entity JOIN schools school USING(entity_id) WHERE entity.entity_id=?').get(linkedSchool.entity_id),
+      { status:'under_review',is_active:0 });
+    recordService.submitForReview(db,schoolRecord.formRecordId,'reviewer');
+    recordService.decideRecord(db,schoolRecord.formRecordId,{ decision:'approve',actor:'reviewer' });
+    assert.deepEqual(db.prepare('SELECT entity.status,school.is_active FROM entities entity JOIN schools school USING(entity_id) WHERE entity.entity_id=?').get(linkedSchool.entity_id),
+      { status:'active',is_active:1 });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_code='education_facility_sync' AND resource_id=?").get(String(linkedSchool.entity_id)).count,3);
+
+    const kindergartenTypeId = schoolType.referenceValues.find(option => option.code === 'kindergarten').id;
+    const kindergartenRecord = recordService.saveRecord(db,{ formVersionId:schoolForm.form_version_id,actor:'collector',values:{
+      'education.school.name':{ value:'روضة اختبار' },'education.school.type':{ value:kindergartenTypeId },
+    } });
+    recordService.submitForReview(db,kindergartenRecord.formRecordId,'reviewer');
+    recordService.decideRecord(db,kindergartenRecord.formRecordId,{ decision:'approve',actor:'reviewer' });
+    assert.equal(db.prepare(`SELECT entity_type.entity_type_code FROM form_records record
+      JOIN entities entity USING(entity_id) JOIN entity_types entity_type USING(entity_type_id)
+      WHERE record.form_record_id=?`).get(kindergartenRecord.formRecordId).entity_type_code,'education_facility');
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM indicator_observations').get().count,officialIndicatorCount);
+  } finally {
+    db.close();
+  }
+});
+
+test('approved education records are backfilled into canonical entities idempotently', () => {
+  const db = openDatabase();
+  try {
+    const form = recordService.listForms(db).find(item => item.form_code === 'education_school_collection_v1');
+    const definition = recordService.getFormDefinition(db,form.form_version_id);
+    const typeId = definition.fields.find(field => field.field_code === 'education.school.type').referenceValues
+      .find(option => option.code === 'kindergarten').id;
+    const record = recordService.saveRecord(db,{ formVersionId:form.form_version_id,actor:'collector',values:{
+      'education.school.name':{ value:'روضة ترحيل' },'education.school.type':{ value:typeId },
+    } });
+    db.prepare("UPDATE form_records SET record_status='approved' WHERE form_record_id=?").run(record.formRecordId);
+    db.prepare('DELETE FROM schema_migrations WHERE version=10').run();
+
+    const migration = recordService.migrateApprovedEducationFacilities(db);
+    assert.equal(migration.linked,1);
+    assert.deepEqual(migration.deferred,[]);
+    const linked = db.prepare(`SELECT record.entity_id,entity.name_ar,school.school_type_id FROM form_records record
+      JOIN entities entity USING(entity_id) JOIN schools school USING(entity_id) WHERE record.form_record_id=?`).get(record.formRecordId);
+    assert.equal(linked.name_ar,'روضة ترحيل');
+    assert.equal(linked.school_type_id,typeId);
+    assert.equal(recordService.migrateApprovedEducationFacilities(db).alreadyApplied,true);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM entities').get().count,1);
+    assert.equal(db.pragma('foreign_key_check').length,0);
+  } finally {
+    db.close();
+  }
+});
+
 test('canonical migration rolls back all schema and backfill changes when existing geography violates uniqueness', () => {
   const db = new Database(':memory:');
   try {
@@ -659,6 +789,56 @@ test('approved central project records are mirrored transactionally into canonic
     assert.equal(db.prepare('SELECT estimated_cost FROM projects WHERE id=?').get(link.legacy_entity_id).estimated_cost,1500);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM project_versions WHERE project_id=? AND action='central-record-approval-update'").get(link.legacy_entity_id).n,1);
     assert.equal(canonical.listCanonicalProjects(db,{ search:'مطور' }).total,1);
+  } finally {
+    db.close();
+  }
+});
+
+test('approved central project funding stays linked through save, review, edit and canonical reads', () => {
+  const db = openDatabase();
+  try {
+    dataArchitecture.migrate(db);
+    db.prepare("INSERT INTO sectors(code,name_ar,created_at) VALUES('water','المياه','2026-01-01')").run();
+    const projectForm = recordService.listForms(db).find(item => item.form_code === 'project_v1');
+    const fundingForm = recordService.listForms(db).find(item => item.form_code === 'project_funding_v1');
+    assert.ok(projectForm?.form_version_id);
+    assert.ok(fundingForm?.form_version_id);
+    const projectValues = {
+      projectCode:{ value:'CENTRAL-FUNDING-1' },projectName:{ value:'مشروع اختبار تمويل' },
+      projectStatus:{ value:'مقترح' },estimatedCost:{ value:'800' },currencyCode:{ value:'YER' },sectorCode:{ value:'water' },
+    };
+    const projectRecord = recordService.saveRecord(db,{ formVersionId:projectForm.form_version_id,periodYear:'2025',values:projectValues,actor:'operator' });
+    assert.equal(recordService.listApprovedProjectParents(db,{}).total,0);
+    recordService.submitForReview(db,projectRecord.formRecordId,'reviewer');
+    recordService.decideRecord(db,projectRecord.formRecordId,{ decision:'approve',actor:'reviewer' });
+    const projectLink = db.prepare("SELECT legacy_entity_id FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='project'").get(projectRecord.formRecordId);
+    assert.ok(projectLink);
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:fundingForm.form_version_id,periodYear:'2025',parentRecordId:999999,
+      values:{ partnerName:{ value:'شريك' },amount:{ value:'250' },currencyCode:{ value:'USD' } } }),/سجل الأب غير موجود أو غير معتمد/);
+
+    const fundingValues = { partnerName:{ value:'شريك محلي' },amount:{ value:'250' },currencyCode:{ value:'USD' },fundingDate:{ value:'2025-06-01' } };
+    const fundingRecord = recordService.saveRecord(db,{ formVersionId:fundingForm.form_version_id,periodYear:'2025',parentRecordId:projectRecord.formRecordId,
+      values:fundingValues,actor:'operator',valueSources:{ amount:'قرار التمويل، الصفحة 2' } });
+    assert.equal(recordService.getRecord(db,fundingRecord.formRecordId).record.parent_record_id,projectRecord.formRecordId);
+    assert.deepEqual(recordService.listApprovedProjectParents(db,{ search:'CENTRAL-FUNDING-1' }).rows.map(row => row.formRecordId),[projectRecord.formRecordId]);
+    recordService.submitForReview(db,fundingRecord.formRecordId,'reviewer');
+    recordService.decideRecord(db,fundingRecord.formRecordId,{ decision:'approve',actor:'reviewer' });
+    const fundingLink = db.prepare("SELECT legacy_entity_id FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='project_funding'").get(fundingRecord.formRecordId);
+    assert.ok(fundingLink);
+    assert.equal(db.prepare('SELECT project_id,partner_name,amount,currency_code FROM project_funding WHERE id=?').get(fundingLink.legacy_entity_id).project_id,projectLink.legacy_entity_id);
+    assert.equal(canonical.getCanonicalProject(db,projectLink.legacy_entity_id).funding[0].amount,250);
+    assert.equal(recordService.getRecord(db,fundingRecord.formRecordId).values.amount.sourceLocator,'قرار التمويل، الصفحة 2');
+
+    recordService.decideRecord(db,fundingRecord.formRecordId,{ decision:'reopen',actor:'reviewer',reason:'تحديث مبلغ التمويل.' });
+    recordService.saveRecord(db,{ formVersionId:fundingForm.form_version_id,formRecordId:fundingRecord.formRecordId,parentRecordId:projectRecord.formRecordId,
+      periodYear:'2025',values:{ ...fundingValues,amount:{ value:'275' } },changeReason:'تصحيح مبلغ التمويل من الوثيقة.',actor:'operator' });
+    assert.equal(canonical.getCanonicalProject(db,projectLink.legacy_entity_id).funding[0].amount,250);
+    recordService.submitForReview(db,fundingRecord.formRecordId,'reviewer');
+    recordService.decideRecord(db,fundingRecord.formRecordId,{ decision:'approve',actor:'reviewer' });
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='project_funding'").get(fundingRecord.formRecordId).n,1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM project_funding WHERE project_id=?').get(projectLink.legacy_entity_id).n,1);
+    assert.equal(canonical.getCanonicalProject(db,projectLink.legacy_entity_id).funding[0].amount,275);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM project_versions WHERE project_id=? AND action='central-funding-approval-update'").get(projectLink.legacy_entity_id).n,1);
   } finally {
     db.close();
   }

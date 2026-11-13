@@ -17,6 +17,7 @@ const security = require('./security.cjs');
 const { analyze } = require('./analysis/engine.cjs');
 const { readDirectorateWorkbook } = require('./analysis/template-reader.cjs');
 const canonicalData = require('./analysis/canonical-data.cjs');
+const fileArchive = require('./database/file-archive.cjs');
 const dataArchitecture = require('./database/architecture.cjs');
 const manualEntryCatalog = require('./database/manual-entry-catalog.cjs');
 const documentService = require('./documents/document-service.cjs');
@@ -676,7 +677,7 @@ function registerHandlers() {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: 'إضافة وثيقة إلى المكتبة المحلية',
       properties: ['openFile'],
-      filters: [{ name: 'PDF وWord وصور', extensions: ['pdf', 'docx', 'png', 'jpg', 'jpeg', 'tif', 'tiff'] }],
+      filters: [{ name: 'Excel وPDF وWord وصور', extensions: ['xlsx', 'xlsm', 'pdf', 'docx', 'png', 'jpg', 'jpeg', 'tif', 'tiff'] }],
     });
     if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
     const staged = await documentService.stageFile(requireDatabase(), result.filePaths[0]);
@@ -1062,13 +1063,6 @@ function registerHandlers() {
     return security.redactPlanSummary(summarizePlan(pendingPlan.plan, 5000), currentProfile());
   });
 
-  ipcMain.handle('import:history', (_event, request = {}) => {
-    const db = requireDatabase();
-    const history = canonicalData.listWorkbookImports(db, request.limit ?? 30);
-    auditRead('import:history', { entity: 'workbook_import_batches', rowCount: history.length });
-    return history;
-  });
-
   ipcMain.handle('import:sheet-preview', (_event, request = {}) => {
     if (currentProfile() !== 'owner') {
       return { restricted: true, message: 'عرض القيم الخام متاح في وضع المالك فقط؛ وضع المشاركة لا يكشف بيانات ملفات غير مصنفة.' };
@@ -1101,6 +1095,13 @@ function registerHandlers() {
   ipcMain.handle('data:record:get', (_event, recordId) => {
     if (currentProfile() !== 'owner') throw new Error('عرض السجل يتطلب وضع المالك.');
     return recordService.getRecord(requireDatabase(),recordId);
+  });
+
+  ipcMain.handle('data:project-parents:list', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') return { restricted: true, rows: [], total: 0 };
+    const result = recordService.listApprovedProjectParents(requireDatabase(),request);
+    auditRead('data:project-parents:list',{ entity:'form_records',rowCount:result.rows.length,detail:'approved-project-parent-records' });
+    return result;
   });
 
   ipcMain.handle('data:records:list', (_event, request = {}) => {
@@ -1186,6 +1187,30 @@ function registerHandlers() {
     if (currentProfile() !== 'owner') return { restricted: true, rows: [], total: 0 };
     const result = canonicalData.listDataSources(requireDatabase(),request);
     auditRead('sources:list',{ entity:'data_sources',rowCount:result.rows.length,detail:'offset='+result.offset+';limit='+result.limit });
+    return result;
+  });
+
+  ipcMain.handle('files:archive', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('أرشفة الملفات تتطلب وضع المالك.');
+    const targets = fileArchive.normalizeTargets(request.targets);
+    for (const target of targets) {
+      if (target.resourceType === 'document' && activeDocumentJobs.has(target.resourceId)) throw new Error('انتظر انتهاء معالجة الوثيقة قبل أرشفتها.');
+    }
+    const result = fileArchive.archive(requireDatabase(), targets, sessionId);
+    for (const target of targets) {
+      if (target.resourceType === 'workbook_import' && pendingPlan?.staging?.batchId === Number(target.resourceId)) pendingPlan = null;
+      persist.logAccess(requireDatabase(), { action: 'file-archive', entity: target.resourceType, entityId: target.resourceId, detail: 'recoverable archive' });
+    }
+    auditRead('files:archive', { entity: 'file_archive', rowCount: result.archived, result: 'archived' });
+    return result;
+  });
+
+  ipcMain.handle('files:restore', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('استعادة الملفات تتطلب وضع المالك.');
+    const targets = fileArchive.normalizeTargets(request.targets);
+    const result = fileArchive.restore(requireDatabase(), targets);
+    for (const target of targets) persist.logAccess(requireDatabase(), { action: 'file-restore', entity: target.resourceType, entityId: target.resourceId, detail: 'restored from recoverable archive' });
+    auditRead('files:restore', { entity: 'file_archive', rowCount: result.restored, result: 'restored' });
     return result;
   });
 
@@ -1403,8 +1428,9 @@ function registerHandlers() {
 
   ipcMain.handle('sheet:dashboard', () => {
     const payload = sheetPayloads();
+    const summary = canonicalData.fileDashboardSummary(requireDatabase());
     auditRead('sheet:dashboard', { entity: 'directorates', rowCount: payload.dashboard.totals.directorates });
-    return { ...payload.dashboard, generatedAt: payload.generatedAt, profile: currentProfile() };
+    return { ...payload.dashboard, summary, generatedAt: payload.generatedAt, profile: currentProfile() };
   });
 
   ipcMain.handle('sheet:indicators', () => {

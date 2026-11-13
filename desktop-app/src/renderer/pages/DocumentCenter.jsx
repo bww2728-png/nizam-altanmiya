@@ -17,6 +17,14 @@ function compatibleFieldType(sourceType, targetType) {
   return normalize(sourceType) === normalize(targetType);
 }
 
+function candidateSourceLabel(candidate) {
+  const source = candidate.sourceLocation?.source ?? {};
+  const line = source.sheet_name ? `${source.sheet_name}!${(source.cells ?? []).map(cell => cell.address).join('، ')}`
+    : source.row_number ? `صف ${source.row_number}`
+      : candidate.page_number ? `الصفحة ${candidate.page_number}` : '';
+  return [candidate.source_file_name,line].filter(Boolean).join(' · ') || 'موضع المصدر غير متاح';
+}
+
 function statusLabel(status) {
   return ({ staged: 'محفوظ للمراجعة', processing: 'جارٍ الاستخراج', extracted: 'مستخرج', review: 'بانتظار المراجعة', failed: 'فشل الاستخراج', unavailable: 'المحرك غير جاهز' })[status] ?? status;
 }
@@ -45,6 +53,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
   const [candidateValues, setCandidateValues] = useState({});
   const [candidateNotes, setCandidateNotes] = useState({});
   const [forms, setForms] = useState([]);
+  const [catalog, setCatalog] = useState(null);
   const [geography, setGeography] = useState([]);
   const [periods, setPeriods] = useState([]);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState({});
@@ -60,10 +69,11 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
     setLoading(true);
     setError('');
     try {
-      const [page, service, formRows, geographyResult, periodResult] = await Promise.all([
+      const [page, service, formRows, catalogResult, geographyResult, periodResult] = await Promise.all([
         window.localApp.documents({ offset: documents.offset, limit: PAGE_SIZE }),
         window.localApp.ragflowStatus(),
         window.localApp.dataForms(),
+        window.localApp.dataEntryCatalog(),
         window.localApp.dataGeography(''),
         window.localApp.dataPeriods(),
       ]);
@@ -71,6 +81,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
       setDocuments(page);
       setRagflow(service);
       setForms((formRows ?? []).filter(form => form.is_active && form.form_version_id && form.version_status === 'published'));
+      setCatalog(catalogResult);
       setGeography(geographyResult?.rows ?? []);
       setPeriods(periodResult?.rows ?? []);
       if (selected?.document?.id) {
@@ -124,7 +135,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
       await window.localApp.reviewDocumentFieldCandidate({
         candidateId: candidate.id,
         status,
-        value: status === 'reviewed' ? (candidateValues[candidate.id] ?? candidate.raw_value ?? '') : null,
+        value: status === 'reviewed' ? (candidateValues[candidate.id] ?? candidate.suggested_value ?? candidate.raw_value ?? '') : null,
         note: candidateNotes[candidate.id] ?? '',
       });
       const fieldReview = await window.localApp.documentFieldCandidates(selected.document.id);
@@ -303,17 +314,39 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
           <div><h3>حقول مقترحة للمراجعة</h3><p className="muted">المقترحات مستخرجة من أدلة الوثائق فقط. مراجعتها هنا لا تعتمدها ولا تغيّر قاعدة البيانات الرسمية.</p>
             <div className="chip-row"><Badge>{fmtNumber(selected.fieldReview.run.searched_count, 0)} حقلاً جرى فحصه</Badge><Badge tone="ok">{fmtNumber(selected.fieldReview.run.evidence_count, 0)} دليلًا</Badge><Badge tone="neutral">{fmtNumber(selected.fieldReview.run.no_evidence_count, 0)} بلا دليل</Badge></div>
           </div>
+          {(catalog?.domains ?? []).some(domain => domain.groups.some(group => !group.forms.length)) && <details className="quote" style={{ marginBottom: 16 }}>
+            <summary>مجالات غير متاحة للإدخال لعدم نشر نموذج ({fmtNumber((catalog?.domains ?? []).flatMap(domain => domain.groups).filter(group => !group.forms.length).length, 0)})</summary>
+            <p className="muted">لن تُحوّل الاقتراحات لهذه المجموعات إلى حقول إدخال أو سجلات حتى يُنشر نموذج مناسب.</p>
+            <div className="chip-row">{(catalog?.domains ?? []).flatMap(domain => domain.groups.filter(group => !group.forms.length).map(group => `${domain.name} · ${group.name}`)).map(label => <Badge key={label} tone="warn">{label}</Badge>)}</div>
+          </details>}
           {(selected.fieldReview.rows ?? []).filter(candidate => candidate.review_status === 'pending').map(candidate => <article className="quote stack tight" key={candidate.id}>
             <div className="row between" style={{ flexWrap: 'wrap' }}><strong>{candidate.field_label_ar}</strong><Badge>{candidateStatusLabel(candidate.review_status)}</Badge></div>
-            <div className="chip-row"><Badge>{candidate.entity_type} · {candidate.field_key}</Badge>{candidate.source_file_name && <Badge>{candidate.source_file_name}</Badge>}{candidate.page_number && <Badge>صفحة {fmtNumber(candidate.page_number, 0)}</Badge>}</div>
+            <div className="chip-row"><Badge>{candidate.entity_type} · {candidate.field_key}</Badge><Badge>{candidateSourceLabel(candidate)}</Badge>{candidate.confidence != null && <Badge tone="neutral">ثقة المطابقة {Math.round(candidate.confidence * 100)}٪</Badge>}</div>
             {candidate.evidence_text && <p>{candidate.evidence_text}</p>}
-            <label className="stack tight"><span>القيمة بعد التحقق من الدليل</span><input className="input" value={candidateValues[candidate.id] ?? candidate.raw_value ?? ''} onChange={event => setCandidateValues(current => ({ ...current, [candidate.id]: event.target.value }))} maxLength={1000} /></label>
+            <label className="stack tight"><span>القيمة المقترحة بعد التحقق من الدليل</span><input className="input" value={candidateValues[candidate.id] ?? candidate.suggested_value ?? candidate.raw_value ?? ''} onChange={event => setCandidateValues(current => ({ ...current, [candidate.id]: event.target.value }))} maxLength={1000} /></label>
             <label className="stack tight"><span>سبب قرار المراجعة (مطلوب)</span><input className="input" value={candidateNotes[candidate.id] ?? ''} onChange={event => setCandidateNotes(current => ({ ...current, [candidate.id]: event.target.value }))} maxLength={1000} /></label>
             <div className="row"><button className="btn small primary" onClick={() => reviewCandidate(candidate, 'reviewed')} disabled={busyId === selected.document.id || !(candidateNotes[candidate.id] ?? '').trim()}>تسجيل المراجعة</button><button className="btn small ghost" onClick={() => reviewCandidate(candidate, 'rejected')} disabled={busyId === selected.document.id || !(candidateNotes[candidate.id] ?? '').trim()}>رفض المرشح</button><span className="muted">لا يُرحّل إلى البيانات الرسمية تلقائيًا.</span></div>
           </article>)}
           {reviewedCandidates.length > 0 && <section className="stack" style={{ marginBottom: 18 }}>
             <div><h3>إنشاء سجل معياري من القيم المراجَعة</h3><p className="muted">اختر الحقول بعد التحقق من قيمها واربطها بنموذج منشور. سيُنشأ سجل «قيد المراجعة» فقط؛ لا تصبح القيم رسمية حتى يعتمدها المراجع في شاشة الإدخال المركزي.</p></div>
             <label className="stack tight"><span>النموذج المستهدف</span><select className="input" value={promotionFormVersionId} onChange={event => choosePromotionForm(event.target.value)}><option value="">— اختر نموذجًا منشورًا —</option>{forms.map(form => <option key={form.form_version_id} value={form.form_version_id}>{form.form_code} — {form.name_ar}</option>)}</select></label>
+            {promotionFormVersionId && promotionDefinition && <section className="stack" aria-label="معاينة نموذج الإدخال" style={{ marginBottom: 16 }}>
+              <h4>معاينة نموذج الإدخال ونتائج البحث</h4>
+              <div className="quote">كل حقل هنا مرتبط بدليل الملف عند العثور عليه. القيم البديلة لا تُعتمد تلقائياً؛ افتح الدليل وراجع المصدر قبل اختيارها.</div>
+              <div className="table-wrap"><table className="data"><thead><tr><th>حقل النموذج</th><th>القيمة المقترحة / الحالة</th><th>المصدر والمقتطف</th><th>الثقة</th></tr></thead>
+                <tbody>{promotionDefinition.fields.filter(field => field.field_code.split('.').at(-1) !== 'decision').map(field => {
+                  const evidence = (selected.fieldReview?.rows ?? []).filter(candidate => candidate.field_code === field.field_code || candidateMappings[candidate.id] === field.field_code);
+                  return <tr key={field.form_field_id}><th>{field.label_ar}{field.is_required ? ' · مطلوب' : ''}</th>
+                    <td>{evidence.length ? evidence.map(candidate => <div className="stack tight" key={candidate.id}>
+                      {candidate.source_document_id ? <input className="input" aria-label={`القيمة المقترحة: ${field.label_ar}`} value={candidateValues[candidate.id] ?? candidate.reviewedValue?.value ?? candidate.suggested_value ?? candidate.raw_value ?? ''} onChange={event => setCandidateValues(current => ({ ...current, [candidate.id]: event.target.value }))} disabled={candidate.review_status !== 'pending'} maxLength={1000} /> : <span className="muted">لم يُعثر على قيمة في الملف</span>}
+                      <Badge tone={candidate.review_status === 'reviewed' ? 'ok' : candidate.review_status === 'rejected' ? 'bad' : 'warn'}>{candidateStatusLabel(candidate.review_status)}</Badge>
+                    </div>) : <span className="muted">لم يُعثر على قيمة مقترحة</span>}</td>
+                    <td>{evidence.length ? evidence.map(candidate => <div className="stack tight" key={candidate.id}><span>{candidateSourceLabel(candidate)}</span><small>{candidate.evidence_text}</small></div>) : '—'}</td>
+                    <td>{evidence.length ? evidence.map(candidate => <span className="chip" key={candidate.id}>{candidate.confidence == null ? 'غير محسوبة' : `${Math.round(candidate.confidence * 100)}٪`}</span>) : '—'}</td>
+                  </tr>;
+                })}</tbody>
+              </table></div>
+            </section>}
             {promotionFormVersionId && <form className="stack" onSubmit={event => { event.preventDefault(); promoteReviewedCandidates(); }}>
               {reviewedCandidates.map(candidate => {
                 const compatibleFields = (promotionDefinition?.fields ?? []).filter(field => compatibleFieldType(candidate.data_type,field.data_type_override ?? field.data_type) && field.is_importable && !field.is_derived && field.storage_class !== 'ignored_derived');

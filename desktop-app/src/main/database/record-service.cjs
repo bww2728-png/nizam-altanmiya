@@ -4,6 +4,8 @@ const crypto = require('node:crypto');
 const { normalize } = require('./architecture.cjs');
 
 const VALUE_STATES = new Set(['known','zero','not_available','unknown','not_applicable','not_collected','not_verified']);
+const EDUCATION_SYNC_VERSION = 10;
+const EDUCATION_SYNC_CODE = '2026-11-13-approved-education-facility-sync-v10';
 const DECIMAL_PATTERN = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
 
 function parseLocalizedNumber(input) {
@@ -70,6 +72,43 @@ function parseValue(field, input) {
   }
   return { state, raw: String(value), value: String(value), kind: dataType };
 }
+function resolveObservationDimensions(db,definition,provided,parsedValues) {
+  const supplied = provided ?? {};
+  if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)) throw new Error('صيغة أبعاد القياس غير صحيحة.');
+  const fields = new Map(definition.fields.map(field => [field.field_code,field]));
+  const parsedMeasurementFields = new Set(parsedValues.filter(item => item.field.storage_class === 'measurement').map(item => item.field.field_code));
+  for (const fieldCode of Object.keys(supplied)) {
+    const field = fields.get(fieldCode);
+    if (!field || field.storage_class !== 'measurement' || !field.dimensions.length || !parsedMeasurementFields.has(fieldCode)) {
+      throw new Error(`أبعاد غير معرّفة أو دون قياس للحقل: ${fieldCode}`);
+    }
+  }
+  const resolved = new Map();
+  for (const item of parsedValues) {
+    if (item.field.storage_class !== 'measurement' || !item.field.dimensions.length) continue;
+    const values = supplied[item.field.field_code] ?? {};
+    if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error(`صيغة الأبعاد غير صحيحة للحقل «${item.field.label_ar}».`);
+    const allowedCodes = new Set(item.field.dimensions.map(dimension => dimension.code));
+    for (const dimensionCode of Object.keys(values)) {
+      if (!allowedCodes.has(dimensionCode)) throw new Error(`البعد «${dimensionCode}» غير مرتبط بالحقل «${item.field.label_ar}».`);
+    }
+    const dimensions = [];
+    for (const dimension of item.field.dimensions) {
+      const valueCode = values[dimension.code];
+      if (valueCode == null || valueCode === '') {
+        if (dimension.required) throw new Error(`اختر ${dimension.name} للحقل «${item.field.label_ar}».`);
+        continue;
+      }
+      const selected = db.prepare(`SELECT definition.dimension_id,value.dimension_value_id,value.value_code,value.label_ar
+        FROM dimension_definitions definition JOIN dimension_values value USING(dimension_id)
+        WHERE definition.dimension_code=? AND definition.is_active=1 AND value.value_code=? AND value.is_active=1`).get(dimension.code,String(valueCode));
+      if (!selected || selected.dimension_id !== dimension.id) throw new Error(`قيمة البعد «${dimension.name}» غير صالحة.`);
+      dimensions.push({ dimensionId:selected.dimension_id,valueId:selected.dimension_value_id,dimensionCode:dimension.code,valueCode:selected.value_code,label:selected.label_ar });
+    }
+    resolved.set(item.field.field_code,dimensions);
+  }
+  return resolved;
+}
 function audit(db, event) {
   const now = new Date().toISOString();
   db.prepare(`INSERT INTO audit_events(event_code,resource_type,resource_id,action_type,old_value_json,new_value_json,performed_by,session_id,performed_at,details)
@@ -85,26 +124,53 @@ function addManualSource(db, actor, now) {
 }
 function listForms(db) {
   return db.prepare(`SELECT f.form_id,f.form_code,f.name_ar,f.name_en,f.description,f.data_structure_type,f.is_active,
-    f.sector_id,s.name_ar AS sector_name_ar,fv.form_version_id,fv.version_number,fv.version_label,fv.status AS version_status
+    f.sector_id,s.name_ar AS sector_name_ar,fv.form_version_id,fv.version_number,fv.version_label,fv.status AS version_status,
+    governance.collection_mode,governance.definition_status,governance.methodology_status,governance.reference_status,
+    coalesce(governance.analysis_eligible,1) AS analysis_eligible,governance.notes AS governance_notes
     FROM form_definitions f LEFT JOIN sectors s ON s.sector_id=f.sector_id
     LEFT JOIN form_versions fv ON fv.form_id=f.form_id AND fv.version_number=(SELECT MAX(v.version_number) FROM form_versions v WHERE v.form_id=f.form_id)
+    LEFT JOIN manual_entry_form_governance governance ON governance.form_version_id=fv.form_version_id
     ORDER BY coalesce(s.sort_order,0),f.form_code`).all();
 }
 function getFormDefinition(db, formVersionId) {
   const id = Number(formVersionId);
   if (!Number.isSafeInteger(id) || id <= 0) throw new Error('إصدار النموذج غير صالح.');
   const version = db.prepare(`SELECT fv.*,fv.status AS version_status,f.form_code,f.name_ar,f.name_en,f.sector_id,f.description AS form_description,
-    f.data_structure_type,f.default_geo_level_id FROM form_versions fv JOIN form_definitions f USING(form_id) WHERE fv.form_version_id=?`).get(id);
+    f.data_structure_type,f.default_geo_level_id,governance.collection_mode,governance.definition_status,governance.methodology_status,
+    governance.reference_status,coalesce(governance.analysis_eligible,1) AS analysis_eligible,governance.notes AS governance_notes
+    FROM form_versions fv JOIN form_definitions f USING(form_id)
+    LEFT JOIN manual_entry_form_governance governance ON governance.form_version_id=fv.form_version_id WHERE fv.form_version_id=?`).get(id);
   if (!version) throw new Error('إصدار النموذج غير موجود.');
   const sections = db.prepare('SELECT * FROM form_sections WHERE form_version_id=? ORDER BY sort_order,section_id').all(id);
   const fields = db.prepare(`SELECT ff.*,fd.canonical_name_ar,fd.canonical_name_en,fd.semantic_type,fd.data_type,
-    fd.default_unit_id,mu.name_ar AS unit_name_ar,rs.set_code AS reference_set_code
+    fd.default_unit_id,mu.name_ar AS unit_name_ar,rs.reference_set_id,rs.set_code AS reference_set_code
     FROM form_fields ff LEFT JOIN field_definitions fd USING(field_definition_id)
     LEFT JOIN measurement_units mu ON mu.unit_id=coalesce(ff.unit_id,fd.default_unit_id)
     LEFT JOIN reference_sets rs ON rs.reference_set_id=coalesce(ff.reference_set_id,fd.reference_set_id)
     WHERE ff.form_version_id=? ORDER BY ff.section_id,ff.sort_order,ff.form_field_id`).all(id);
+  const dimensions = db.prepare(`SELECT mapping.form_field_id,dimension.dimension_id,dimension.dimension_code,dimension.name_ar AS dimension_name_ar,
+      mapping.is_required,value.dimension_value_id,value.value_code,value.label_ar AS value_label_ar
+    FROM manual_entry_form_field_dimensions mapping
+    JOIN dimension_definitions dimension ON dimension.dimension_id=mapping.dimension_id AND dimension.is_active=1
+    LEFT JOIN dimension_values value ON value.dimension_id=dimension.dimension_id AND value.is_active=1
+    JOIN form_fields field ON field.form_field_id=mapping.form_field_id
+    WHERE field.form_version_id=? ORDER BY field.sort_order,mapping.sort_order,value.sort_order`).all(id);
+  const fieldById = new Map(fields.map(field => [field.form_field_id,{ ...field,dimensions:[] }]));
+  for (const row of dimensions) {
+    const field = fieldById.get(row.form_field_id);
+    let dimension = field.dimensions.find(item => item.code === row.dimension_code);
+    if (!dimension) {
+      dimension = { id:row.dimension_id,code:row.dimension_code,name:row.dimension_name_ar,required:Boolean(row.is_required),values:[] };
+      field.dimensions.push(dimension);
+    }
+    if (row.dimension_value_id != null) dimension.values.push({ id:row.dimension_value_id,code:row.value_code,label:row.value_label_ar });
+  }
+  for (const field of fieldById.values()) {
+    field.referenceValues = field.reference_set_id == null ? [] : db.prepare(`SELECT reference_value_id AS id,value_code AS code,label_ar AS label
+      FROM reference_values WHERE reference_set_id=? AND is_active=1 ORDER BY sort_order,reference_value_id`).all(field.reference_set_id);
+  }
   const rows = db.prepare('SELECT * FROM form_row_definitions WHERE form_version_id=? ORDER BY sort_order,row_definition_id').all(id);
-  return { ...version, sections, fields, rows };
+  return { ...version, sections, fields:[...fieldById.values()], rows };
 }
 function resolveGeo(db, id) {
   if (id == null || id === '') return null;
@@ -126,6 +192,19 @@ function resolvePeriod(db, id, requestedYear) {
   const number = Number(id);
   if (!Number.isSafeInteger(number) || number <= 0 || !db.prepare('SELECT 1 FROM periods WHERE period_id=?').get(number)) throw new Error('الفترة المرجعية غير موجودة.');
   return number;
+}
+function resolveApprovedProjectParent(db,parentRecordId) {
+  const id = Number(parentRecordId);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('اختر سجل المشروع المعتمد المرتبط بالتمويل.');
+  const parent = db.prepare(`SELECT record.form_record_id,record.geo_unit_id,project.id AS project_id,project.name AS project_name
+    FROM form_records record
+    JOIN form_versions version ON version.form_version_id=record.form_version_id
+    JOIN form_definitions form ON form.form_id=version.form_id
+    JOIN form_record_legacy_links link ON link.form_record_id=record.form_record_id AND link.legacy_entity_type='project'
+    JOIN projects project ON project.id=link.legacy_entity_id
+    WHERE record.form_record_id=? AND record.record_status='approved' AND form.form_code='project_v1'`).get(id);
+  if (!parent) throw new Error('سجل الأب غير موجود أو غير معتمد كمشروع.');
+  return parent;
 }
 function saveRecord(db, request = {}) {
   const definition = getFormDefinition(db,request.formVersionId);
@@ -168,7 +247,9 @@ function saveRecordWithSource(db, request, sourceContext) {
   const versionId = Number(request.formVersionId);
   const definition = getFormDefinition(db,versionId);
   if (definition.version_status !== 'published') throw new Error('لا يمكن إدخال بيانات إلى إصدار نموذج غير منشور.');
-  const geoUnitId = resolveGeo(db,request.geoUnitId);
+  const requestedGeoUnitId = resolveGeo(db,request.geoUnitId);
+  const isProjectFunding = definition.form_code === 'project_funding_v1';
+  if (!isProjectFunding && request.parentRecordId != null && request.parentRecordId !== '') throw new Error('لا يقبل هذا النموذج سجلاً أباً.');
   const values = request.values && typeof request.values === 'object' && !Array.isArray(request.values) ? request.values : {};
   const fields = new Map(definition.fields.map(field => [field.field_code,field]));
   const unknown = Object.keys(values).filter(code => !fields.has(code));
@@ -177,7 +258,14 @@ function saveRecordWithSource(db, request, sourceContext) {
   for (const [fieldCode,input] of Object.entries(values)) {
     const field = fields.get(fieldCode);
     if (!field.is_importable || field.is_derived || field.storage_class === 'ignored_derived') throw new Error(`الحقل «${field.label_ar}» غير قابل للإدخال المباشر.`);
-    parsed.push({ field, value:parseValue(field,input) });
+    const parsedValue = parseValue(field,input);
+    if (field.reference_set_id != null && ['known','zero'].includes(parsedValue.state)) {
+      const referenceValueId = Number(parsedValue.value);
+      if (!db.prepare('SELECT 1 FROM reference_values WHERE reference_value_id=? AND reference_set_id=? AND is_active=1').get(referenceValueId,field.reference_set_id)) {
+        throw new Error(`قيمة التصنيف غير صالحة للحقل «${field.label_ar}».`);
+      }
+    }
+    parsed.push({ field, value:parsedValue });
   }
   for (const field of definition.fields.filter(item => item.is_required)) {
     const supplied = parsed.find(item => item.field.form_field_id === field.form_field_id)?.value;
@@ -192,25 +280,39 @@ function saveRecordWithSource(db, request, sourceContext) {
     if (parsed.some(item => item.value.explicitDelete) && !String(request.changeReason ?? '').trim()) throw new Error('سبب الحذف الصريح مطلوب.');
     if (previous && previous.form_version_id !== versionId) throw new Error('لا يمكن تغيير إصدار النموذج المرتبط بسجل قائم.');
     if (previous && !['draft','rejected'].includes(previous.record_status)) throw new Error('لا يمكن تعديل سجل قيد المراجعة أو معتمد؛ أعده للمسودة أولاً.');
+    let parentRecordId = null;
+    let geoUnitId = requestedGeoUnitId;
+    if (isProjectFunding) {
+      parentRecordId = previous?.parent_record_id ?? request.parentRecordId;
+      if (previous?.parent_record_id && request.parentRecordId != null
+        && Number(request.parentRecordId) !== Number(previous.parent_record_id)) throw new Error('لا يمكن تغيير المشروع الأب لسجل تمويل قائم.');
+      const parent = resolveApprovedProjectParent(db,parentRecordId);
+      if (requestedGeoUnitId != null && Number(requestedGeoUnitId) !== Number(parent.geo_unit_id)) {
+        throw new Error('موقع سجل التمويل يجب أن يطابق موقع المشروع الأب.');
+      }
+      geoUnitId = parent.geo_unit_id;
+    }
     if (parsed.some(item => item.field.storage_class === 'measurement' && ['known','zero'].includes(item.value.state))
       && !request.periodId && !request.periodYear) throw new Error('حدّد الفترة المرجعية للقياسات قبل حفظ السجل.');
     const periodId = resolvePeriod(db,request.periodId,request.periodYear);
+    const dimensionsByField = resolveObservationDimensions(db,definition,request.dimensionValues,parsed);
     const sourceId = sourceContext?.sourceId ?? addManualSource(db,actor,now);
     const before = previous ? recordSnapshot(db,previous.form_record_id) : null;
     let recordId = previous?.form_record_id;
     if (!previous) {
-      const result = db.prepare(`INSERT INTO form_records(form_version_id,entity_id,geo_unit_id,period_id,record_code,record_key,record_label,record_status,revision_number,notes,created_by,created_at,updated_at)
-        VALUES(?,NULL,?,?,?,?,?,'draft',1,?,?,?,?)`).run(versionId,geoUnitId,periodId,request.recordCode ?? null,request.recordKey ?? null,
+      const result = db.prepare(`INSERT INTO form_records(form_version_id,entity_id,geo_unit_id,period_id,parent_record_id,record_code,record_key,record_label,record_status,revision_number,notes,created_by,created_at,updated_at)
+        VALUES(?,NULL,?,?,?,?,?,?,'draft',1,?,?,?,?)`).run(versionId,geoUnitId,periodId,parentRecordId,request.recordCode ?? null,request.recordKey ?? null,
           request.recordLabel ?? null,request.notes ?? null,actor,now,now);
       recordId = Number(result.lastInsertRowid);
     } else {
-      db.prepare(`UPDATE form_records SET geo_unit_id=?,period_id=?,record_label=?,notes=?,revision_number=revision_number+1,updated_at=? WHERE form_record_id=?`)
-        .run(geoUnitId,periodId,request.recordLabel ?? previous.record_label,request.notes ?? previous.notes,now,recordId);
+      db.prepare(`UPDATE form_records SET geo_unit_id=?,period_id=?,parent_record_id=?,record_label=?,notes=?,revision_number=revision_number+1,updated_at=? WHERE form_record_id=?`)
+        .run(geoUnitId,periodId,parentRecordId,request.recordLabel ?? previous.record_label,request.notes ?? previous.notes,now,recordId);
     }
     for (const item of parsed) {
       const fieldSource = sourceContext?.sourceByField?.[item.field.field_code];
       storeFieldValue(db,recordId,item.field,item.value,fieldSource?.sourceId ?? sourceId,actor,now,
-        sourceContext ? { provenanceType:sourceContext.provenanceType,sourceLocator:fieldSource?.sourceLocator ?? null } : null);
+        sourceContext ? { provenanceType:sourceContext.provenanceType,sourceLocator:fieldSource?.sourceLocator ?? null } : null,
+        dimensionsByField.get(item.field.field_code) ?? []);
     }
     const after = recordSnapshot(db,recordId);
     const revision = db.prepare('SELECT revision_number FROM form_records WHERE form_record_id=?').get(recordId).revision_number;
@@ -220,24 +322,28 @@ function saveRecordWithSource(db, request, sourceContext) {
     return { formRecordId:recordId,revisionNumber:revision,sourceId,status:previous?.record_status ?? 'draft' };
   })();
 }
-function storeFieldValue(db,recordId,field,parsed,sourceId,actor,now,sourceContext = null) {
+function storeFieldValue(db,recordId,field,parsed,sourceId,actor,now,sourceContext = null,dimensions = []) {
   if (field.storage_class === 'measurement') {
     if (!field.field_definition_id) throw new Error(`حقل القياس «${field.label_ar}» لا يرتبط بتعريف دلالي.`);
     const valueInteger = parsed.state === 'known' || parsed.state === 'zero' ? (Number.isInteger(parsed.value) ? parsed.value : null) : null;
     const valueReal = parsed.state === 'known' || parsed.state === 'zero' ? (!Number.isInteger(parsed.value) ? parsed.value : null) : null;
+    const dimensionSignature = dimensions.map(dimension => `${dimension.dimensionCode}=${dimension.valueCode}`).sort().join('|');
     const record = db.prepare('SELECT geo_unit_id,period_id FROM form_records WHERE form_record_id=?').get(recordId);
     const existing = db.prepare('SELECT observation_id FROM observations WHERE form_record_id=? AND form_field_id=? ORDER BY observation_id DESC LIMIT 1').get(recordId,field.form_field_id);
     let observationId;
     if (existing) {
       observationId = existing.observation_id;
       db.prepare(`UPDATE observations SET field_definition_id=?,geo_unit_id=?,period_id=?,unit_id=?,value_integer=?,value_real=?,value_text=NULL,
-        value_state=?,source_id=?,updated_at=? WHERE observation_id=?`).run(field.field_definition_id,record.geo_unit_id,record.period_id,field.unit_id,
-        valueInteger,valueReal,parsed.state,sourceId,now,observationId);
+        value_state=?,dimension_signature=?,source_id=?,updated_at=? WHERE observation_id=?`).run(field.field_definition_id,record.geo_unit_id,record.period_id,field.unit_id,
+        valueInteger,valueReal,parsed.state,dimensionSignature,sourceId,now,observationId);
+      db.prepare('DELETE FROM observation_dimensions WHERE observation_id=?').run(observationId);
     } else {
       observationId = Number(db.prepare(`INSERT INTO observations(form_record_id,form_field_id,field_definition_id,geo_unit_id,period_id,unit_id,value_integer,value_real,value_text,value_state,observation_role,quality_status,dimension_signature,source_id,created_by,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?, 'observed','unverified','',?,?,?,?)`).run(recordId,field.form_field_id,field.field_definition_id,
-          record.geo_unit_id,record.period_id,field.unit_id,valueInteger,valueReal,null,parsed.state,sourceId,actor,now,now).lastInsertRowid);
+        VALUES(?,?,?,?,?,?,?,?,?,?, 'observed','unverified',?,?,?, ?,?)`).run(recordId,field.form_field_id,field.field_definition_id,
+          record.geo_unit_id,record.period_id,field.unit_id,valueInteger,valueReal,null,parsed.state,dimensionSignature,sourceId,actor,now,now).lastInsertRowid);
     }
+    const insertDimension = db.prepare('INSERT INTO observation_dimensions(observation_id,dimension_id,dimension_value_id,created_at) VALUES(?,?,?,?)');
+    for (const dimension of dimensions) insertDimension.run(observationId,dimension.dimensionId,dimension.valueId,now);
     db.prepare(`INSERT INTO value_provenance(observation_id,source_id,provenance_type,original_value_text,normalized_value_text,source_locator,entered_by,created_at)
       VALUES(?,?,?,?,?,?,?,?)`).run(observationId,sourceId,sourceContext?.provenanceType ?? (parsed.explicitDelete?'explicit_deletion':'manual_entry'),parsed.raw,
       parsed.value == null ? null : String(parsed.value),sourceContext?.sourceLocator ?? null,actor,now);
@@ -267,6 +373,72 @@ function storeFieldValue(db,recordId,field,parsed,sourceId,actor,now,sourceConte
     VALUES(?,?,?,?,?,?,?,?)`).run(valueId,sourceId,sourceContext?.provenanceType ?? (parsed.explicitDelete?'explicit_deletion':'manual_entry'),parsed.raw,
     parsed.value == null ? null : String(parsed.value),sourceContext?.sourceLocator ?? null,actor,now);
 }
+function syncApprovedEducationFacility(db,recordId,actor,now) {
+  const record = db.prepare('SELECT form_record_id,form_version_id,geo_unit_id,entity_id FROM form_records WHERE form_record_id=?').get(recordId);
+  const form = db.prepare('SELECT form.form_code FROM form_versions version JOIN form_definitions form USING(form_id) WHERE version.form_version_id=?').get(record.form_version_id);
+  if (form?.form_code !== 'education_school_collection_v1') return null;
+  const values = db.prepare(`SELECT field.field_code,value.value_text,value.value_reference_id,value.value_state
+    FROM record_field_values value JOIN form_fields field USING(form_field_id) WHERE value.form_record_id=?`).all(recordId);
+  const byCode = new Map(values.map(value => [value.field_code,value]));
+  const nameValue = byCode.get('education.school.name');
+  const typeValue = byCode.get('education.school.type');
+  const name = String(nameValue?.value_text ?? '').trim();
+  if (nameValue?.value_state !== 'known' || !name) throw new Error('اسم المنشأة التعليمية مطلوب قبل اعتماد سجلها.');
+  if (typeValue?.value_state !== 'known' || typeValue.value_reference_id == null) throw new Error('نوع المنشأة التعليمية مطلوب قبل اعتماد سجلها.');
+  const schoolType = db.prepare(`SELECT value.reference_value_id,value.value_code FROM reference_values value
+    JOIN reference_sets reference USING(reference_set_id) WHERE value.reference_value_id=? AND reference.set_code='education_school_kind_v1' AND value.is_active=1`)
+    .get(typeValue.value_reference_id);
+  if (!schoolType || !['school','kindergarten'].includes(schoolType.value_code)) throw new Error('تصنيف المنشأة التعليمية لا يطابق قائمة المدرسة ورياض الأطفال.');
+  const entityType = db.prepare("SELECT entity_type_id FROM entity_types WHERE entity_type_code='education_facility' AND is_active=1").get();
+  if (!entityType) throw new Error('نوع كيان المنشأة التعليمية غير مهيأ في القاموس.');
+  if (record.geo_unit_id != null && !db.prepare('SELECT 1 FROM geographic_units WHERE geo_unit_id=?').get(record.geo_unit_id)) {
+    throw new Error('موقع المنشأة التعليمية غير مرتبط بالمرجع الجغرافي الموحد.');
+  }
+  let entityId = record.entity_id == null ? null : Number(record.entity_id);
+  const previousEntity = entityId == null ? null : db.prepare('SELECT * FROM entities WHERE entity_id=?').get(entityId);
+  const previousSchool = entityId == null ? null : db.prepare('SELECT * FROM schools WHERE entity_id=?').get(entityId);
+  if (entityId != null && (!previousEntity || previousEntity.entity_type_id !== entityType.entity_type_id)) {
+    throw new Error('رابط سجل المنشأة التعليمية يشير إلى كيان غير متوافق.');
+  }
+  if (previousEntity) {
+    db.prepare('UPDATE entities SET geo_unit_id=?,name_ar=?,normalized_name=?,status=\'active\',updated_at=? WHERE entity_id=?')
+      .run(record.geo_unit_id,name,normalize(name),now,entityId);
+    db.prepare(`INSERT INTO schools(entity_id,school_type_id,is_active,created_at,updated_at) VALUES(?,?,1,?,?)
+      ON CONFLICT(entity_id) DO UPDATE SET school_type_id=excluded.school_type_id,is_active=1,updated_at=excluded.updated_at`)
+      .run(entityId,schoolType.reference_value_id,now,now);
+  } else {
+    entityId = Number(db.prepare(`INSERT INTO entities(entity_type_id,geo_unit_id,name_ar,normalized_name,status,created_at,updated_at)
+      VALUES(?,?,?,?,'active',?,?)`).run(entityType.entity_type_id,record.geo_unit_id,name,normalize(name),now,now).lastInsertRowid);
+    db.prepare('INSERT INTO schools(entity_id,school_type_id,created_at,updated_at) VALUES(?,?,?,?)')
+      .run(entityId,schoolType.reference_value_id,now,now);
+    db.prepare('UPDATE form_records SET entity_id=? WHERE form_record_id=?').run(entityId,recordId);
+  }
+  db.prepare('UPDATE observations SET entity_id=? WHERE form_record_id=?').run(entityId,recordId);
+  const afterEntity = db.prepare('SELECT * FROM entities WHERE entity_id=?').get(entityId);
+  const afterSchool = db.prepare('SELECT * FROM schools WHERE entity_id=?').get(entityId);
+  audit(db,{ code:'education_facility_sync',resourceType:'entity',resourceId:entityId,action:previousEntity?'update':'create',
+    before:previousEntity ? { entity:previousEntity,school:previousSchool } : null,after:{ entity:afterEntity,school:afterSchool },actor,
+    details:`form_record=${recordId};reference_type=${schoolType.value_code}` });
+  return { entityId,action:previousEntity?'updated':'created' };
+}
+
+function markEducationFacilityUnderReview(db,recordId,actor,now,reason) {
+  const record = db.prepare('SELECT form_version_id,entity_id FROM form_records WHERE form_record_id=?').get(recordId);
+  const form = db.prepare('SELECT form.form_code FROM form_versions version JOIN form_definitions form USING(form_id) WHERE version.form_version_id=?').get(record.form_version_id);
+  if (form?.form_code !== 'education_school_collection_v1' || record.entity_id == null) return null;
+  const entityId = Number(record.entity_id);
+  const beforeEntity = db.prepare('SELECT * FROM entities WHERE entity_id=?').get(entityId);
+  const beforeSchool = db.prepare('SELECT * FROM schools WHERE entity_id=?').get(entityId);
+  if (!beforeEntity || !beforeSchool) throw new Error('تعذر إعادة فتح المنشأة التعليمية لأن ملف الكيان المرتبط غير مكتمل.');
+  db.prepare("UPDATE entities SET status='under_review',updated_at=? WHERE entity_id=?").run(now,entityId);
+  db.prepare('UPDATE schools SET is_active=0,updated_at=? WHERE entity_id=?').run(now,entityId);
+  const afterEntity = db.prepare('SELECT * FROM entities WHERE entity_id=?').get(entityId);
+  const afterSchool = db.prepare('SELECT * FROM schools WHERE entity_id=?').get(entityId);
+  audit(db,{ code:'education_facility_sync',resourceType:'entity',resourceId:entityId,action:'reopen',before:{ entity:beforeEntity,school:beforeSchool },
+    after:{ entity:afterEntity,school:afterSchool },actor,details:`form_record=${recordId};${String(reason ?? '').slice(0,300)}` });
+  return { entityId,action:'under_review' };
+}
+
 function syncApprovedDirectorate(db,recordId,actor,now) {
   const record = db.prepare('SELECT form_record_id,form_version_id FROM form_records WHERE form_record_id=?').get(recordId);
   const form = db.prepare(`SELECT f.form_code FROM form_versions v JOIN form_definitions f USING(form_id) WHERE v.form_version_id=?`).get(record.form_version_id);
@@ -377,6 +549,59 @@ function syncApprovedProject(db,recordId,actor,now) {
     .run(previous ? 'central-record-update' : 'central-record-create','projects',String(linkedProjectId),'project_v1','form_record=' + recordId,now);
   return { projectId:linkedProjectId,action:previous ? 'updated' : 'created' };
 }
+function syncApprovedProjectFunding(db,recordId,actor,now) {
+  const record = db.prepare('SELECT form_record_id,form_version_id,parent_record_id,geo_unit_id FROM form_records WHERE form_record_id=?').get(recordId);
+  const form = db.prepare('SELECT f.form_code FROM form_versions v JOIN form_definitions f USING(form_id) WHERE v.form_version_id=?').get(record.form_version_id);
+  if (form?.form_code !== 'project_funding_v1') return null;
+  const parent = resolveApprovedProjectParent(db,record.parent_record_id);
+  const scalarRows = db.prepare(`SELECT field.field_code,value.value_text,value.value_date,value.value_state
+    FROM record_field_values value JOIN form_fields field USING(form_field_id) WHERE value.form_record_id=?`).all(recordId);
+  const values = Object.fromEntries(scalarRows.filter(row => ['known','zero'].includes(row.value_state))
+    .map(row => [row.field_code,row.value_date ?? row.value_text]));
+  const amountRow = db.prepare(`SELECT observation.value_integer,observation.value_real,observation.value_state
+    FROM observations observation JOIN form_fields field USING(form_field_id)
+    WHERE observation.form_record_id=? AND field.field_code='amount'`).get(recordId);
+  const amount = amountRow && ['known','zero'].includes(amountRow.value_state)
+    ? amountRow.value_integer ?? amountRow.value_real : null;
+  const partner = String(values.partnerName ?? '').trim();
+  if (!partner || partner.length > 240) throw new Error('اسم جهة التمويل مطلوب قبل اعتماد سجل التمويل.');
+  const currency = String(values.currencyCode ?? '').trim().toUpperCase() || null;
+  if (amount != null && !currency) throw new Error('أدخل رمز العملة قبل اعتماد مبلغ التمويل.');
+  if (currency && !/^[A-Z]{3}$/.test(currency)) throw new Error('رمز عملة التمويل يجب أن يتكون من ثلاثة أحرف لاتينية.');
+  const fundingDate = values.fundingDate ?? null;
+  const link = db.prepare("SELECT legacy_entity_id FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='project_funding'").get(recordId);
+  const fundingId = link ? Number(link.legacy_entity_id) : null;
+  const previous = fundingId ? db.prepare('SELECT * FROM project_funding WHERE id=?').get(fundingId) : null;
+  if (fundingId && (!previous || Number(previous.project_id) !== Number(parent.project_id))) {
+    throw new Error('رابط التمويل المعتمد لا يطابق المشروع الأب المحدد.');
+  }
+  const revision = db.prepare('SELECT source_id FROM record_revisions WHERE form_record_id=? ORDER BY revision_number DESC LIMIT 1').get(recordId);
+  const sourceId = revision?.source_id == null ? null
+    : db.prepare('SELECT id FROM data_sources WHERE id=? OR source_id=? ORDER BY id LIMIT 1').get(revision.source_id,revision.source_id)?.id ?? null;
+  const project = db.prepare('SELECT * FROM projects WHERE id=?').get(parent.project_id);
+  if (previous) {
+    const fundingBefore = db.prepare('SELECT * FROM project_funding WHERE project_id=? ORDER BY id').all(parent.project_id);
+    db.prepare('INSERT INTO project_versions(project_id,action,payload_json,source_id,created_at) VALUES(?,?,?,?,?)')
+      .run(parent.project_id,'central-funding-approval-update',JSON.stringify({ project,funding:fundingBefore }),sourceId,now);
+    db.prepare('UPDATE project_funding SET partner_name=?,amount=?,currency_code=?,funding_date=?,source_id=? WHERE id=?')
+      .run(partner,amount,currency,fundingDate,sourceId,fundingId);
+  } else {
+    const inserted = db.prepare(`INSERT INTO project_funding(project_id,partner_name,amount,currency_code,funding_date,source_id,created_at)
+      VALUES(?,?,?,?,?,?,?)`).run(parent.project_id,partner,amount,currency,fundingDate,sourceId,now);
+    const createdId = Number(inserted.lastInsertRowid);
+    db.prepare("INSERT INTO form_record_legacy_links(form_record_id,legacy_entity_type,legacy_entity_id,linked_at) VALUES(?,'project_funding',?,?)")
+      .run(recordId,createdId,now);
+    db.prepare(`INSERT OR IGNORE INTO application_migration_log(migration_code,source_table,source_id,target_table,target_id,status,details,created_at)
+      VALUES('domain-records-v1','project_funding',?,'form_records',?,'migrated','مرتبط بسجل تمويل المشروع المركزي المعتمد.',?)`)
+      .run(String(createdId),String(recordId),now);
+  }
+  db.prepare('UPDATE projects SET updated_at=?,source_id=? WHERE id=?').run(now,sourceId,parent.project_id);
+  const linkedFundingId = fundingId ?? Number(db.prepare("SELECT legacy_entity_id FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='project_funding'").get(recordId).legacy_entity_id);
+  db.prepare('INSERT INTO access_log(action,entity,entity_id,fields,detail,created_at) VALUES(?,?,?,?,?,?)')
+    .run(previous ? 'central-funding-update' : 'central-funding-create','project_funding',String(linkedFundingId),'project_id,partner_name,amount,currency_code,funding_date',
+      `project=${parent.project_id};form_record=${recordId}`,now);
+  return { fundingId:linkedFundingId,projectId:parent.project_id,action:previous ? 'updated' : 'created' };
+}
 function syncApprovedIndicatorObservation(db,recordId,actor,now) {
   const record = db.prepare('SELECT form_record_id,form_version_id,geo_unit_id FROM form_records WHERE form_record_id=?').get(recordId);
   const form = db.prepare('SELECT f.form_code FROM form_versions v JOIN form_definitions f USING(form_id) WHERE v.form_version_id=?').get(record.form_version_id);
@@ -438,10 +663,10 @@ function syncApprovedIndicatorObservation(db,recordId,actor,now) {
 }
 function recordSnapshot(db,recordId) {
   const record = db.prepare('SELECT * FROM form_records WHERE form_record_id=?').get(recordId);
-  const values = db.prepare(`SELECT ff.field_code,rfv.item_ordinal,rfv.value_text,rfv.value_boolean,rfv.value_date,rfv.value_reference_id,rfv.value_entity_id,rfv.value_state
+  const values = db.prepare(`SELECT ff.field_code,rfv.item_ordinal,rfv.value_text,rfv.value_boolean,rfv.value_date,rfv.value_reference_id,rfv.value_entity_id,rfv.value_state,NULL AS dimension_signature
     FROM record_field_values rfv JOIN form_fields ff USING(form_field_id) WHERE rfv.form_record_id=?
     UNION ALL
-    SELECT ff.field_code,1,o.value_integer,o.value_real,o.value_text,NULL,NULL,o.value_state
+    SELECT ff.field_code,1,o.value_integer,o.value_real,o.value_text,NULL,NULL,o.value_state,o.dimension_signature
     FROM observations o JOIN form_fields ff USING(form_field_id) WHERE o.form_record_id=?`).all(recordId,recordId);
   return { record,values };
 }
@@ -465,17 +690,28 @@ function getRecord(db,recordId) {
       provenanceType:row.provenance_type,originalValue:row.original_value_text,normalizedValue:row.normalized_value_text,enteredBy:row.entered_by,
       provenanceAt:row.provenance_at,sourceType:row.source_type,documentTitle:row.document_title,fileName:row.file_name,organization:row.organization };
   }
-  const observations = db.prepare(`SELECT ff.field_code,o.observation_id,o.value_integer,o.value_real,o.value_text,o.value_state,
+  const observations = db.prepare(`SELECT ff.field_code,o.observation_id,o.value_integer,o.value_real,o.value_text,o.value_state,o.dimension_signature,
     provenance.source_id,provenance.source_locator,provenance.provenance_type,provenance.original_value_text,provenance.normalized_value_text,
     provenance.entered_by,provenance.created_at AS provenance_at,source.source_type,source.document_title,source.file_name,source.organization
     FROM observations o JOIN form_fields ff USING(form_field_id)
     LEFT JOIN value_provenance provenance ON provenance.provenance_id=(SELECT MAX(latest.provenance_id) FROM value_provenance latest WHERE latest.observation_id=o.observation_id)
     LEFT JOIN data_sources source ON source.id=provenance.source_id WHERE o.form_record_id=?`).all(id);
+  const dimensionRows = db.prepare(`SELECT observation.observation_id,definition.dimension_code,value.value_code,value.label_ar
+    FROM observations observation JOIN observation_dimensions mapping USING(observation_id)
+    JOIN dimension_definitions definition USING(dimension_id) JOIN dimension_values value USING(dimension_value_id)
+    WHERE observation.form_record_id=? ORDER BY definition.dimension_code`).all(id);
+  const dimensionsByObservation = new Map();
+  for (const row of dimensionRows) {
+    const dimensions = dimensionsByObservation.get(row.observation_id) ?? {};
+    dimensions[row.dimension_code] = { code:row.value_code,label:row.label_ar };
+    dimensionsByObservation.set(row.observation_id,dimensions);
+  }
   for (const row of observations) {
     const value = row.value_integer ?? row.value_real ?? row.value_text;
     values[row.field_code] = { value:value == null ? '' : String(value),state:row.value_state,sourceId:row.source_id,sourceLocator:row.source_locator,
       provenanceType:row.provenance_type,originalValue:row.original_value_text,normalizedValue:row.normalized_value_text,enteredBy:row.entered_by,
-      provenanceAt:row.provenance_at,sourceType:row.source_type,documentTitle:row.document_title,fileName:row.file_name,organization:row.organization };
+      provenanceAt:row.provenance_at,sourceType:row.source_type,documentTitle:row.document_title,fileName:row.file_name,organization:row.organization,
+      dimensionSignature:row.dimension_signature,dimensions:dimensionsByObservation.get(row.observation_id) ?? {} };
   }
   return { record,values };
 }
@@ -504,6 +740,34 @@ function listRecords(db, request = {}) {
     ${from} ${where} ORDER BY r.updated_at DESC,r.form_record_id DESC LIMIT ? OFFSET ?`).all(...params,limit,offset);
   return { rows,total,limit,offset,hasPrevious:offset>0,hasNext:offset+rows.length<total };
 }
+function listApprovedProjectParents(db,request = {}) {
+  const limit = Math.min(200,Math.max(1,Number(request.limit)||50));
+  const offset = Math.max(0,Math.min(1000000,Number(request.offset)||0));
+  const search = String(request.search ?? '').trim().slice(0,120);
+  const conditions = ["record.record_status='approved'","form.form_code='project_v1'"];
+  const params = [];
+  const parentRecordId = Number(request.parentRecordId);
+  if (Number.isSafeInteger(parentRecordId) && parentRecordId > 0) {
+    conditions.push('record.form_record_id=?');
+    params.push(parentRecordId);
+  }
+  if (search) {
+    conditions.push("(instr(lower(coalesce(project.name,'')),lower(?))>0 OR instr(lower(coalesce(project.code,'')),lower(?))>0)");
+    params.push(search,search);
+  }
+  const from = `FROM form_records record
+    JOIN form_versions version ON version.form_version_id=record.form_version_id
+    JOIN form_definitions form ON form.form_id=version.form_id
+    JOIN form_record_legacy_links link ON link.form_record_id=record.form_record_id AND link.legacy_entity_type='project'
+    JOIN projects project ON project.id=link.legacy_entity_id
+    LEFT JOIN geographic_units geo ON geo.geo_unit_id=record.geo_unit_id`;
+  const where = `WHERE ${conditions.join(' AND ')}`;
+  const total = db.prepare(`SELECT COUNT(*) AS count ${from} ${where}`).get(...params).count;
+  const rows = db.prepare(`SELECT record.form_record_id AS formRecordId,record.geo_unit_id AS geoUnitId,
+      project.id AS projectId,project.name,project.code,geo.name_ar AS geoName
+    ${from} ${where} ORDER BY lower(project.name),project.id LIMIT ? OFFSET ?`).all(...params,limit,offset);
+  return { rows,total,limit,offset,hasPrevious:offset>0,hasNext:offset+rows.length<total };
+}
 function submitForReview(db,recordId,actor) {
   return decideRecord(db,recordId,{decision:'submit',actor});
 }
@@ -527,8 +791,10 @@ function decideRecord(db,recordId,request = {}) {
     const next = decisions[request.decision];
     const actor = typeof request.actor === 'string' ? request.actor.slice(0,120) : null;
     const before = recordSnapshot(db,id);
+    if (request.decision === 'reopen') markEducationFacilityUnderReview(db,id,actor,now,request.reason);
     const legacySync = request.decision === 'approve'
-      ? (syncApprovedDirectorate(db,id,actor,now) ?? syncApprovedProject(db,id,actor,now) ?? syncApprovedIndicatorObservation(db,id,actor,now))
+      ? (syncApprovedEducationFacility(db,id,actor,now) ?? syncApprovedDirectorate(db,id,actor,now) ?? syncApprovedProject(db,id,actor,now)
+        ?? syncApprovedProjectFunding(db,id,actor,now) ?? syncApprovedIndicatorObservation(db,id,actor,now))
       : null;
     const revision = previous.revision_number + 1;
     db.prepare(`UPDATE form_records SET record_status=?,revision_number=?,submitted_by=CASE WHEN ?='pending_review' THEN ? ELSE submitted_by END,
@@ -572,4 +838,45 @@ function listPeriods(db) {
   return db.prepare('SELECT period_id,period_code,period_type,calendar_type,label_ar,label_en,start_date,end_date FROM periods WHERE is_active=1 ORDER BY coalesce(start_date,created_at) DESC LIMIT 300').all();
 }
 
-module.exports = { parseLocalizedNumber, parseValue, listForms, getFormDefinition, saveRecord, saveRecordFromDocument, getRecord, listRecords, submitForReview, decideRecord, archiveLinkedDirectorate, listGeoUnits, listPeriods };
+function migrateApprovedEducationFacilities(db) {
+  const checksum = crypto.createHash('sha256').update(EDUCATION_SYNC_CODE).update('education_facility|schools|form_records.entity_id').digest('hex');
+  const existing = db.prepare('SELECT * FROM schema_migrations WHERE version=?').get(EDUCATION_SYNC_VERSION);
+  if (existing?.success === 1) {
+    if (existing.checksum !== checksum || existing.migration_code !== EDUCATION_SYNC_CODE) {
+      throw new Error('ترحيل ربط المنشآت التعليمية تغيّر بعد تطبيقه؛ أضف ترحيلاً جديداً بدلاً من تعديل النسخة المنشورة.');
+    }
+    return { version:EDUCATION_SYNC_VERSION,alreadyApplied:true };
+  }
+  if (existing) db.prepare('DELETE FROM schema_migrations WHERE version=? AND success=0').run(EDUCATION_SYNC_VERSION);
+  const now = new Date().toISOString();
+  const startedAt = Date.now();
+  let linked = 0;
+  const deferred = [];
+  try {
+    db.transaction(() => {
+      const approved = db.prepare(`SELECT record.form_record_id FROM form_records record
+        JOIN form_versions version USING(form_version_id) JOIN form_definitions form USING(form_id)
+        WHERE form.form_code='education_school_collection_v1' AND record.record_status='approved' AND record.entity_id IS NULL
+        ORDER BY record.form_record_id`).all();
+      for (const row of approved) {
+        try {
+          db.transaction(() => syncApprovedEducationFacility(db,row.form_record_id,'migration',now))();
+          linked += 1;
+        } catch (error) {
+          deferred.push(`${row.form_record_id}:${String(error.message).slice(0,180)}`);
+        }
+      }
+      db.prepare(`INSERT INTO schema_migrations(version,migration_code,migration_name,checksum,applied_at,execution_ms,success,details)
+        VALUES(?,?,?,?,?,?,1,?)`).run(EDUCATION_SYNC_VERSION,EDUCATION_SYNC_CODE,'ربط سجلات المدارس المعتمدة بالكيانات المركزية',checksum,now,
+          Date.now()-startedAt,`linked=${linked};deferred=${deferred.length};${deferred.slice(0,20).join('|')}`);
+    })();
+  } catch (error) {
+    db.prepare(`INSERT OR REPLACE INTO schema_migrations(version,migration_code,migration_name,checksum,applied_at,execution_ms,success,details)
+      VALUES(?,?,?,?,?,?,0,?)`).run(EDUCATION_SYNC_VERSION,EDUCATION_SYNC_CODE,'ربط سجلات المدارس المعتمدة بالكيانات المركزية',checksum,
+        new Date().toISOString(),Date.now()-startedAt,String(error.message).slice(0,4000));
+    throw error;
+  }
+  return { version:EDUCATION_SYNC_VERSION,alreadyApplied:false,linked,deferred };
+}
+
+module.exports = { parseLocalizedNumber, parseValue, listForms, getFormDefinition, saveRecord, saveRecordFromDocument, getRecord, listRecords, listApprovedProjectParents, submitForReview, decideRecord, archiveLinkedDirectorate, listGeoUnits, listPeriods, migrateApprovedEducationFacilities };

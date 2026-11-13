@@ -43,6 +43,8 @@ const SCHEMA = `
     retrieval_reference_json TEXT NOT NULL DEFAULT '{}',
     evidence_text TEXT NOT NULL DEFAULT '',
     raw_value TEXT,
+    suggested_value TEXT,
+    confidence REAL,
     validation_status TEXT NOT NULL,
     review_status TEXT NOT NULL DEFAULT 'pending' CHECK(review_status IN ('pending','reviewed','rejected','no_evidence')),
     reviewed_value_json TEXT,
@@ -75,6 +77,9 @@ const RAGFLOW_FIELD_BATCH_LIMIT = 40;
 
 function migrate(database) {
   database.exec(SCHEMA);
+  const columns = database.prepare('PRAGMA table_info(document_field_candidates)').all().map(column => column.name);
+  if (!columns.includes('suggested_value')) database.exec('ALTER TABLE document_field_candidates ADD COLUMN suggested_value TEXT');
+  if (!columns.includes('confidence')) database.exec('ALTER TABLE document_field_candidates ADD COLUMN confidence REAL');
 }
 
 function normalizeDataType(value) {
@@ -121,7 +126,8 @@ function fieldRegistry(database) {
   const definitions = database.prepare(`SELECT id AS field_definition_id,entity_type,field_key,
     entity_type || '.' || field_key AS field_code,label_ar,data_type,unit,field_class,description
     FROM data_field_definitions WHERE active=1 AND entity_type NOT IN ('system','metadata') ORDER BY entity_type,field_key`).all();
-  const registry = new Map(definitions.map((field) => [field.field_code, { ...field, aliases: [] }]));
+  const definitionsByCode = new Map(definitions.map(field => [field.field_code,field]));
+  const registry = new Map();
   const formFields = database.prepare(`SELECT NULL AS field_definition_id,
     CASE WHEN form.form_code='legacy_directorate_v1' THEN 'directorate' ELSE form.form_code END AS entity_type,
     form_field.field_code,form_field.field_code AS field_key,form_field.label_ar,
@@ -143,7 +149,12 @@ function fieldRegistry(database) {
       existing.form_label_ar = field.label_ar;
       continue;
     }
-    registry.set(field.field_code, { ...field, field_key: field.field_code, aliases: [], form_field: true });
+    registry.set(field.field_code, { ...(definitionsByCode.get(field.field_code) ?? {}), ...field,
+      field_definition_id: definitionsByCode.get(field.field_code)?.field_definition_id ?? null,
+      label_ar: definitionsByCode.get(field.field_code)?.label_ar ?? field.label_ar,
+      unit: definitionsByCode.get(field.field_code)?.unit ?? field.unit,
+      field_class: definitionsByCode.get(field.field_code)?.field_class ?? field.field_class,
+      field_key: definitionsByCode.get(field.field_code)?.field_key ?? field.field_code, aliases: [], form_field: true });
   }
   for (const field of registry.values()) field.aliases = aliasesFor(database, field);
   return [...registry.values()].filter((field) => field.field_class !== 'review_decision' && field.field_class !== 'ignored_derived');
@@ -153,22 +164,33 @@ function buildLocalCandidates(database, field, aliases, triggerDocumentId, runId
   const conditions = aliases.map(() => 'instr(element.search_text,?)>0').join(' OR ');
   if (!conditions) return [];
   const rows = database.prepare(`SELECT element.id AS element_id,element.document_id,document.file_name,document.sha256,
-    element.element_type,element.heading,element.content,element.page_number,element.position_json,element.source_json
+    element.element_type,element.heading,element.content,element.page_number,element.position_json,element.confidence,element.source_json
     FROM document_elements element JOIN document_records document ON document.id=element.document_id
     WHERE (${conditions}) ORDER BY CASE WHEN element.document_id=? THEN 0 ELSE 1 END,document.created_at DESC,element.sequence_number
     LIMIT ?`).all(...aliases, triggerDocumentId, MAX_LOCAL_EVIDENCE_PER_FIELD);
   return rows.map((row) => {
     const evidence = evidenceLine(row, aliases);
     const rawValue = extractLabelValue(evidence, aliases);
+    const sourceConfidence = row.confidence == null ? null : Number(row.confidence);
+    const confidence = Math.max(0, Math.min(1, (rawValue ? 0.96 : 0.4) * (Number.isFinite(sourceConfidence) ? 0.75 + sourceConfidence * 0.25 : 1)));
     return {
       id: crypto.randomUUID(), runId, field, sourceDocumentId: row.document_id, sourceElementId: row.element_id,
       sourceFileName: row.file_name, sourceSha256: row.sha256, pageNumber: row.page_number,
       sourceLocation: { pageNumber: row.page_number, position: parseJson(row.position_json, null), source: parseJson(row.source_json, {}) },
       searchTerms: aliases, retrievalMethod: 'local-literal', retrievalReference: { elementType: row.element_type, heading: row.heading },
-      evidenceText: evidence.slice(0, 4000), rawValue, validationStatus: rawValue ? 'needs-type-and-context-review' : 'evidence-only',
-      createdAt: now,
+      evidenceText: evidence.slice(0, 4000), rawValue, suggestedValue: normalizeCandidateValue(field, rawValue), confidence,
+      validationStatus: rawValue ? 'needs-type-and-context-review' : 'evidence-only', createdAt: now,
     };
   });
+}
+
+function normalizeCandidateValue(field, value) {
+  if (value == null || !['integer','decimal'].includes(normalizeDataType(field.data_type))) return value ?? null;
+  const original = String(value).trim();
+  const normalizedDigits = original.replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x06f0));
+  if (!/^[+-]?[\d\s٬,٫.]+$/.test(normalizedDigits)) return original;
+  return normalizedDigits.replace(/[\s٬,]/g, '').replace(/٫/g, '.');
 }
 
 function evidenceLine(row, aliases) {
@@ -238,13 +260,14 @@ function insertCandidate(database, candidate) {
   database.prepare(`INSERT OR IGNORE INTO document_field_candidates
     (id,run_id,field_definition_id,field_code,entity_type,field_key,field_label_ar,data_type,unit,field_class,
       source_document_id,source_element_id,source_file_name,source_sha256,page_number,source_location_json,
-      search_terms_json,retrieval_method,retrieval_reference_json,evidence_text,raw_value,validation_status,review_status,created_at,updated_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(candidate.id,candidate.runId,candidate.field.field_definition_id ?? null,
+      search_terms_json,retrieval_method,retrieval_reference_json,evidence_text,raw_value,suggested_value,confidence,validation_status,review_status,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(candidate.id,candidate.runId,candidate.field.field_definition_id ?? null,
       candidate.field.field_code,candidate.field.entity_type,candidate.field.field_key,candidate.field.label_ar,candidate.field.data_type,
       candidate.field.unit ?? null,candidate.field.field_class ?? null,candidate.sourceDocumentId,candidate.sourceElementId,
       candidate.sourceFileName,candidate.sourceSha256,candidate.pageNumber,JSON.stringify(candidate.sourceLocation),
       JSON.stringify(candidate.searchTerms),candidate.retrievalMethod,JSON.stringify(candidate.retrievalReference),candidate.evidenceText,
-      candidate.rawValue,candidate.validationStatus,['not-searched-remotely','ragflow-unavailable','ragflow-no-hit'].includes(candidate.retrievalMethod) ? 'no_evidence' : 'pending',
+      candidate.rawValue,candidate.suggestedValue ?? candidate.rawValue,candidate.confidence ?? null,candidate.validationStatus,
+      ['not-searched-remotely','ragflow-unavailable','ragflow-no-hit'].includes(candidate.retrievalMethod) ? 'no_evidence' : 'pending',
       candidate.createdAt,candidate.createdAt);
 }
 
@@ -323,7 +346,7 @@ function listCandidates(database, documentId) {
   if (!run) return { run: null, rows: [] };
   const rows = database.prepare(`SELECT candidate.id,candidate.field_code,candidate.entity_type,candidate.field_key,candidate.field_label_ar,candidate.data_type,candidate.unit,candidate.field_class,
     candidate.source_document_id,candidate.source_file_name,candidate.source_sha256,candidate.page_number,candidate.source_location_json,candidate.search_terms_json,candidate.retrieval_method,
-    candidate.retrieval_reference_json,candidate.evidence_text,candidate.raw_value,candidate.validation_status,candidate.review_status,candidate.reviewed_value_json,candidate.review_note,candidate.reviewed_by,candidate.reviewed_at,candidate.created_at,candidate.updated_at,
+    candidate.retrieval_reference_json,candidate.evidence_text,candidate.raw_value,candidate.suggested_value,candidate.confidence,candidate.validation_status,candidate.review_status,candidate.reviewed_value_json,candidate.review_note,candidate.reviewed_by,candidate.reviewed_at,candidate.created_at,candidate.updated_at,
     promotion.form_record_id AS promoted_form_record_id
     FROM document_field_candidates candidate LEFT JOIN document_candidate_promotions promotion ON promotion.candidate_id=candidate.id
     WHERE candidate.run_id=? ORDER BY candidate.entity_type,candidate.field_class,candidate.field_label_ar,candidate.source_file_name`).all(run.id).map((row) => ({

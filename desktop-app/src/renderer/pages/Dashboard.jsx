@@ -48,9 +48,10 @@ export default function Dashboard({ onNavigate, refreshKey }) {
             icon={FileSpreadsheet}
             title="لا توجد مديريات محفوظة بعد"
             hint="يمكن إدخال البيانات يدويًا أو استيراد ملف Excel، ثم مراجعتها واعتمادها قبل حفظها في قاعدة البيانات."
-            action={<button className="btn primary" onClick={() => onNavigate('import')}><FileSpreadsheet size={17} />استيراد البيانات</button>}
+            action={<button className="btn primary" onClick={() => onNavigate('documents', { tab: 'import' })}><FileSpreadsheet size={17} />استيراد البيانات</button>}
           />
         </Card>
+        <OperationalSummary summary={data.summary} />
       </>
     );
   }
@@ -202,7 +203,25 @@ export default function Dashboard({ onNavigate, refreshKey }) {
           </div>
         </Card>
       </div>
+
+      <OperationalSummary summary={data.summary} />
     </>
+  );
+}
+
+function OperationalSummary({ summary = {} }) {
+  const observations = summary.observations ?? {};
+  const quality = summary.dataQuality ?? {};
+  return (
+    <Card title="ملخص قياسات المؤشرات وسجل الجودة" subtitle="إجماليات للمتابعة السريعة؛ تبقى التفاصيل والبيانات محفوظة في قاعدة البيانات.">
+      <div className="stat-strip">
+        <MiniStat label="قياسات محفوظة" value={fmtNumber(observations.total ?? 0, 0)} />
+        <MiniStat label="مؤشرات ممثلة" value={fmtNumber(observations.indicators ?? 0, 0)} />
+        <MiniStat label="ملاحظات جودة مفتوحة" value={fmtNumber(quality.open ?? 0, 0)} />
+        <MiniStat label="ملاحظات مسوّاة" value={fmtNumber(quality.resolved ?? 0, 0)} />
+      </div>
+      {observations.latest_at && <p className="muted">آخر قياس محفوظ: {fmtDate(observations.latest_at)}</p>}
+    </Card>
   );
 }
 
@@ -220,7 +239,7 @@ function Hero({ onNavigate, generatedAt }) {
           </p>
         </div>
         <div className="hero-actions">
-          <button className="btn primary sheen" onClick={() => onNavigate('import')}>
+          <button className="btn primary sheen" onClick={() => onNavigate('documents', { tab: 'import' })}>
             <FileSpreadsheet size={17} />
             استيراد ملف Excel
           </button>

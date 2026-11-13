@@ -6,7 +6,9 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { StringDecoder } = require('node:string_decoder');
 const unzipper = require('unzipper');
+const ExcelJS = require('exceljs');
 const { SaxesParser } = require('saxes');
+const { inspectXlsxPackage } = require('../analysis/xlsx-preflight.cjs');
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 24 * 1024 * 1024;
@@ -21,6 +23,8 @@ const WORKER_ENV_KEYS = Object.freeze([
 const MIME_TYPES = Object.freeze({
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.pdf': 'application/pdf',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.xlsm': 'application/vnd.ms-excel.sheet.macroEnabled.12',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -117,6 +121,7 @@ async function inspectFile(filePath, fileSystem = fs) {
           : header[0] === 0x50 && header[1] === 0x4b;
   if (!valid) throw new Error('محتوى الملف لا يطابق نوعه الفعلي؛ لم يُحفظ.');
   if (extension === '.docx') await inspectDocxPackage(resolved);
+  if (extension === '.xlsx' || extension === '.xlsm') inspectXlsxPackage(resolved);
   return { filePath: resolved, extension, mimeType, size: stat.size };
 }
 
@@ -169,19 +174,29 @@ async function stageFile(database, filePath) {
   return { id, file_name: path.basename(inspected.filePath), status: 'staged', sha256, duplicate: false };
 }
 
+function archiveTableExists(database) {
+  return Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_archive'").get());
+}
+
+function isArchived(database, id) {
+  if (!archiveTableExists(database)) return false;
+  return Boolean(database.prepare("SELECT 1 FROM file_archive WHERE resource_type='document' AND resource_id=?").get(String(id)));
+}
+
 function listDocuments(database, request = {}) {
   const limit = Math.max(1, Math.min(100, Math.trunc(Number(request.limit) || 30)));
   const offset = Math.max(0, Math.trunc(Number(request.offset) || 0));
+  const active = archiveTableExists(database) ? "WHERE NOT EXISTS (SELECT 1 FROM file_archive archive WHERE archive.resource_type='document' AND archive.resource_id=document_records.id)" : '';
   const rows = database.prepare(`SELECT id,file_name,mime_type,file_size,sha256,status,engine_name,engine_version,processing_error,created_at,updated_at
-    FROM document_records ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset);
-  const total = database.prepare('SELECT COUNT(*) AS total FROM document_records').get().total;
+    FROM document_records ${active} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset);
+  const total = database.prepare(`SELECT COUNT(*) AS total FROM document_records ${active}`).get().total;
   return { rows, total, offset, limit, hasNext: offset + rows.length < total };
 }
 
 function getDocument(database, id) {
   const document = database.prepare(`SELECT id,source_id,file_name,mime_type,file_size,sha256,status,engine_name,engine_version,processing_error,created_at,updated_at
     FROM document_records WHERE id=?`).get(String(id));
-  if (!document) throw new Error('الوثيقة غير موجودة.');
+  if (!document || isArchived(database, document.id)) throw new Error('الوثيقة غير موجودة أو مؤرشفة.');
   const artifacts = database.prepare('SELECT artifact_type,content,created_at FROM document_artifacts WHERE document_id=? ORDER BY artifact_type').all(document.id);
   const elements = database.prepare(`SELECT id,sequence_number,element_type,heading,content,page_number,position_json,confidence,source_json
     FROM document_elements WHERE document_id=? ORDER BY sequence_number LIMIT 1000`).all(document.id);
@@ -191,7 +206,7 @@ function getDocument(database, id) {
 
 function readOriginal(database, id) {
   const row = database.prepare('SELECT id,file_name,mime_type,sha256,original_content FROM document_records WHERE id=?').get(String(id));
-  if (!row) throw new Error('الوثيقة غير موجودة.');
+  if (!row || isArchived(database, row.id)) throw new Error('الوثيقة غير موجودة أو مؤرشفة.');
   return { id: row.id, file_name: row.file_name, mime_type: row.mime_type, sha256: row.sha256, content: Buffer.from(row.original_content) };
 }
 
@@ -218,9 +233,10 @@ function searchDocuments(database, request = {}) {
   const query = normalizeSearchText(request.query);
   if (query.length < 2 || query.length > 250) throw new Error('اكتب عبارة بحث من حرفين إلى 250 حرفًا.');
   const limit = Math.max(1, Math.min(50, Math.trunc(Number(request.limit) || 20)));
+  const activeFilter = archiveTableExists(database) ? "AND NOT EXISTS (SELECT 1 FROM file_archive archive WHERE archive.resource_type='document' AND archive.resource_id=d.id)" : '';
   const rows = database.prepare(`SELECT e.id AS element_id,e.document_id,d.file_name,d.sha256,e.element_type,e.heading,e.content,e.page_number,e.position_json,e.confidence,e.source_json
     FROM document_elements e JOIN document_records d ON d.id=e.document_id
-    WHERE instr(e.search_text,?)>0
+    WHERE instr(e.search_text,?)>0 ${activeFilter}
     ORDER BY d.created_at DESC,e.sequence_number LIMIT ?`).all(query, limit);
   return { query, mode: 'literal-local', rows };
 }
@@ -369,6 +385,66 @@ async function extractDocxFile(filePath) {
   return extractDocxXml(xml, path.basename(filePath));
 }
 
+async function extractXlsxFile(filePath) {
+  inspectXlsxPackage(filePath);
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(filePath);
+  const elements = [];
+  const warnings = [];
+  let skippedFormulaCells = 0;
+  for (const worksheet of workbook.worksheets.slice(0, 200)) {
+    const headers = new Map();
+    let headerRow = 0;
+    for (let rowNumber = 1; rowNumber <= Math.min(worksheet.rowCount, 5000); rowNumber += 1) {
+      const row = worksheet.getRow(rowNumber);
+      const cells = [];
+      row.eachCell({ includeEmpty: false }, (cell) => {
+        if (cell.col <= 400) cells.push(cell);
+      });
+      if (!cells.length) continue;
+      if (!headerRow) {
+        headerRow = rowNumber;
+        for (const cell of cells) {
+          if (cell.value && typeof cell.value === 'object' && (cell.value.formula || cell.value.sharedFormula)) continue;
+          const label = String(cell.text ?? '').trim();
+          if (label) headers.set(cell.col, label);
+        }
+        continue;
+      }
+      const lines = [];
+      const locations = [];
+      for (const cell of cells) {
+        if (cell.value && typeof cell.value === 'object' && (cell.value.formula || cell.value.sharedFormula)) {
+          skippedFormulaCells += 1;
+          continue;
+        }
+        const value = String(cell.text ?? '').trim();
+        if (!value) continue;
+        const label = headers.get(cell.col) ?? `العمود ${cell.address.replace(/\d/g, '')}`;
+        lines.push(`${label}: ${value}`);
+        locations.push({ header: label, address: cell.address, value });
+      }
+      if (!lines.length) continue;
+      if (elements.length >= 50000) throw new Error('تجاوز عدد صفوف Excel حد الاستخراج الآمن.');
+      elements.push({
+        type: 'spreadsheet-row',
+        heading: worksheet.name,
+        content: lines.join('\n'),
+        source: { file_name: path.basename(filePath), sheet_name: worksheet.name, row_number: rowNumber, header_row: headerRow, cells: locations },
+      });
+    }
+  }
+  if (skippedFormulaCells) warnings.push(`تُركت ${skippedFormulaCells} خلية صيغة دون تقييم أو استخدام.`);
+  const markdown = elements.map((element) => `## ${element.heading} · صف ${element.source.row_number}\n${element.content}`).join('\n\n');
+  return {
+    engine: { name: 'Local ExcelJS parser', version: '4.4.0' },
+    structured: { sheets: workbook.worksheets.map(sheet => ({ name: sheet.name, rowCount: sheet.rowCount, columnCount: sheet.columnCount })) },
+    markdown,
+    elements,
+    warnings,
+  };
+}
+
 function workerStartError(error) {
   if (error.code === 'ENOENT') return new Error('محرك معالجة هذا النوع غير مثبت أو غير مهيأ على الجهاز. بقي الملف الأصلي محفوظًا، ويمكن استخدام استخراج Word المحلي دون تثبيت Python.');
   return new Error(`تعذر تشغيل محرك الوثائق: ${error.message}`);
@@ -380,7 +456,9 @@ function workerExitError(code, stderr) {
 }
 
 function runWorker(filePath, options = {}) {
-  if (path.extname(filePath).toLowerCase() === '.docx') return extractDocxFile(filePath);
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === '.docx') return extractDocxFile(filePath);
+  if (extension === '.xlsx' || extension === '.xlsm') return extractXlsxFile(filePath);
 
   const python = options.python ?? process.env.DOCUMENT_WORKER_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
   const script = workerScriptPath(options);
@@ -430,5 +508,5 @@ function runWorker(filePath, options = {}) {
 module.exports = {
   MAX_FILE_BYTES, MIME_TYPES, SCHEMA, checksum: () => crypto.createHash('sha256').update(SCHEMA).digest('hex'), inspectFile, migrate, stageFile, listDocuments, getDocument, readOriginal,
   saveRagflowReference, listRagflowReferences, searchDocuments, normalizeSearchText, normalizeExtraction, persistExtraction,
-  markProcessingStarted, markProcessingUnavailable, markProcessingFailure, workerEnvironment, workerScriptPath, extractDocxXml, workerExitError, runWorker,
+  markProcessingStarted, markProcessingUnavailable, markProcessingFailure, workerEnvironment, workerScriptPath, extractDocxXml, extractXlsxFile, workerExitError, runWorker,
 };

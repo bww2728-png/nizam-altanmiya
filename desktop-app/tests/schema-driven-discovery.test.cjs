@@ -27,14 +27,17 @@ test('schema-driven discovery creates evidence-linked review candidates without 
     const staged = await documents.stageFile(database,filePath);
     documents.persistExtraction(database,staged.id,{
       engine:{ name:'test-extractor',version:'1' },
-      elements:[{ type:'paragraph',content:'population: 12345',page_number:2 }],
-      markdown:'population: 12345',
+      elements:[{ type:'paragraph',content:'population: ١٢٬٣٤٥',page_number:2 }],
+      markdown:'population: ١٢٬٣٤٥',
     });
     const result = await discovery.discoverFields(database,{ documentId:staged.id });
     const candidates = discovery.listCandidates(database,staged.id);
     const candidate = candidates.rows.find(row => row.field_key === 'population' && row.review_status === 'pending');
     assert.ok(candidate);
-    assert.equal(candidate.raw_value,'12345');
+    assert.equal(candidate.raw_value,'١٢٬٣٤٥');
+    assert.equal(candidate.suggested_value,'12345');
+    assert.ok(candidate.confidence > 0.9);
+    assert.ok(discovery.fieldRegistry(database).every(field => field.form_field));
     assert.equal(candidate.source_document_id,staged.id);
     assert.equal(candidate.source_file_name,'evidence.pdf');
     assert.equal(candidate.page_number,2);
