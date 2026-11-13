@@ -1319,20 +1319,8 @@ function getCanonicalProject(database, projectId) {
   LEFT JOIN data_sources source ON source.source_id=revision.source_id
   WHERE p.id=? AND p.record_status='approved'`).get(id);
   if (!project) throw new Error('المشروع المطلوب غير موجود.');
-  const funding = database.prepare(`WITH funding_values AS (
-    SELECT record.form_record_id,link.legacy_entity_id AS id,record.created_at,
-      MAX(CASE WHEN field.field_code='partnerName' THEN value.value_text END) AS partner_name,
-      MAX(CASE WHEN field.field_code='amount' THEN coalesce(observation.value_integer,observation.value_real) END) AS amount,
-      MAX(CASE WHEN field.field_code='currencyCode' THEN value.value_text END) AS currency_code,
-      MAX(CASE WHEN field.field_code='fundingDate' THEN value.value_date END) AS funding_date
-    FROM form_records record JOIN form_versions version USING(form_version_id) JOIN form_definitions form USING(form_id)
-    JOIN form_record_legacy_links link ON link.form_record_id=record.form_record_id AND link.legacy_entity_type='project_funding'
-    JOIN form_fields field USING(form_version_id)
-    LEFT JOIN record_field_values value ON value.form_record_id=record.form_record_id AND value.form_field_id=field.form_field_id
-    LEFT JOIN observations observation ON observation.form_record_id=record.form_record_id AND observation.form_field_id=field.form_field_id
-    WHERE form.form_code='project_funding_v1' AND record.parent_record_id=?
-    GROUP BY record.form_record_id
-  ) SELECT id,partner_name,amount,currency_code,funding_date,created_at FROM funding_values ORDER BY id`).all(project.form_record_id);
+  const funding = database.prepare(`SELECT id,partner_name,amount,currency_code,funding_date,created_at
+    FROM project_funding WHERE project_id=? ORDER BY id`).all(project.id);
   const provenance = database.prepare(`
     SELECT promotion.source_location,promotion.mapping_json,promotion.mapped_values_json,
       batch.file_name,batch.sha256,batch.created_at AS received_at
@@ -1395,35 +1383,75 @@ function completeWorkbookImport(database, batchId, result = {}) {
 }
 
 function listDataSources(database, request = {}) {
-  const limit = Math.min(100,Math.max(1,Number(request.limit)||30));
-  const offset = Math.max(0,Math.min(1000000,Number(request.offset)||0));
-  const search = String(request.search ?? '').trim().slice(0,120);
-  const sourceColumns = new Set(database.prepare('PRAGMA table_info(data_sources)').all().map(column => column.name));
-  const expression = names => {
-    const present = names.filter(name => sourceColumns.has(name)).map(name => `source.${name}`);
-    return present.length > 1 ? `coalesce(${present.join(',')})` : present[0] ?? 'NULL';
-  };
-  const sourceCode = expression(['source_code']);
-  const organization = expression(['organization','organization_name']);
-  const fileName = expression(['file_name']);
-  const documentTitle = expression(['document_title']);
-  const referencePeriod = expression(['reference_period']);
-  const receivedAt = expression(['received_at']);
-  const collectedAt = expression(['collected_at']);
-  const notes = expression(['notes']);
-  const sha256 = expression(['content_sha256']);
-  const fileSize = expression(['file_size','file_size_bytes']);
+  const limit = Math.min(100, Math.max(1, Number(request.limit) || 30));
+  const offset = Math.max(0, Math.min(1000000, Number(request.offset) || 0));
+  const search = String(request.search ?? '').trim().slice(0, 120);
+  const dateFrom = /^\d{4}-\d{2}-\d{2}$/.test(String(request.dateFrom ?? '')) ? request.dateFrom : '';
+  const dateTo = /^\d{4}-\d{2}-\d{2}$/.test(String(request.dateTo ?? '')) ? `${request.dateTo}T23:59:59.999Z` : '';
+  const archivedFilter = ['archived', 'all'].includes(request.archived) ? request.archived : 'active';
+  const sort = request.sort === 'name' ? 'name' : request.sort === 'oldest' ? 'oldest' : 'newest';
+  const sources = `
+    SELECT source.id, 'source' AS resource_type, CAST(source.id AS TEXT) AS resource_id,
+      source.source_type, source.organization, source.document_title, source.file_name, source.mime_type,
+      source.content_sha256, source.file_size, source.reference_period, source.received_at, source.collected_at,
+      source.notes, NULL AS status, 0 AS archived, NULL AS archived_at,
+      NULL AS sheet_count, NULL AS row_count, NULL AS cell_count, NULL AS media_count, NULL AS media_stored_count
+    FROM data_sources source
+    WHERE source.source_type NOT IN ('document','excel-workbook')
+    UNION ALL
+    SELECT source.id, 'document' AS resource_type, document.id AS resource_id,
+      'document' AS source_type, source.organization, source.document_title, document.file_name, document.mime_type,
+      document.sha256 AS content_sha256, document.file_size, source.reference_period, source.received_at, source.collected_at,
+      source.notes, document.status, CASE WHEN archive.resource_id IS NULL THEN 0 ELSE 1 END AS archived, archive.archived_at,
+      NULL AS sheet_count, NULL AS row_count, NULL AS cell_count, NULL AS media_count, NULL AS media_stored_count
+    FROM document_records document
+    JOIN data_sources source ON source.id=document.source_id
+    LEFT JOIN file_archive archive ON archive.resource_type='document' AND archive.resource_id=document.id
+    UNION ALL
+    SELECT COALESCE(source.id,batch.id) AS id, 'workbook_import' AS resource_type, CAST(batch.id AS TEXT) AS resource_id,
+      'excel-workbook' AS source_type, source.organization, source.document_title, batch.file_name, source.mime_type,
+      batch.sha256 AS content_sha256, batch.file_size, source.reference_period, source.received_at, source.collected_at,
+      source.notes, batch.status, CASE WHEN archive.resource_id IS NULL THEN 0 ELSE 1 END AS archived, archive.archived_at,
+      batch.sheet_count, batch.row_count, batch.cell_count, batch.media_count, batch.media_stored_count
+    FROM workbook_import_batches batch
+    LEFT JOIN data_sources source ON source.id=batch.source_id
+    LEFT JOIN file_archive archive ON archive.resource_type='workbook_import' AND archive.resource_id=CAST(batch.id AS TEXT)
+  `;
+  const conditions = [];
   const params = [];
-  const where = search ? `WHERE (instr(lower(coalesce(${sourceCode},'')),lower(?))>0 OR instr(lower(coalesce(${organization},'')),lower(?))>0
-    OR instr(lower(coalesce(${fileName},'')),lower(?))>0 OR instr(lower(coalesce(${documentTitle},'')),lower(?))>0
-    OR instr(lower(coalesce(${referencePeriod},'')),lower(?))>0 OR instr(lower(coalesce(${notes},'')),lower(?))>0)` : '';
-  if (search) params.push(search,search,search,search,search,search);
-  const total = database.prepare(`SELECT COUNT(*) AS count FROM data_sources source ${where}`).get(...params).count;
-  const rows = database.prepare(`SELECT source.id,${sourceCode} AS source_code,source.source_type,${organization} AS organization,
-    ${documentTitle} AS document_title,${fileName} AS file_name,${referencePeriod} AS reference_period,${receivedAt} AS received_at,
-    ${collectedAt} AS collected_at,${notes} AS notes,${sha256} AS content_sha256,${fileSize} AS file_size
-    FROM data_sources source ${where} ORDER BY source.id DESC LIMIT ? OFFSET ?`).all(...params,limit,offset);
-  return { rows,total,limit,offset,hasPrevious:offset>0,hasNext:offset+rows.length<total };
+  if (archivedFilter === 'active') conditions.push('source_rows.archived=0');
+  if (archivedFilter === 'archived') conditions.push('source_rows.archived=1');
+  if (search) {
+    conditions.push(`(instr(lower(coalesce(source_rows.file_name,'')),lower(?))>0 OR
+      instr(lower(coalesce(source_rows.document_title,'')),lower(?))>0 OR
+      instr(lower(coalesce(source_rows.organization,'')),lower(?))>0 OR
+      instr(lower(coalesce(source_rows.source_type,'')),lower(?))>0 OR
+      instr(lower(coalesce(source_rows.notes,'')),lower(?))>0)`);
+    params.push(search, search, search, search, search);
+  }
+  if (dateFrom) { conditions.push('coalesce(source_rows.received_at,source_rows.collected_at) >= ?'); params.push(`${dateFrom}T00:00:00.000Z`); }
+  if (dateTo) { conditions.push('coalesce(source_rows.received_at,source_rows.collected_at) <= ?'); params.push(dateTo); }
+  if (request.status) { conditions.push('source_rows.status=?'); params.push(String(request.status).slice(0, 60)); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const from = `FROM (${sources}) source_rows ${where}`;
+  const total = database.prepare(`SELECT COUNT(*) AS count ${from}`).get(...params).count;
+  const orderBy = sort === 'name' ? "coalesce(source_rows.file_name,source_rows.document_title,source_rows.organization,'') COLLATE NOCASE ASC,source_rows.id DESC"
+    : `coalesce(source_rows.received_at,source_rows.collected_at,'') ${sort === 'oldest' ? 'ASC' : 'DESC'},source_rows.id DESC`;
+  const rows = database.prepare(`SELECT source_rows.* ${from} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
+    .all(...params, limit, offset);
+  return { rows, total, limit, offset, hasPrevious: offset > 0, hasNext: offset + rows.length < total, archived: archivedFilter, sort };
+}
+
+function fileDashboardSummary(database) {
+  const observation = database.prepare(`SELECT COUNT(*) AS total, COUNT(DISTINCT indicator_id) AS indicators,
+    COUNT(DISTINCT geographic_unit_id) AS geographic_units, MAX(created_at) AS latest_at FROM indicator_observations`).get();
+  const issues = database.prepare(`SELECT COUNT(*) AS total,
+    COALESCE(SUM(CASE WHEN status='open' THEN 1 ELSE 0 END),0) AS open,
+    COALESCE(SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END),0) AS resolved,
+    COALESCE(SUM(CASE WHEN status='open' AND severity='blocker' THEN 1 ELSE 0 END),0) AS blockers,
+    COALESCE(SUM(CASE WHEN status='open' AND severity<>'blocker' THEN 1 ELSE 0 END),0) AS warnings
+    FROM data_quality_issues`).get();
+  return { observations: observation, dataQuality: issues };
 }
 
 function listWorkbookImports(database, limit = 30) {
@@ -1431,4 +1459,4 @@ function listWorkbookImports(database, limit = 30) {
   return database.prepare("SELECT b.id,b.file_name,b.file_size,b.sha256,b.sheet_count,b.row_count,b.cell_count,b.media_count,b.media_stored_count,b.truncated,b.status,b.created_at,b.updated_at,(SELECT COUNT(*) FROM workbook_import_regions r WHERE r.batch_id=b.id) AS region_count,(SELECT COUNT(*) FROM workbook_import_rows w WHERE w.batch_id=b.id) AS stored_row_count FROM workbook_import_batches b ORDER BY b.id DESC LIMIT ?").all(bounded);
 }
 
-module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, checksum, migrateCanonicalData, syncLegacyDirectorate, retireLegacyDirectorate, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, promoteIndicatorRegion, listCanonicalReferences, listIndicatorObservations, saveIndicatorObservation, listDataQualityIssues, listDataSources, resolveDataQualityIssue, saveCanonicalProject, resolveProjectQualityIssue, addProjectFunding, addProjectAttachment, getProjectAttachment, listCanonicalProjects, getCanonicalProject, completeWorkbookImport, listWorkbookImports };
+module.exports = { LIMITS, PROJECT_IMPORT_FIELDS, checksum, migrateCanonicalData, syncLegacyDirectorate, retireLegacyDirectorate, stageWorkbook, readWorkbookSheetPreview, listWorkbookImportRegions, readWorkbookImportRegion, promoteProjectRegion, promoteIndicatorRegion, listCanonicalReferences, listIndicatorObservations, saveIndicatorObservation, listDataQualityIssues, listDataSources, fileDashboardSummary, resolveDataQualityIssue, saveCanonicalProject, resolveProjectQualityIssue, addProjectFunding, addProjectAttachment, getProjectAttachment, listCanonicalProjects, getCanonicalProject, completeWorkbookImport, listWorkbookImports };

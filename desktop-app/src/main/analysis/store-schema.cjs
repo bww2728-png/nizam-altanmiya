@@ -4,11 +4,13 @@ const crypto = require('node:crypto');
 const canonicalData = require('./canonical-data.cjs');
 const dataArchitecture = require('../database/architecture.cjs');
 const manualEntryCatalog = require('../database/manual-entry-catalog.cjs');
+const recordService = require('../database/record-service.cjs');
 const unifiedDevelopmentModel = require('../database/unified-development-model.cjs');
 const unifiedDevelopmentModelV2 = require('../database/unified-development-model-v2.cjs');
 const documentService = require('../documents/document-service.cjs');
 const schemaDrivenDiscovery = require('../documents/schema-driven-discovery.cjs');
 const indicatorCalculationPersistence = require('./indicator-calculation-persistence.cjs');
+const fileArchive = require('../database/file-archive.cjs');
 
 /**
  * Database schema for the analysis layer.
@@ -378,8 +380,8 @@ function applyColumnMigrations(database, table, migrations) {
   }
 }
 
-const MIGRATION_VERSION = 4;
-const MIGRATION_CODE = 'unified-store-schema-v4';
+const MIGRATION_VERSION = 5;
+const MIGRATION_CODE = 'unified-store-schema-v5';
 
 function checksum() {
   return crypto.createHash('sha256').update(JSON.stringify({
@@ -413,6 +415,8 @@ function needsMigration(database) {
 function migrate(database, options = {}) {
   if (!needsMigration(database)) {
     manualEntryCatalog.migrate(database);
+    fileArchive.migrate(database);
+    recordService.migrateApprovedEducationFacilities(database);
     return { version: MIGRATION_VERSION, alreadyApplied: true };
   }
   const sourceChecksum = checksum();
@@ -442,6 +446,7 @@ function migrate(database, options = {}) {
     indicatorCalculationPersistence.migrate(database);
     documentService.migrate(database);
     schemaDrivenDiscovery.migrate(database);
+    fileArchive.migrate(database);
     for (const index of EXTRA_INDEXES) {
       if (tableExists(database, index.table)) database.exec(index.ddl);
     }
@@ -476,6 +481,7 @@ function migrate(database, options = {}) {
     throw error;
   }
   manualEntryCatalog.migrate(database);
+  recordService.migrateApprovedEducationFacilities(database);
   return result;
 }
 

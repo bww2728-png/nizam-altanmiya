@@ -12,6 +12,8 @@ const ui = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/Import.jsx'), 'ut
 const shell = fs.readFileSync(path.join(ROOT, 'src/renderer/components/AppShell.jsx'), 'utf8');
 const app = fs.readFileSync(path.join(ROOT, 'src/renderer/App.jsx'), 'utf8');
 const projects = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/Projects.jsx'), 'utf8');
+const sources = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/DataSources.jsx'), 'utf8');
+const documentsHub = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/DocumentsHub.jsx'), 'utf8');
 
 test('main process durably stages a workbook before constructing the directorate review plan', () => {
   const scanStart = main.indexOf("ipcMain.handle('import:scan'");
@@ -20,7 +22,7 @@ test('main process durably stages a workbook before constructing the directorate
   assert.ok(scanStart >= 0 && stage > scanStart && applyPlan > stage);
   assert.match(main, /pendingPlan = \{ filePath, read, plan, staging \}/);
   assert.match(main, /canonicalData\.completeWorkbookImport/);
-  assert.match(main, /ipcMain\.handle\('import:history'/);
+  assert.match(main, /canonicalData\.listDataSources/);
 });
 
 test('workbooks without a directorate table are retained as unapproved review batches', () => {
@@ -30,12 +32,16 @@ test('workbooks without a directorate table are retained as unapproved review ba
   assert.match(main, /pendingPlan\.plan\.rows\?\.length\s*\?/);
 });
 
-test('renderer bridge exposes import history and owner-only staged sheet previews', () => {
-  assert.match(preload, /importHistory: \(request\) => ipcRenderer\.invoke\('import:history', request\)/);
+test('import history is only exposed through the data sources archive and staged sheet previews remain owner-only', () => {
+  assert.doesNotMatch(preload, /importHistory:/);
+  assert.match(preload, /archiveFiles: \(targets\) => ipcRenderer\.invoke\('files:archive'/);
+  assert.match(preload, /restoreFiles: \(targets\) => ipcRenderer\.invoke\('files:restore'/);
   assert.match(preload, /importSheetPreview: \(request\) => ipcRenderer\.invoke\('import:sheet-preview', request\)/);
   assert.match(main, /currentProfile\(\) !== 'owner'/);
   assert.match(main, /canonicalData\.readWorkbookSheetPreview/);
-  assert.match(ui, /function ImportHistory/);
+  assert.doesNotMatch(ui, /function ImportHistory/);
+  assert.match(sources, /window\.localApp\.dataSources/);
+  assert.match(sources, /archiveFiles/);
   assert.match(ui, /function DurableStaging/);
   assert.match(ui, /importSheetPreview/);
   assert.match(ui, /عرض عينة/);
@@ -119,9 +125,10 @@ test('canonical project register is routed, paged, owner-gated and displays prov
   assert.match(projects, /سجل التعديلات/);
 });
 
-test('manual indicator observations and general data quality are exposed through owner-gated routes', () => {
+test('indicator observations and data-quality data remain available only as dashboard summaries', () => {
   const observations = fs.readFileSync(path.join(ROOT,'src/renderer/pages/IndicatorObservations.jsx'),'utf8');
   const quality = fs.readFileSync(path.join(ROOT,'src/renderer/pages/DataQuality.jsx'),'utf8');
+  const dashboard = fs.readFileSync(path.join(ROOT,'src/renderer/pages/Dashboard.jsx'),'utf8');
   assert.match(main,/ipcMain\.handle\('observations:list'/);
   assert.match(main,/ipcMain\.handle\('observations:save'/);
   assert.match(main,/ipcMain\.handle\('quality:list'/);
@@ -130,13 +137,17 @@ test('manual indicator observations and general data quality are exposed through
   assert.match(preload,/saveIndicatorObservation: \(request\) => ipcRenderer\.invoke\('observations:save', request\)/);
   assert.match(preload,/dataQualityIssues: \(request\) => ipcRenderer\.invoke\('quality:list', request\)/);
   assert.match(preload,/resolveDataQualityIssue: \(request\) => ipcRenderer\.invoke\('quality:resolve', request\)/);
-  assert.match(app,/case 'observations'/);
-  assert.match(app,/case 'quality'/);
-  assert.match(shell,/id: 'observations', label: 'سجل قياسات المؤشرات'/);
-  assert.match(shell,/id: 'quality', label: 'جودة البيانات'/);
+  assert.doesNotMatch(app,/case 'observations'/);
+  assert.doesNotMatch(app,/case 'quality'/);
+  assert.doesNotMatch(shell,/id: 'observations'/);
+  assert.doesNotMatch(shell,/id: 'quality'/);
+  assert.doesNotMatch(documentsHub,/id: 'observations'/);
+  assert.doesNotMatch(documentsHub,/id: 'quality'/);
+  assert.match(main,/canonicalData\.fileDashboardSummary/);
+  assert.match(dashboard,/OperationalSummary/);
+  assert.match(dashboard,/قياسات محفوظة/);
+  assert.match(dashboard,/ملاحظات جودة مفتوحة/);
   assert.match(observations,/window\.localApp\.indicatorObservations/);
-  assert.match(observations,/window\.localApp\.saveIndicatorObservation/);
-  assert.match(quality,/window\.localApp\.resolveDataQualityIssue/);
   assert.match(quality,/سبب التسوية/);
 });
 

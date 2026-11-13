@@ -7,6 +7,7 @@ const path = require('node:path');
 const zlib = require('node:zlib');
 const test = require('node:test');
 const Database = require('better-sqlite3-multiple-ciphers');
+const ExcelJS = require('exceljs');
 const documents = require('../src/main/documents/document-service.cjs');
 
 function makeDatabase() {
@@ -88,6 +89,28 @@ test('DOCX extraction runs locally without a Python installation', async () => {
   }
 });
 
+test('Excel workbooks are scanned locally into row evidence with sheet and cell references', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'document-xlsx-'));
+  const filePath = path.join(directory, 'population.xlsx');
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet('السكان');
+  worksheet.addRow(['عدد السكان', 'السنة']);
+  worksheet.addRow(['١٢٬٣٤٥', 2025]);
+  await workbook.xlsx.writeFile(filePath);
+  try {
+    const inspected = await documents.inspectFile(filePath);
+    assert.equal(inspected.extension, '.xlsx');
+    const result = await documents.runWorker(filePath, { python: 'python-command-that-is-not-installed' });
+    assert.equal(result.engine.name, 'Local ExcelJS parser');
+    assert.match(result.elements[0].content, /عدد السكان: ١٢٬٣٤٥/);
+    assert.equal(result.elements[0].source.sheet_name, 'السكان');
+    assert.equal(result.elements[0].source.row_number, 2);
+    assert.equal(result.elements[0].source.cells[0].address, 'A2');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('document center maps reviewed candidates through protected IPC without exposing service credentials', () => {
   const interfaceSource = fs.readFileSync(path.join(__dirname, '../src/renderer/pages/DocumentCenter.jsx'), 'utf8');
   const preloadSource = fs.readFileSync(path.join(__dirname, '../src/main/preload.cjs'), 'utf8');
@@ -162,7 +185,7 @@ test('document worker receives only required environment variables and always ru
 
 test('document staging rejects unsupported extensions and mismatched file signatures', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'document-preflight-'));
-  const unsupportedPath = path.join(directory, 'report.xlsx');
+  const unsupportedPath = path.join(directory, 'report.xls');
   const invalidPdfPath = path.join(directory, 'report.pdf');
   fs.writeFileSync(unsupportedPath, 'not a document');
   fs.writeFileSync(invalidPdfPath, 'not a PDF');

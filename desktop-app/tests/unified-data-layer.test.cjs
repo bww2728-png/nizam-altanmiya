@@ -90,6 +90,20 @@ test('the dataset browser contract keeps its documented shape', () => {
   }
 });
 
+test('physical columns without dataset metadata are visible but cannot be edited', () => {
+  const database = freshStore();
+  try {
+    database.exec('ALTER TABLE development_issues ADD COLUMN provisional_field TEXT');
+    const field = domain.describe(database,'developmentIssues').fields.find(item => item.name === 'provisional_field');
+    assert.equal(field.inferred,true);
+    assert.equal(field.readOnly,true);
+    assert.equal(domain.validateRow(database,'developmentIssues',{ provisional_field:'unreviewed' }).valid,false);
+    assert.throws(() => domain.save(database,{ dataset:'developmentIssues',values:{ provisional_field:'unreviewed' } }),/غير موثق/);
+  } finally {
+    database.close();
+  }
+});
+
 test('a missing value is never stored as a zero value', () => {
   const database = freshStore();
   try {

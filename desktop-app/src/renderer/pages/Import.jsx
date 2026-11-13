@@ -52,18 +52,6 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
   const [hideUnchanged, setHideUnchanged] = useState(false);
   const [statusFilter, setStatusFilter] = useState('all');
   const [page, setPage] = useState(0);
-  const [importHistory, setImportHistory] = useState([]);
-
-  const refreshHistory = useCallback(async () => {
-    try {
-      const rows = await window.localApp.importHistory?.({ limit: 20 });
-      if (Array.isArray(rows)) setImportHistory(rows);
-    } catch {
-      // History is supplementary; a temporary read failure must not block scanning.
-    }
-  }, []);
-
-  useEffect(() => { refreshHistory(); }, [refreshHistory]);
 
   const rows = useMemo(() => (fullPlan?.preview ?? plan?.preview ?? []), [fullPlan, plan]);
 
@@ -85,7 +73,6 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
         return;
       }
       setPlan(scanned);
-      await refreshHistory();
       setFullPlan(null);
       setResult(null);
       setDecisions({});
@@ -102,7 +89,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
       setProgress(null);
       setBusy(false);
     }
-  }, [notify, refreshHistory]);
+  }, [notify]);
 
   const loadAllRows = useCallback(async () => {
     setBusy(true);
@@ -127,7 +114,6 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
       const applied = await window.localApp.applyImport({ decisions, force });
       setResult(applied);
       setPlan(current => current?.staging ? { ...current, stagingStatus: applied.stagingStatus } : current);
-      await refreshHistory();
       setStep('applied');
       onApplied?.();
       notify?.({
@@ -139,7 +125,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
     } finally {
       setBusy(false);
     }
-  }, [decisions, force, notify, onApplied, refreshHistory]);
+  }, [decisions, force, notify, onApplied]);
 
   const visibleRows = useMemo(() => rows.filter((row) => {
     if (hideUnchanged && row.action === 'unchanged') return false;
@@ -195,7 +181,6 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
           <IndicatorRegionReview staging={plan.staging} />
         </>
       )}
-      <ImportHistory rows={importHistory} />
 
       {step === 'idle' && <Starter busy={busy} onChoose={chooseFile} />}
 
@@ -1185,31 +1170,6 @@ function IndicatorRegionReview({ staging }) {
             </>
           )}
         </>
-      )}
-    </Card>
-  );
-}
-
-function ImportHistory({ rows }) {
-  return (
-    <Card title="سجل ملفات الاستيراد المستلمة" subtitle="هذه الدفعات محفوظة محليًا حتى عند إغلاق الشاشة؛ حالة الاستقبال لا تعني اعتماد بياناتها.">
-      {rows.length === 0 ? <p className="muted">لا توجد دفعات محفوظة بعد.</p> : (
-        <div className="table-wrap">
-          <table className="data">
-            <thead><tr><th>الملف</th><th>تاريخ الاستلام</th><th>الأوراق</th><th>الصفوف</th><th>الخلايا</th><th>الصور</th><th>الحالة</th></tr></thead>
-            <tbody>{rows.map(row => (
-              <tr key={row.id}>
-                <td className="strong">{row.file_name}</td>
-                <td>{row.created_at}</td>
-                <td className="num">{fmtNumber(row.sheet_count,0)}</td>
-                <td className="num">{fmtNumber(row.row_count,0)}</td>
-                <td className="num">{fmtNumber(row.cell_count,0)}</td>
-                <td className="num">{fmtNumber(row.media_stored_count,0)}/{fmtNumber(row.media_count,0)}</td>
-                <td><Badge tone={row.status === 'staged' ? 'warn' : 'info'}>{row.status}</Badge></td>
-              </tr>
-            ))}</tbody>
-          </table>
-        </div>
       )}
     </Card>
   );
