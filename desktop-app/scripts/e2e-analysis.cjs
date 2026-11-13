@@ -313,8 +313,9 @@ app.whenReady().then(async () => {
     await waitFor(window, `Boolean(document.querySelector('.app-shell'))`);
 
     const labels = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.side-nav .nav-item span')].map((node) => node.textContent)`);
-    const expectedNav = ['اللوحة التفاعلية', 'المؤشرات الـ 12', 'ترتيب الأولويات', 'الاستيراد الآلي', 'سجل المشاريع', 'سجل قياسات المؤشرات', 'جودة البيانات', 'تصحيح البيانات', 'قاعدة البيانات الشاملة', 'بطاقة مديرية'];
-    check('nav', 'التنقل يعرض الشاشات العشر', expectedNav.every((label) => labels.includes(label)), labels.join(' · '));
+    const expectedNav = ['اللوحة التفاعلية', 'المؤشرات الـ 12', 'ترتيب الأولويات', 'الوثائق والبحث والاستيراد', 'سجل المشاريع', 'مصادر البيانات', 'تصحيح البيانات', 'قاعدة البيانات الشاملة', 'بطاقة مديرية'];
+    const removedNav = ['سجل قياسات المؤشرات', 'جودة البيانات'];
+    check('nav', 'التنقل يعرض مركز الوثائق الموحد ويخفي الصفحات المحذوفة', expectedNav.every((label) => labels.includes(label)) && removedNav.every((label) => !labels.includes(label)), labels.join(' · '));
     const storeState = await window.webContents.executeJavaScript(`window.localApp.status().then((s) => ({ unlocked: s.unlocked, hasKey: s.hasKey, plaintext: s.plaintext, encrypted: s.encrypted }))`);
     check('entry', 'قاعدة البيانات مفتوحة في صيغة SQLite عادية بلا تشفير', storeState.unlocked === true && storeState.plaintext === true && storeState.encrypted === false, JSON.stringify(storeState));
     const storeHeader = fs.readFileSync(STORE_PATH).subarray(0, 16).toString('latin1');
@@ -424,10 +425,12 @@ app.whenReady().then(async () => {
     check('pages', 'تصحيح البيانات يفتح محرر السجلات', correctionText.includes('السجلات') && correctionText.includes('تصحيح البيانات'), correctionText.slice(-160).replace(/\n/g, ' | '));
     await screenshot(window, '7-تصحيح-البيانات.png');
 
-    await clickByText(window, '.side-nav .nav-item', 'الاستيراد الآلي');
+    await clickByText(window, '.side-nav .nav-item', 'الوثائق والبحث والاستيراد');
+    await waitFor(window, `document.body.innerText.includes('الوثائق والبحث') && document.body.innerText.includes('الاستيراد الآلي')`, 30000);
+    const importTabClicked = await clickByText(window, '.btn.primary', 'استيراد ملف Excel');
     await waitFor(window, `document.body.innerText.includes('اختيار ملف Excel')`, 30000);
     await sleep(400);
-    check('pages', 'شاشة الاستيراد تعرض الخطوات الثلاث', await window.webContents.executeJavaScript(`Boolean(document.querySelector('.stepper'))`));
+    check('pages', 'زر الاستيراد في المركز الموحد يفتح خطوات الاستيراد الثلاث', importTabClicked && await window.webContents.executeJavaScript(`Boolean(document.querySelector('.stepper'))`));
     check('pages', 'شاشة الاستيراد تذكر الصيغ والقواعد', (await bodyText(window)).includes('xlsx'));
 
     // Exercise the actual UI scan path. Native dialog is stubbed to a synthetic
@@ -569,63 +572,18 @@ app.whenReady().then(async () => {
     const projectDetailsClosed = await clickBySelector(window, '.modal-card .modal-head button[aria-label="إغلاق"]', 'إغلاق تفاصيل المشروع');
     check('pages', 'تفاصيل المشروع تغلق بزر واضح قبل متابعة التنقل', projectDetailsClosed);
 
-    const qualityNavClicked = await clickByText(window, '.side-nav .nav-item', 'جودة البيانات');
-    await waitFor(window, `document.body.innerText.includes('جودة البيانات') && document.body.innerText.includes('سبب التسوية')`, 12000);
-    const qualityPageText = await bodyText(window);
-    check('pages', 'سجل الجودة يعرض القضايا المفتوحة وسياق المصدر', qualityNavClicked && qualityPageText.includes('unmatched-project-') && qualityPageText.includes('مشاريع اختبار'), qualityPageText.slice(-900));
-    await screenshot(window, '17-جودة-البيانات.png');
-
-    const firstOpenIssue = await window.webContents.executeJavaScript(`window.localApp.dataQualityIssues({ status: 'open', limit: 1 }).then(result => result.rows[0] ?? null)`);
-    const resolutionFieldSet = await window.webContents.executeJavaScript(`(() => {
-      const field = document.querySelector('.quote textarea');
-      if (!field) return false;
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-      setter.call(field, 'تمت مراجعة المصدر في اختبار E2E.');
-      field.dispatchEvent(new Event('input', { bubbles: true }));
-      field.dispatchEvent(new Event('change', { bubbles: true }));
-      return field.value === 'تمت مراجعة المصدر في اختبار E2E.';
-    })()`);
-    const qualityResolveClicked = await clickByText(window, 'button.btn.small.primary', 'تسوية مع حفظ السبب');
-    await waitFor(window, `window.localApp.dataQualityIssues({ status: 'resolved', limit: 50 }).then(result => result.rows.some(issue => issue.id === ${Number(firstOpenIssue?.id ?? 0)} && issue.resolution.includes('اختبار E2E')))` , 12000);
-    check('pages', 'تسوية الجودة تحفظ السبب والسجل عبر الواجهة', Boolean(firstOpenIssue) && resolutionFieldSet && qualityResolveClicked);
-
-    const observationsNavClicked = await clickByText(window, '.side-nav .nav-item', 'سجل قياسات المؤشرات');
-    await waitFor(window, `document.body.innerText.includes('سجل قياسات المؤشرات') && document.body.innerText.includes('لا توجد قياسات محفوظة')`, 12000);
-    const observationsText = await bodyText(window);
-    check('pages', 'سجل القياسات يظهر معزولًا عن تحليل الترتيب', observationsNavClicked && observationsText.includes('لا توجد قياسات محفوظة') && observationsText.includes('هذا السجل منفصل'), observationsText.slice(0, 600));
-    await screenshot(window, '18-سجل-قياسات-المؤشرات.png');
-
-    const addObservationClicked = await clickByText(window, '.card-head button', 'قياس جديد');
-    const observationFormReady = await waitFor(window, `Boolean(document.querySelector('#indicator-observation-form'))`, 5000).then(() => true).catch(() => false);
-    const observationReferences = await window.webContents.executeJavaScript(`window.localApp.canonicalProjectReferences()`);
-    const observationIndicator = observationReferences.indicators.find(item => item.unit === '%');
-    const observationDistrict = observationReferences.geographicUnits.find(item => item.unit_type === 'district');
-    const observationFormFilled = await window.webContents.executeJavaScript(`(() => {
-      const form = document.querySelector('#indicator-observation-form');
-      if (!form) return false;
-      const selects = [...form.querySelectorAll('select')];
-      const inputs = [...form.querySelectorAll('input')];
-      const selectSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
-      const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      selectSetter.call(selects[0], ${JSON.stringify(String(observationIndicator?.id ?? ''))});
-      selects[0].dispatchEvent(new Event('change', { bubbles: true }));
-      selectSetter.call(selects[1], ${JSON.stringify(String(observationDistrict?.id ?? ''))});
-      selects[1].dispatchEvent(new Event('change', { bubbles: true }));
-      inputSetter.call(inputs[0], '2026-e2e');
-      inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
-      inputs[0].dispatchEvent(new Event('change', { bubbles: true }));
-      inputSetter.call(inputs[1], '75');
-      inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
-      inputs[1].dispatchEvent(new Event('change', { bubbles: true }));
-      return selects.length === 2 && inputs.length === 2 && Boolean(inputs[0].value) && inputs[1].value === '75';
-    })()`);
-    await waitFor(window, `!document.querySelector('.toast-stack .toast')`, 12000);
-    const observationSaveClicked = await clickByText(window, 'button[form="indicator-observation-form"]', 'حفظ القياس');
-    await waitFor(window, `window.localApp.indicatorObservations({ search: '2026-e2e', limit: 10 }).then(result => result.rows.some(row => row.period_key === '2026-e2e' && row.value_number === 75))`, 12000);
-    const savedObservation = await window.webContents.executeJavaScript(`window.localApp.indicatorObservations({ search: '2026-e2e', limit: 10 }).then(result => result.rows[0] ?? null)`);
-    check('pages', 'إضافة قياس مؤرخ تحفظه الواجهة مع مصدره', addObservationClicked && observationFormReady && observationFormFilled && observationSaveClicked && savedObservation?.period_key === '2026-e2e' && savedObservation.value_number === 75 && savedObservation.source_type === 'manual-indicator-observation', JSON.stringify(savedObservation));
-    await waitFor(window, `document.body.innerText.includes('2026-e2e') && document.body.innerText.includes('75')`, 12000);
-    await screenshot(window, '19-قياس-مؤشر-محفوظ.png');
+    await clickByText(window, '.side-nav .nav-item', 'اللوحة التفاعلية');
+    await waitFor(window, `document.body.innerText.includes('ملخص قياسات المؤشرات وسجل الجودة')`, 12000);
+    const dashboardSummaryText = await bodyText(window);
+    check('pages', 'اللوحة تعرض ملخصات القياسات والجودة بدل الصفحات التفصيلية', dashboardSummaryText.includes('قياسات محفوظة') && dashboardSummaryText.includes('مؤشرات ممثلة') && dashboardSummaryText.includes('ملاحظات جودة مفتوحة') && dashboardSummaryText.includes('ملاحظات مسوّاة'));
+    const retainedOperationalData = await window.webContents.executeJavaScript(`Promise.all([
+      window.localApp.dataQualityIssues({ status: 'open', limit: 1 }),
+      window.localApp.indicatorObservations({ limit: 1 }),
+    ]).then(([quality, observations]) => ({
+      qualityAvailable: Array.isArray(quality.rows),
+      observationsAvailable: Array.isArray(observations.rows),
+    }))`);
+    check('pages', 'بيانات القياسات والجودة ما زالت متاحة عبر الواجهات الخلفية', retainedOperationalData.qualityAvailable && retainedOperationalData.observationsAvailable, JSON.stringify(retainedOperationalData));
 
     // ---------- 4. Access profile ----------
     const toggled = await clickBySelector(window, '.topbar button.chip.clickable', 'تبديل وضع الوصول');
@@ -797,9 +755,7 @@ app.whenReady().then(async () => {
         '  6-بطاقة-مديرية.png          بطاقة مديرية كاملة',
         '  7-تصحيح-البيانات.png        شاشة التصحيح',
         '  8-الاستيراد.png             شاشة الاستيراد',
-        '  17-جودة-البيانات.png        سجل الجودة وتسوية قضية',
-        '  18-سجل-قياسات-المؤشرات.png  سجل القياسات المعياري',
-        '  19-قياس-مؤشر-محفوظ.png      قياس يدوي محفوظ ومصدره',
+        '  17-ملخص-اللوحة              ملخص القياسات والجودة مع بقاء البيانات محفوظة',
         '  3..7 ملفات JSON             نتائج كل مجموعة',
         '  6-تقرير-التحليل.pdf         التقرير الفعلي المولّد من المحرك',
         '  7-نتائج-التحليل.xlsx        ملف Excel بثماني أوراق',

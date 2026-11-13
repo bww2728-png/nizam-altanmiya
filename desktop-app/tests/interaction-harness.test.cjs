@@ -40,11 +40,11 @@ test('Electron E2E checks keyboard focus visibility', () => {
   assert.match(harness, /:focus-visible/);
 });
 
-test('Electron E2E verifies the new data review screens with real interactions', () => {
-  assert.match(harness, /سجل قياسات المؤشرات/);
-  assert.match(harness, /جودة البيانات/);
-  assert.match(harness, /تسوية مع حفظ السبب/);
-  assert.match(harness, /حفظ القياس/);
+test('Electron E2E verifies retained observation and quality data through dashboard summaries', () => {
+  assert.match(harness, /ملخص قياسات المؤشرات وسجل الجودة/);
+  assert.match(harness, /indicatorObservations/);
+  assert.match(harness, /dataQualityIssues/);
+  assert.doesNotMatch(harness, /clickByText\(window, '\.side-nav \.nav-item', '(?:سجل قياسات المؤشرات|جودة البيانات)'/);
 });
 
 test('Release workflow gates every push to main with tests before packaging', () => {

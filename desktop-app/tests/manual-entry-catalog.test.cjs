@@ -203,7 +203,7 @@ test('manual-entry coverage export matches the complete synthetic 86-group catal
     assert.equal(valueStates.candidateFields.length, 0);
     assert.match(valueStates.mappingState, /دعم تخزين/);
     const documented = fs.readFileSync(path.join(__dirname, '../../docs/architecture/central-manual-entry-coverage.csv'), 'utf8');
-    assert.equal(renderCoverageCsv(rows), documented);
+    assert.equal(renderCoverageCsv(rows), documented.replace(/\r\n/g, '\n'));
   } finally {
     db.close();
   }
@@ -276,7 +276,7 @@ test('manual-entry requirement register preserves all 18 domains, 85 specificati
     assert.ok(rows.filter(row => row.coverageState === 'published_form_partial_group_evidence_only')
       .every(row => row.evidenceLimit.includes('لا يثبت تحقق النوع')));
     const documented = fs.readFileSync(path.join(__dirname, '../../docs/architecture/manual-entry-requirement-register.csv'), 'utf8');
-    assert.equal(renderCsv(rows),documented);
+    assert.equal(renderCsv(rows),documented.replace(/\r\n/g, '\n'));
   } finally {
     db.close();
   }
