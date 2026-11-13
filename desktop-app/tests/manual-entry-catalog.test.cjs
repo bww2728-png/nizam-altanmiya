@@ -29,8 +29,8 @@ test('manual-entry domain catalog is versioned, idempotent, and only exposes exp
     assert.equal(groups.length, manualEntryCatalog.DOMAINS.reduce((total, [, , domainGroups]) => total + domainGroups.length, 0));
     assert.ok(groups.every(group => ['needs_semantic_definition','partial_form_available'].includes(group.definitionState)));
 
-    const mappedGroups = groups.filter(group => group.forms.length > 0);
-    assert.deepEqual(mappedGroups.map(group => group.forms.map(form => form.code)).flat().sort(), [
+    const mappedGroups = groups.filter(group => group.forms.some(form => !form.rawCaptureOnly));
+    assert.deepEqual(mappedGroups.flatMap(group => group.forms.filter(form => !form.rawCaptureOnly).map(form => form.code)).sort(), [
       'education_school_collection_v1', 'indicator_observation_v1', 'legacy_directorate_v1', 'population_age_sex_collection_v1', 'project_funding_v1', 'project_v1',
     ]);
     assert.ok(mappedGroups.every(group => group.forms.every(form => form.versionId > 0)));
@@ -68,7 +68,8 @@ test('manual-entry candidate dictionary links existing definitions without enabl
     assert.ok(groups.flatMap(group => group.fields).every(field => field.code && field.mappingState === 'needs_domain_review'));
     assert.equal(publishedFieldCodes.length, 68);
     assert.equal(new Set([...candidateFieldCodes,...publishedFieldCodes]).size, 426);
-    assert.equal(groups.filter(group => group.forms.length > 0).length, 6);
+    assert.equal(groups.filter(group => group.forms.some(form => !form.rawCaptureOnly)).length, 6);
+    assert.equal(groups.filter(group => group.rawCaptureAvailable).length, 84);
     assert.ok(catalog.fieldMappingNote.includes('يحتاج مراجعة دلالية'));
 
     db.exec('DROP TABLE manual_entry_group_field_candidates');
@@ -120,7 +121,7 @@ test('manual-entry catalog migration reopens an encrypted store without losing e
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM manual_entry_groups').get().count,
       manualEntryCatalog.DOMAINS.reduce((total, [, , groups]) => total + groups.length,0));
     assert.equal(db.prepare('SELECT success FROM schema_migrations WHERE version=?').get(manualEntryCatalog.CATALOG_VERSION).success,1);
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM manual_entry_form_governance WHERE collection_mode='primary_collection'").get().count,2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM manual_entry_form_governance WHERE collection_mode='primary_collection'").get().count,86);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM manual_entry_group_forms WHERE form_code IN (\'population_age_sex_collection_v1\',\'education_school_collection_v1\')').get().count,2);
     db.close();
   } finally {
@@ -171,16 +172,112 @@ test('manual-entry field register covers every existing definition and preserves
     const codes = new Set(rows.map(row => row.code));
     const catalog = manualEntryCatalog.listCatalog(db);
     const allCatalogCodes = new Set(catalog.domains.flatMap(domain => domain.groups.flatMap(group =>
-      [...group.fields,...group.publishedFields].map(field => field.code))));
+      [...group.fields,...group.publishedFields].map(field => field.code).concat(
+        group.rawRequirements.filter(item => item.fieldCode).map(item => item.fieldCode)))));
     const definitionCount = db.prepare('SELECT COUNT(*) AS count FROM field_definitions').get().count;
-    assert.equal(definitionCount, 426);
+    assert.equal(definitionCount, 718);
     assert.equal(rows.length, definitionCount);
     assert.deepEqual(codes, allCatalogCodes);
     assert.equal(rows.filter(row => row.entryState === 'published_form_field').length, 68);
     assert.equal(rows.filter(row => row.entryState === 'review_only_candidate').length, 358);
-    assert.ok(rows.every(row => row.specificationMatch === 'not_verified_against_each_clause'));
-    assert.ok(rows.every(row => row.sourceBasis === 'current_unified_field_catalog_and_published_forms'));
+    const rawCaptureRows = rows.filter(row => row.entryState === 'raw_capture_only');
+    assert.equal(rawCaptureRows.length, 292);
+    assert.ok(rawCaptureRows.every(row => row.semanticType === 'raw_capture_prompt' && row.unit === null));
+    assert.ok(rawCaptureRows.every(row => row.specificationMatch === 'literal_requirement_text_not_semantic_match'));
+    const reviewedRows = rows.filter(row => row.entryState !== 'raw_capture_only');
+    assert.ok(reviewedRows.every(row => row.specificationMatch === 'not_verified_against_each_clause'));
+    assert.ok(reviewedRows.every(row => row.sourceBasis === 'current_unified_field_catalog_and_published_forms'));
     assert.match(renderCsv(rows), /field_code.*specification_match.*source_basis/);
+  } finally {
+    db.close();
+  }
+});
+
+test('raw collection forms make all unresolved requirements collectable without qualifying them for official analysis', () => {
+  const { SPECIFICATION_ITEMS } = require('../scripts/manual-entry-requirement-register.cjs');
+  const recordService = require('../src/main/database/record-service.cjs');
+  const db = new Database(':memory:');
+  db.pragma('foreign_keys = ON');
+  try {
+    migrate(db);
+    const catalog = manualEntryCatalog.listCatalog(db);
+    const groups = catalog.domains.flatMap(domain => domain.groups);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM manual_entry_requirement_items').get().count,299);
+    assert.equal(groups.filter(group => group.rawCaptureAvailable).length,84);
+    assert.equal(groups.reduce((sum, group) => sum + group.rawCaptureFieldCount,0),292);
+    assert.equal(db.prepare('PRAGMA foreign_key_check').all().length,0);
+
+    const [groupCode,items] = Object.entries(SPECIFICATION_ITEMS).find(([code]) => code !== 'crosscutting-documentation-quality.value-states');
+    const group = groups.find(item => item.code === groupCode);
+    const rawCatalogForm = group.forms.find(form => form.rawCaptureOnly);
+    const form = recordService.listForms(db).find(item => item.form_code === rawCatalogForm.code);
+    const definition = recordService.getFormDefinition(db,form.form_version_id);
+    const fieldCode = `raw_requirement.${groupCode}.001`;
+    const field = definition.fields.find(item => item.field_code === fieldCode);
+    assert.ok(field);
+    assert.equal(field.data_type,'long_text');
+    assert.equal(form.collection_mode,'primary_collection');
+    assert.equal(form.analysis_eligible,0);
+    const officialCount = db.prepare('SELECT COUNT(*) AS count FROM indicator_observations').get().count;
+    const firstSource = 'استمارة أولية، الصفحة 1';
+    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,actor:'collector',
+      values:{ [fieldCode]:{ value:'إجابة خام للمراجعة',state:'known' } },
+      valueSources:{ [fieldCode]:firstSource } });
+    assert.equal(recordService.getRecord(db,created.formRecordId).values[fieldCode].sourceLocator,firstSource);
+    recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,actor:'collector',
+      changeReason:'تصحيح النص الخام.',values:{ [fieldCode]:{ value:'إجابة خام مصححة',state:'known' } },
+      valueSources:{ [fieldCode]:'استمارة أولية، الصفحة 2' } });
+    assert.equal(recordService.getRecord(db,created.formRecordId).values[fieldCode].value,'إجابة خام مصححة');
+    assert.equal(recordService.getRecord(db,created.formRecordId).values[fieldCode].sourceLocator,'استمارة أولية، الصفحة 2');
+    assert.equal(recordService.submitForReview(db,created.formRecordId,'reviewer').status,'pending_review');
+    assert.equal(recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' }).status,'approved');
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM indicator_observations').get().count,officialCount);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM observations WHERE form_record_id=?').get(created.formRecordId).count,0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM manual_entry_form_governance WHERE form_version_id=? AND analysis_eligible=1').get(form.form_version_id).count,0);
+    const { buildCoverageRows } = require('../scripts/manual-entry-coverage.cjs');
+    assert.equal(buildCoverageRows(db).filter(row => row.formCodes.length > 0).length,6);
+    migrate(db);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM manual_entry_requirement_items').get().count,299);
+  } finally {
+    db.close();
+  }
+});
+
+test('raw collection migration rolls back a partial failure and safely retries on the same store', () => {
+  const db = new Database(':memory:');
+  db.pragma('foreign_keys = ON');
+  try {
+    migrate(db);
+    db.transaction(() => {
+      db.exec(`DELETE FROM manual_entry_form_references WHERE form_version_id IN (
+        SELECT version.form_version_id FROM form_versions version JOIN form_definitions form USING(form_id) WHERE form.form_code LIKE 'raw_collection_v1_%');
+        DELETE FROM manual_entry_form_field_governance WHERE form_field_id IN (
+          SELECT form_field_id FROM form_fields WHERE field_code LIKE 'raw_requirement.%');
+        DELETE FROM manual_entry_group_forms WHERE form_code LIKE 'raw_collection_v1_%';
+        DELETE FROM manual_entry_form_governance WHERE form_version_id IN (
+          SELECT version.form_version_id FROM form_versions version JOIN form_definitions form USING(form_id) WHERE form.form_code LIKE 'raw_collection_v1_%');
+        DELETE FROM form_fields WHERE field_code LIKE 'raw_requirement.%';
+        DELETE FROM form_sections WHERE form_version_id IN (
+          SELECT version.form_version_id FROM form_versions version JOIN form_definitions form USING(form_id) WHERE form.form_code LIKE 'raw_collection_v1_%');
+        DELETE FROM form_versions WHERE form_id IN (SELECT form_id FROM form_definitions WHERE form_code LIKE 'raw_collection_v1_%');
+        DELETE FROM form_definitions WHERE form_code LIKE 'raw_collection_v1_%';
+        DROP TABLE manual_entry_requirement_items;
+        DELETE FROM field_definitions WHERE field_code LIKE 'raw_requirement.%';`);
+      db.prepare('DELETE FROM schema_migrations WHERE version=?').run(manualEntryCatalog.RAW_COLLECTION_VERSION);
+    })();
+    db.exec(`CREATE TRIGGER block_raw_collection BEFORE INSERT ON schema_migrations
+      WHEN NEW.version=${manualEntryCatalog.RAW_COLLECTION_VERSION} AND NEW.success=1
+      BEGIN SELECT RAISE(ABORT,'forced raw collection migration failure'); END;`);
+    assert.throws(() => manualEntryCatalog.migrate(db),/forced raw collection migration failure/);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='manual_entry_requirement_items'").get().count,0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM form_definitions WHERE form_code LIKE 'raw_collection_v1_%'").get().count,0);
+    assert.equal(db.prepare('SELECT success FROM schema_migrations WHERE version=?').get(manualEntryCatalog.RAW_COLLECTION_VERSION).success,0);
+    db.exec('DROP TRIGGER block_raw_collection');
+    manualEntryCatalog.migrate(db);
+    assert.equal(db.prepare('SELECT success FROM schema_migrations WHERE version=?').get(manualEntryCatalog.RAW_COLLECTION_VERSION).success,1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM manual_entry_requirement_items').get().count,299);
+    assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
   } finally {
     db.close();
   }
@@ -196,6 +293,8 @@ test('manual-entry coverage export matches the complete synthetic 86-group catal
     const rows = buildCoverageRows(db);
     assert.equal(rows.length, 86);
     assert.equal(rows.filter(row => row.formCodes.length > 0).length, 6);
+    assert.equal(rows.filter(row => row.rawFormCodes.length > 0).length, 84);
+    assert.equal(rows.reduce((total,row) => total + row.rawCaptureFieldCount,0),292);
     assert.equal(rows.reduce((total, row) => total + row.publishedFields.length, 0), 68);
     assert.equal(rows.reduce((total, row) => total + row.candidateFields.length, 0), 384);
     assert.equal(rows.filter(row => row.mappingState === 'لا يوجد تعريف حقل حالي مرتبط').length, 7);

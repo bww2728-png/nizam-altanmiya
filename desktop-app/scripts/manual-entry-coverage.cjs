@@ -7,7 +7,7 @@ const { migrate: migrateStore } = require('../src/main/analysis/store-schema.cjs
 const manualEntryCatalog = require('../src/main/database/manual-entry-catalog.cjs');
 
 const OUTPUT_PATH = path.resolve(__dirname, '../../docs/architecture/central-manual-entry-coverage.csv');
-const HEADERS = ['#','domain_code','المجال','group_code','المجموعة','form_code','حالة التغطية','عدد الحقول المنشورة',
+const HEADERS = ['#','domain_code','المجال','group_code','المجموعة','form_code','raw_collection_form_code','raw_capture_field_count','حالة التغطية','عدد الحقول المنشورة',
   'رموز الحقول المنشورة','عدد الحقول المرشحة','حالة ربط الحقول','رموز الحقول المرشحة','ملاحظة'];
 
 function csvCell(value) {
@@ -20,17 +20,22 @@ function buildCoverageRows(db) {
   let index = 0;
   for (const domain of catalog.domains) {
     for (const group of domain.groups) {
-      const forms = [...new Set(group.forms.map(form => form.code))].sort();
+      const forms = [...new Set(group.forms.filter(form => !form.rawCaptureOnly).map(form => form.code))].sort();
+      const rawForms = [...new Set(group.forms.filter(form => form.rawCaptureOnly).map(form => form.code))].sort();
       const publishedFields = [...new Set(group.publishedFields.map(field => field.code))].sort();
       const candidateFields = [...new Set(group.fields.map(field => field.code))].sort();
       const coverageStatus = forms.length
-        ? 'نموذج منشور جزئي؛ الإدخال متاح للحقول المرتبطة فقط'
-        : 'غير منفذ؛ لا يوجد نموذج منشور';
+        ? 'نموذج بحقول موصوفة جزئياً؛ الإدخال متاح للحقول المرتبطة فقط'
+        : rawForms.length ? 'جمع خام متاح؛ لا يوجد نموذج دلالي معتمد'
+          : 'لا يتطلب نموذج قيم مستقل أو لم ينفذ';
       let mappingState = 'لا يوجد تعريف حقل حالي مرتبط';
       let note = 'يجب استكمال التعريف من المواصفة دون تخمين الدلالة أو الوحدة أو الأبعاد.';
+      if (rawForms.length) note = `نموذج جمع خام للنصوص كما وردت؛ ${group.rawCaptureFieldCount} حقلاً غير مؤهل للتحليل ولا يمثل تعريفات دلالية.`;
       if (candidateFields.length) {
         mappingState = 'مرشحات موجودة؛ تحتاج مراجعة دلالية';
-        note = 'الحقول المرشحة لا تُستخدم للإدخال أو التحليل حتى مراجعتها ونشر نموذج معتمد.';
+        note = rawForms.length
+          ? `توجد مرشحات غير معتمدة؛ نموذج الجمع الخام يحفظ ${group.rawCaptureFieldCount} إجابة نصية فقط ولا يفعّل المرشحات أو التحليل.`
+          : 'الحقول المرشحة لا تُستخدم للإدخال أو التحليل حتى مراجعتها ونشر نموذج معتمد.';
       } else if (publishedFields.length) {
         mappingState = 'لا توجد مرشحات منفصلة؛ الحقول المنشورة أعلاه';
         note = 'تعرض هذه المجموعة حقول النموذج المنشور الجزئي فقط، ولا يدل ذلك على اكتمال موضوعها.';
@@ -46,6 +51,8 @@ function buildCoverageRows(db) {
         groupCode: group.code,
         groupName: group.name,
         formCodes: forms,
+        rawFormCodes:rawForms,
+        rawCaptureFieldCount:group.rawCaptureFieldCount,
         coverageStatus,
         publishedFields,
         candidateFields,
@@ -62,7 +69,7 @@ function renderCoverageCsv(rows) {
   for (const row of rows) {
     lines.push([
       row.index, row.domainCode, row.domainName, row.groupCode, row.groupName, row.formCodes.join('; '),
-      row.coverageStatus, row.publishedFields.length, row.publishedFields.join('; '), row.candidateFields.length,
+      row.rawFormCodes.join('; '),row.rawCaptureFieldCount,row.coverageStatus,row.publishedFields.length,row.publishedFields.join('; '),row.candidateFields.length,
       row.mappingState, row.candidateFields.join('; '), row.note,
     ].map(csvCell).join(','));
   }

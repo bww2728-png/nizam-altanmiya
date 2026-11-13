@@ -2,9 +2,6 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const Database = require('better-sqlite3-multiple-ciphers');
-const { migrate: migrateStore } = require('../src/main/analysis/store-schema.cjs');
-const catalogModule = require('../src/main/database/manual-entry-catalog.cjs');
 
 const OUTPUT_PATH = path.resolve(__dirname, '../../docs/architecture/manual-entry-requirement-register.csv');
 const SPECIFICATION_VERSION = 'user-brief-2026-11-12';
@@ -387,8 +384,7 @@ function findPhraseOverlaps(item, fields) {
   }).map(field => `${field.code}: ${field.name}`).sort();
 }
 
-function buildRequirementRegister(db) {
-  const catalog = catalogModule.listCatalog(db);
+function buildRequirementRegister(db, catalog = require('../src/main/database/manual-entry-catalog.cjs').listCatalog(db)) {
   const rows = [];
   for (const domain of catalog.domains) {
     for (const group of domain.groups) {
@@ -396,7 +392,7 @@ function buildRequirementRegister(db) {
       if (!items) continue;
       const publishedFields = group.publishedFields.map(field => field.code).sort();
       const candidateFields = group.fields.map(field => field.code).sort();
-      const formCodes = group.forms.map(form => form.code).sort();
+      const formCodes = group.forms.filter(form => !form.rawCaptureOnly).map(form => form.code).sort();
       const isSharedCapability = group.code === 'crosscutting-documentation-quality.value-states';
       const evidenceState = isSharedCapability
         ? 'implemented_shared_capability'
@@ -477,6 +473,8 @@ function renderCsv(rows) {
 }
 
 function exportRequirementRegister(outputPath = OUTPUT_PATH) {
+  const Database = require('better-sqlite3-multiple-ciphers');
+  const { migrate: migrateStore } = require('../src/main/analysis/store-schema.cjs');
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   try {
@@ -495,4 +493,4 @@ if (require.main === module) {
   process.stdout.write(`Generated ${rows.length} requirement rows in ${groupCount} specification groups from a fresh synthetic schema: ${outputPath}\n`);
 }
 
-module.exports = { HEADERS, OUTPUT_PATH, SPECIFICATION_VERSION, SPECIFICATION_ITEMS, buildRequirementRegister, exportRequirementRegister, renderCsv };
+module.exports = { HEADERS, ITEM_TYPES, OUTPUT_PATH, SPECIFICATION_VERSION, SPECIFICATION_ITEMS, buildRequirementRegister, exportRequirementRegister, renderCsv };

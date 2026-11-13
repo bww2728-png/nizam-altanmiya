@@ -67,6 +67,41 @@ function buildManualEntryFieldRegister(db) {
       }
     }
   }
+  for (const domain of catalog.domains) {
+    for (const group of domain.groups) {
+      for (const item of group.rawRequirements ?? []) {
+        if (!item.fieldCode) continue;
+        fields.set(item.fieldCode, {
+          code:item.fieldCode,
+          name:item.text,
+          description:'حقل جمع نصي خام مطابق لعبارة المواصفة؛ لا يمثل تعريفاً دلالياً معتمداً.',
+          semanticType:'raw_capture_prompt',
+          dataType:'long_text',
+          unit:null,
+          domains:new Map([[domain.code,domain.name]]),
+          groups:new Map([[group.code,group.name]]),
+          sourceGroups:new Set(),
+          forms:new Set(group.forms.filter(form => form.rawCaptureOnly).map(form => form.code)),
+          mappingStates:new Set(['raw_capture_only']),
+          descriptions:new Set(['نص خام؛ يحتاج تصنيفاً دلالياً مستقلاً.']),
+          dimensions:new Set(),
+          references:new Set(),
+          active:new Set(['1']),
+          required:new Set(['0']),
+          repeatable:new Set(['0']),
+          derived:new Set(['0']),
+          minimums:new Set(),
+          maximums:new Set(),
+          precisions:new Set(),
+          validations:new Set(),
+          sourceHeaders:new Set(),
+          aliases:new Set(),
+          approvedAliases:new Set(),
+          rawCapture:true,
+        });
+      }
+    }
+  }
 
   const definitionRows = db.prepare(`SELECT field.field_code,field.description,field.is_active,unit.name_ar AS unit_name_ar,
       dimension.dimension_code,dimension.name_ar AS dimension_name_ar,reference_set.set_code,reference_set.name_ar AS reference_set_name_ar
@@ -88,7 +123,7 @@ function buildManualEntryFieldRegister(db) {
       form_field.source_header_text,form.form_code
     FROM form_fields form_field
     JOIN form_versions version ON version.form_version_id=form_field.form_version_id AND version.status='published'
-    JOIN form_definitions form ON form.form_id=version.form_id AND form.is_active=1
+    JOIN form_definitions form ON form.form_id=version.form_id AND form.is_active=1 AND form.form_code NOT LIKE 'raw_collection_v1_%'
     JOIN field_definitions field ON field.field_definition_id=form_field.field_definition_id`).all();
   for (const row of formRows) {
     const entry = fields.get(row.field_code);
@@ -108,7 +143,7 @@ function buildManualEntryFieldRegister(db) {
     FROM form_field_aliases alias
     JOIN form_fields form_field ON form_field.form_field_id=alias.form_field_id
     JOIN form_versions version ON version.form_version_id=form_field.form_version_id AND version.status='published'
-    JOIN form_definitions form ON form.form_id=version.form_id AND form.is_active=1
+    JOIN form_definitions form ON form.form_id=version.form_id AND form.is_active=1 AND form.form_code NOT LIKE 'raw_collection_v1_%'
     JOIN field_definitions field ON field.field_definition_id=form_field.field_definition_id`).all();
   for (const row of aliasRows) {
     const entry = fields.get(row.field_code);
@@ -118,7 +153,7 @@ function buildManualEntryFieldRegister(db) {
   }
 
   return [...fields.values()].sort((left, right) => left.code.localeCompare(right.code)).map(field => {
-    const published = field.forms.size > 0;
+    const published = field.forms.size > 0 && !field.rawCapture;
     const candidate = field.mappingStates.has('needs_domain_review');
     return {
       code: field.code,
@@ -151,10 +186,10 @@ function buildManualEntryFieldRegister(db) {
       sourceGroups: [...field.sourceGroups].sort(),
       forms: [...field.forms].sort(),
       mappingStates: [...field.mappingStates].sort(),
-      entryState: published ? 'published_form_field' : candidate ? 'review_only_candidate' : 'not_mapped_to_form_or_candidate',
-      specificationMatch: 'not_verified_against_each_clause',
-      sourceBasis: 'current_unified_field_catalog_and_published_forms',
-      notes: REGISTER_NOTE,
+      entryState: field.rawCapture ? 'raw_capture_only' : published ? 'published_form_field' : candidate ? 'review_only_candidate' : 'not_mapped_to_form_or_candidate',
+      specificationMatch: field.rawCapture ? 'literal_requirement_text_not_semantic_match' : 'not_verified_against_each_clause',
+      sourceBasis: field.rawCapture ? 'user_specification_literal_text_only' : 'current_unified_field_catalog_and_published_forms',
+      notes: field.rawCapture ? 'نص التقاط مؤقت حرفي؛ لا يمثل تعريفاً دلالياً أو وحدة أو منهجية معتمدة.' : REGISTER_NOTE,
     };
   });
 }
