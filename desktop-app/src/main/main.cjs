@@ -724,11 +724,13 @@ function registerHandlers() {
 
   ipcMain.handle('documents:field-candidates:promote', (_event, request = {}) => {
     if (currentProfile() !== 'owner') throw new Error('ترحيل القيم المراجَعة يتطلب وضع المالك.');
-    const result = schemaDrivenDiscovery.promoteReviewedCandidates(requireDatabase(),request,{ actor:sessionId });
+    const result = Array.isArray(request.candidateGroups)
+      ? schemaDrivenDiscovery.promoteReviewedCandidateGroups(requireDatabase(),request,{ actor:sessionId })
+      : schemaDrivenDiscovery.promoteReviewedCandidates(requireDatabase(),request,{ actor:sessionId });
     invalidateSheets();
     auditRead('documents:field-candidates:promote', {
-      entity:'form_records',entityId:result.formRecordId,result:result.status,
-      detail:`document=${String(request.documentId ?? '').slice(0,80)};candidates=${result.candidateIds.length};fields=${result.fieldCount}`,
+      entity:'form_records',entityId:Array.isArray(result.records) ? result.records.map(record => record.formRecordId).join(',') : result.formRecordId,result:Array.isArray(result.records) ? `${result.recordCount}_records` : result.status,
+      detail:`document=${String(request.documentId ?? '').slice(0,80)};candidates=${Array.isArray(request.candidateGroups) ? request.candidateGroups.reduce((count,group) => count + (group.candidateIds?.length ?? 0),0) : result.candidateIds.length};fields=${result.fieldCount}`,
     });
     return result;
   });

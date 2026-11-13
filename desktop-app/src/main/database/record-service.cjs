@@ -721,9 +721,11 @@ function listRecords(db, request = {}) {
   const offset = Math.max(0,Math.min(1000000,Number(request.offset)||0));
   const search = String(request.search ?? '').trim().slice(0,120);
   const status = ['draft','pending_review','approved','rejected','superseded','archived'].includes(request.status) ? request.status : null;
+  const formRecordId = Number(request.formRecordId);
   const conditions = [];
   const params = [];
   if (Number.isSafeInteger(formId) && formId > 0) { conditions.push('r.form_version_id=?'); params.push(formId); }
+  if (Number.isSafeInteger(formRecordId) && formRecordId > 0) { conditions.push('r.form_record_id=?'); params.push(formRecordId); }
   if (status) { conditions.push('r.record_status=?'); params.push(status); }
   if (search) {
     conditions.push("(instr(lower(coalesce(r.record_label,'')),lower(?))>0 OR instr(lower(coalesce(g.name_ar,'')),lower(?))>0 OR instr(lower(coalesce(p.label_ar,'')),lower(?))>0 OR instr(lower(f.form_code),lower(?))>0 OR instr(lower(f.name_ar),lower(?))>0)");

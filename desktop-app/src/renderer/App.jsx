@@ -325,7 +325,7 @@ export default function App() {
   function renderPage() {
     switch (route) {
       case 'projects':
-        return <Projects notify={notify} refreshKey={refreshKey} />;
+        return <Projects notify={notify} refreshKey={refreshKey} onNavigate={navigate} />;
       case 'sources':
         return <DataSources refreshKey={refreshKey} notify={notify} />;
       case 'documents':
@@ -339,11 +339,11 @@ export default function App() {
       case 'finance':
         return <FinanceBudget notify={notify} refreshKey={refreshKey} />;
       case 'data-entry':
-        return <DataEntry notify={notify} refreshKey={refreshKey} onDataChanged={refresh} onShowDatabase={() => navigate('database')} />;
+        return <DataEntry notify={notify} refreshKey={refreshKey} initialEntry={params.entry ?? {}} onDataChanged={refresh} onShowDatabase={() => navigate('database')} />;
       case 'correction':
         return <Correction catalogue={catalogue ?? []} notify={notify} refreshKey={refreshKey} focusId={params.focusId ?? null} />;
       case 'indicators':
-        return <Indicators accessProfile={status?.accessProfile ?? 'owner'} notify={notify} refreshKey={refreshKey} />;
+        return <Indicators accessProfile={status?.accessProfile ?? 'owner'} notify={notify} refreshKey={refreshKey} onNavigate={navigate} />;
       case 'ranking':
         return <Ranking catalogue={catalogue ?? []} notify={notify} onOpenCard={(id) => navigate('card', { id })} />;
       case 'database':

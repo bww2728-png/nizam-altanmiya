@@ -65,6 +65,7 @@
     "files": [
       "dist/**",
       "src/main/**",
+      "scripts/manual-entry-requirement-register.cjs",
       "package.json"
     ],
     "extraResources": [

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Activity, ArrowDown, ArrowUp, FileSpreadsheet, FileText } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, FileSpreadsheet, FileText, Plus } from 'lucide-react';
 import { Badge, Card, Empty, ErrorBanner, Loading, Segmented } from '../components/ui.jsx';
 import IndicatorReportFilters from '../components/IndicatorReportFilters.jsx';
 import { errText, fmtNumber, fmtPercent } from '../lib/format.js';
@@ -12,7 +12,7 @@ const VIEWS = [
 ];
 const INITIAL_FILTERS = { criteria: [], logic: 'and', mode: 'calibrated', view: 'values', sort: 'rank', direction: 'desc' };
 
-export default function Indicators({ accessProfile, notify, refreshKey }) {
+export default function Indicators({ accessProfile, notify, refreshKey, onNavigate }) {
   const [payload, setPayload] = useState(null);
   const [filters, setFilters] = useState(INITIAL_FILTERS);
   const [applied, setApplied] = useState(INITIAL_FILTERS);
@@ -67,10 +67,11 @@ export default function Indicators({ accessProfile, notify, refreshKey }) {
       {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
       <Card
         title="المؤشرات الـ 12"
-        subtitle="هذه الشاشة للفلاتر المشتقة والترتيب وجودة نتائج التحليل؛ فلاتر السكان والخدمات والاقتصاد الخام والجغرافيا موجودة في قاعدة البيانات الشاملة فقط."
+        subtitle="هذه الشاشة للنتائج المشتقة والترتيب وجودة التحليل. لإدخال أو تصحيح قياس، استخدم مركز الإدخال؛ القياسات الخام لا تغيّر التقارير الرسمية تلقائيًا."
         icon={Activity}
         actions={(
           <div className="btn-row">
+            <button className="btn small primary" onClick={() => onNavigate?.('data-entry', { entry: { domainCode: 'development-indicators', groupCode: 'indicator-results', formCode: 'indicator_observation_v1' } })}><Plus size={14} /> إدخال قياس مركزي</button>
             <button className="btn small" onClick={() => exportReport('excel')} disabled={exporting}><FileSpreadsheet size={15} /> Excel مطابق</button>
             <button className="btn small" onClick={() => exportReport('pdf')} disabled={exporting}><FileText size={15} /> PDF مطابق</button>
             <span className="chip gold">{fmtNumber(rows.length, 0)} نتيجة</span>

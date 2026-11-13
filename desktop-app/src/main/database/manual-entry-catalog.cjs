@@ -192,6 +192,8 @@ const COLLECTION_FORM_VERSION = 8;
 const COLLECTION_FORM_CODE = '2026-11-13-manual-entry-primary-collection-v8';
 const EDUCATION_ENTITY_VERSION = 9;
 const EDUCATION_ENTITY_CODE = '2026-11-13-education-facility-entity-type-v9';
+const RAW_COLLECTION_VERSION = 11;
+const RAW_COLLECTION_CODE = '2026-11-14-requirement-raw-collection-v11';
 const COLLECTION_FORM_REFERENCE = {
   code: 'user-development-data-spec-v1',
   title: 'مواصفة البيانات التنموية المقدمة من المستخدم',
@@ -356,7 +358,7 @@ function migrate(db) {
     if (existing.checksum !== expectedChecksum || existing.migration_code !== CATALOG_CODE) {
       throw new Error('عُدّل كتالوج مجالات الإدخال بعد تطبيق إصداره؛ أضف ترحيلاً جديداً بدلاً من تغيير التعريف المنشور.');
     }
-    return { version: CATALOG_VERSION, alreadyApplied: true, fieldCandidates: migrateFieldCandidates(db), collectionForms: migrateCollectionForms(db), educationEntityType: migrateEducationEntityType(db) };
+    return { version: CATALOG_VERSION, alreadyApplied: true, fieldCandidates: migrateFieldCandidates(db), collectionForms: migrateCollectionForms(db), educationEntityType: migrateEducationEntityType(db), rawCollectionForms: migrateRawCollectionForms(db) };
   }
   if (existing) db.prepare('DELETE FROM schema_migrations WHERE version=? AND success=0').run(CATALOG_VERSION);
 
@@ -398,7 +400,8 @@ function migrate(db) {
   const fieldCandidates = migrateFieldCandidates(db);
   const collectionForms = migrateCollectionForms(db);
   const educationEntityType = migrateEducationEntityType(db);
-  return { version: CATALOG_VERSION, alreadyApplied: false, fieldCandidates, collectionForms, educationEntityType };
+  const rawCollectionForms = migrateRawCollectionForms(db);
+  return { version: CATALOG_VERSION, alreadyApplied: false, fieldCandidates, collectionForms, educationEntityType, rawCollectionForms };
 }
 
 function fieldCandidateChecksum() {
@@ -618,16 +621,148 @@ function migrateEducationEntityType(db) {
   return { version: EDUCATION_ENTITY_VERSION, alreadyApplied: false };
 }
 
+function rawCollectionChecksum() {
+  const register = require('../../../scripts/manual-entry-requirement-register.cjs');
+  return crypto.createHash('sha256').update(RAW_COLLECTION_CODE).update(register.SPECIFICATION_VERSION)
+    .update(JSON.stringify(register.SPECIFICATION_ITEMS)).update('raw_collection_schema_v2|unclassified_raw_capture|long_text|analysis_ineligible').digest('hex');
+}
+
+function migrateRawCollectionForms(db) {
+  const register = require('../../../scripts/manual-entry-requirement-register.cjs');
+  const expectedChecksum = rawCollectionChecksum();
+  const existing = db.prepare('SELECT * FROM schema_migrations WHERE version=?').get(RAW_COLLECTION_VERSION);
+  if (existing?.success === 1) {
+    if (existing.checksum !== expectedChecksum || existing.migration_code !== RAW_COLLECTION_CODE) {
+      throw new Error('تغيّرت مواصفة نماذج الجمع الخام بعد تطبيق الترحيل؛ أضف إصداراً جديداً بدلاً من تعديل الإصدار المنشور.');
+    }
+    return { version: RAW_COLLECTION_VERSION, alreadyApplied: true,
+      forms: db.prepare("SELECT COUNT(*) AS count FROM manual_entry_form_governance WHERE collection_mode='primary_collection' AND notes LIKE 'التقاط خام%' ").get().count,
+      items: db.prepare('SELECT COUNT(*) AS count FROM manual_entry_requirement_items').get().count };
+  }
+  if (existing) db.prepare('DELETE FROM schema_migrations WHERE version=? AND success=0').run(RAW_COLLECTION_VERSION);
+  const now = new Date().toISOString();
+  const startedAt = Date.now();
+  try {
+    db.transaction(() => {
+      db.exec(`CREATE TABLE IF NOT EXISTS manual_entry_requirement_items (
+        requirement_item_id INTEGER PRIMARY KEY,
+        item_code TEXT NOT NULL UNIQUE,
+        group_id INTEGER NOT NULL REFERENCES manual_entry_groups(group_id),
+        item_order INTEGER NOT NULL,
+        requirement_text TEXT NOT NULL,
+        semantic_class TEXT NOT NULL,
+        classification_state TEXT NOT NULL CHECK(classification_state IN ('implemented_shared_capability','needs_item_level_classification')),
+        field_definition_id INTEGER UNIQUE REFERENCES field_definitions(field_definition_id),
+        specification_version TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(group_id,item_order)
+      );
+      CREATE INDEX IF NOT EXISTS idx_manual_entry_requirement_group ON manual_entry_requirement_items(group_id,item_order);
+      `);
+      const referenceId = db.prepare('SELECT reference_document_id FROM manual_entry_reference_documents WHERE reference_code=? AND version_number=?')
+        .get(COLLECTION_FORM_REFERENCE.code,COLLECTION_FORM_REFERENCE.version)?.reference_document_id;
+      if (!referenceId) throw new Error('مرجع مواصفة المستخدم غير مسجل.');
+      const groups = new Map(db.prepare('SELECT group_id,group_code,name_ar FROM manual_entry_groups').all().map(group => [group.group_code,group]));
+      const insertRequirement = db.prepare(`INSERT INTO manual_entry_requirement_items
+        (item_code,group_id,item_order,requirement_text,semantic_class,classification_state,field_definition_id,specification_version,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?)`);
+      const insertForm = db.prepare(`INSERT OR IGNORE INTO form_definitions(form_code,name_ar,description,data_structure_type,is_active,created_at,updated_at)
+        VALUES(?,?,?,'raw_requirement_collection',1,?,?)`);
+      const selectForm = db.prepare('SELECT form_id FROM form_definitions WHERE form_code=?');
+      const insertVersion = db.prepare(`INSERT OR IGNORE INTO form_versions(form_id,version_number,version_label,status,definition_hash,change_summary,created_at,published_at)
+        VALUES(?,1,'جمع خام غير مصنف v1','published',?,?,?,?)`);
+      const selectVersion = db.prepare('SELECT form_version_id FROM form_versions WHERE form_id=? AND version_number=1');
+      const insertSection = db.prepare(`INSERT OR IGNORE INTO form_sections(form_version_id,section_code,name_ar,section_type,sort_order,is_repeatable,is_required,created_at)
+        VALUES(?,'raw_requirements','عناصر المواصفة كما وردت','data',1,0,0,?)`);
+      const insertFieldDefinition = db.prepare(`INSERT OR IGNORE INTO field_definitions
+        (field_code,canonical_name_ar,description,semantic_type,data_type,default_unit_id,reference_set_id,is_active,created_at,updated_at)
+        VALUES(?,?,?,'raw_capture_prompt','long_text',NULL,NULL,1,?,?)`);
+      const insertField = db.prepare(`INSERT OR IGNORE INTO form_fields
+        (form_version_id,section_id,field_definition_id,field_code,label_ar,data_type_override,storage_class,is_required,allow_null,
+         is_repeatable,is_derived,is_importable,sort_order,created_at)
+        VALUES(?,?,?,?,?,'long_text','record_value',0,1,0,0,1,?,?)`);
+      const insertFieldGovernance = db.prepare(`INSERT OR IGNORE INTO manual_entry_form_field_governance
+        (form_field_id,definition_status,unit_status,methodology_status,analysis_eligible,notes,updated_at)
+        VALUES(?,'needs_review','not_applicable','not_defined',0,?,?)`);
+      const insertFormGovernance = db.prepare(`INSERT OR IGNORE INTO manual_entry_form_governance
+        (form_version_id,collection_mode,definition_status,methodology_status,reference_status,analysis_eligible,notes,updated_at)
+        VALUES(?,'primary_collection','provisional','not_defined','user_specification_only',0,?,?)`);
+      const insertGroupForm = db.prepare(`INSERT OR IGNORE INTO manual_entry_group_forms(group_id,form_code,coverage_note) VALUES(?,?,?)`);
+      const insertReference = db.prepare(`INSERT OR IGNORE INTO manual_entry_form_references
+        (form_version_id,form_field_id,reference_document_id,source_clause) VALUES(?,?,?,?)`);
+      let formCount = 0;
+      let fieldCount = 0;
+      for (const [groupCode,items] of Object.entries(register.SPECIFICATION_ITEMS)) {
+        const group = groups.get(groupCode);
+        if (!group) throw new Error(`مجموعة المواصفة غير موجودة لإنشاء الجمع الخام: ${groupCode}`);
+        const sharedCapability = groupCode === 'crosscutting-documentation-quality.value-states';
+        const formCode = `raw_collection_v1_${groupCode}`;
+        let formVersionId = null;
+        let sectionId = null;
+        if (!sharedCapability) {
+          const form = { code:formCode,groupCode,items };
+          const formHash = crypto.createHash('sha256').update(JSON.stringify(form)).digest('hex');
+          insertForm.run(formCode,`جمع خام أولي — ${group.name_ar}`,
+            `تسجيل أولي حرفي لعناصر مواصفة المستخدم للمراجعة اللاحقة. هذه حقول نصية عامة وليست تعريفات دلالية معتمدة، ولا وحدات أو أبعاد أو منهجية تحليلية.`,now,now);
+          const formId = selectForm.get(formCode).form_id;
+          insertVersion.run(formId,formHash,'جمع خام أولي فقط؛ الحقول غير مصنفة دلالياً ولا تؤهل للتحليل الرسمي.',now,now);
+          formVersionId = selectVersion.get(formId).form_version_id;
+          insertSection.run(formVersionId,now);
+          sectionId = db.prepare("SELECT section_id FROM form_sections WHERE form_version_id=? AND section_code='raw_requirements'").get(formVersionId).section_id;
+          insertFormGovernance.run(formVersionId,'التقاط خام لعناصر المواصفة كما هي؛ النوع النصي وسيلة جمع فقط وليس تعريفاً دلالياً. لا توجد وحدة أو أبعاد أو مصدر رسمي معتمد أو منهجية؛ لا يدخل النموذج التحليل الرسمي.',now);
+          insertGroupForm.run(group.group_id,formCode,'نموذج آلي لالتقاط عناصر المواصفة نصياً كبيانات خام غير مصنفة؛ لا يمثل اعتماد الحقول أو اكتمال المجموعة ولا يتيح التحليل الرسمي.');
+          formCount += 1;
+        }
+        for (const [index,item] of items.entries()) {
+          const itemCode = `${groupCode}.${String(index + 1).padStart(3,'0')}`;
+          const semanticClass = sharedCapability ? 'shared_capability' : 'unclassified_raw_capture';
+          const classificationState = sharedCapability ? 'implemented_shared_capability' : 'needs_item_level_classification';
+        if (sharedCapability) {
+          insertRequirement.run(itemCode,group.group_id,index + 1,item,semanticClass,classificationState,null,
+            register.SPECIFICATION_VERSION,now);
+          continue;
+        }
+        const fieldCode = `raw_requirement.${groupCode}.${String(index + 1).padStart(3,'0')}`;
+        const description = `حقل التقاط خام لبند مواصفة؛ لا يعرّف المعنى أو النوع الدلالي أو الوحدة أو الأبعاد أو المصدر أو المنهجية. البند: ${item}`;
+        insertFieldDefinition.run(fieldCode,item,description,now,now);
+        const fieldDefinitionId = db.prepare('SELECT field_definition_id FROM field_definitions WHERE field_code=?').get(fieldCode).field_definition_id;
+        insertField.run(formVersionId,sectionId,fieldDefinitionId,fieldCode,item,index + 1,now);
+        const formFieldId = db.prepare('SELECT form_field_id FROM form_fields WHERE form_version_id=? AND field_code=?').get(formVersionId,fieldCode).form_field_id;
+        insertFieldGovernance.run(formFieldId,'التقاط نصي مؤقت؛ يلزم تصنيف دلالي ومراجعة مستقلة.',now);
+        insertReference.run(formVersionId,formFieldId,referenceId,item);
+        insertRequirement.run(itemCode,group.group_id,index + 1,item,semanticClass,classificationState,fieldDefinitionId,
+          register.SPECIFICATION_VERSION,now);
+        fieldCount += 1;
+        }
+      }
+      db.prepare(`INSERT INTO schema_migrations(version,migration_code,migration_name,checksum,applied_at,execution_ms,success,details)
+        VALUES(?,?,?,?,?,?,1,?)`).run(RAW_COLLECTION_VERSION,RAW_COLLECTION_CODE,'نماذج الجمع الخام الديناميكية لعناصر المواصفة',expectedChecksum,now,
+          Date.now()-startedAt,`أُنشئ ${formCount} نموذجاً آلياً و${fieldCount} حقل التقاط خام، مع تسجيل كل عناصر المواصفة؛ لا تأهيل تحليلي.`);
+    })();
+  } catch (error) {
+    db.prepare(`INSERT OR REPLACE INTO schema_migrations(version,migration_code,migration_name,checksum,applied_at,execution_ms,success,details)
+      VALUES(?,?,?,?,?,?,0,?)`).run(RAW_COLLECTION_VERSION,RAW_COLLECTION_CODE,'نماذج الجمع الخام الديناميكية لعناصر المواصفة',expectedChecksum,
+        new Date().toISOString(),Date.now()-startedAt,String(error.message).slice(0,4000));
+    throw error;
+  }
+  return { version:RAW_COLLECTION_VERSION,alreadyApplied:false,
+    forms:db.prepare("SELECT COUNT(*) AS count FROM manual_entry_form_governance WHERE collection_mode='primary_collection' AND notes LIKE 'التقاط خام%' ").get().count,
+    items:db.prepare('SELECT COUNT(*) AS count FROM manual_entry_requirement_items').get().count };
+}
+
 function listCatalog(db) {
+
 
   const rows = db.prepare(`SELECT d.domain_id,d.domain_code,d.name_ar AS domain_name_ar,d.sort_order AS domain_order,d.definition_state AS domain_state,
       g.group_id,g.group_code,g.name_ar AS group_name_ar,g.sort_order AS group_order,g.definition_state AS group_state,
-      f.form_code,f.name_ar AS form_name_ar,v.form_version_id,v.status AS form_status
+      f.form_code,f.name_ar AS form_name_ar,v.form_version_id,v.status AS form_status,
+      governance.collection_mode,governance.analysis_eligible
     FROM manual_entry_domains d
     LEFT JOIN manual_entry_groups g ON g.domain_id=d.domain_id
     LEFT JOIN manual_entry_group_forms gf ON gf.group_id=g.group_id
     LEFT JOIN form_definitions f ON f.form_code=gf.form_code AND f.is_active=1
     LEFT JOIN form_versions v ON v.form_id=f.form_id AND v.version_number=(SELECT MAX(v2.version_number) FROM form_versions v2 WHERE v2.form_id=f.form_id)
+    LEFT JOIN manual_entry_form_governance governance ON governance.form_version_id=v.form_version_id
     ORDER BY d.sort_order,g.sort_order,f.form_code`).all();
   const domains = [];
   const byCode = new Map();
@@ -646,7 +781,9 @@ function listCatalog(db) {
       domain.groups.push(group);
     }
     if (row.form_code && row.form_version_id && row.form_status === 'published') {
-      group.forms.push({ code: row.form_code, name: row.form_name_ar, versionId: row.form_version_id });
+      group.forms.push({ code: row.form_code, name: row.form_name_ar, versionId: row.form_version_id,
+        rawCaptureOnly: row.form_code.startsWith('raw_collection_v1_'), collectionMode: row.collection_mode,
+        analysisEligible: row.analysis_eligible == null ? 1 : row.analysis_eligible });
     }
   }
   const candidateRows = db.prepare(`SELECT group_catalog.group_code AS target_group_code,field.field_code,field.canonical_name_ar,
@@ -672,7 +809,7 @@ function listCatalog(db) {
       field.canonical_name_ar,field.semantic_type,field.data_type,unit.name_ar AS unit_name_ar
     FROM manual_entry_group_forms mapping
     JOIN manual_entry_groups group_catalog ON group_catalog.group_id=mapping.group_id
-    JOIN form_definitions form ON form.form_code=mapping.form_code AND form.is_active=1
+    JOIN form_definitions form ON form.form_code=mapping.form_code AND form.is_active=1 AND form.form_code NOT LIKE 'raw_collection_v1_%'
     JOIN form_versions version ON version.form_id=form.form_id AND version.status='published'
     JOIN form_fields form_field ON form_field.form_version_id=version.form_version_id
     JOIN field_definitions field ON field.field_definition_id=form_field.field_definition_id
@@ -688,7 +825,26 @@ function listCatalog(db) {
     const field = group.publishedFields.find(item => item.code === row.field_code);
     if (!field.formCodes.includes(row.form_code)) field.formCodes.push(row.form_code);
   }
+  const rawRequirements = db.prepare(`SELECT requirement.group_id,requirement.item_code,requirement.requirement_text,field.field_code
+    FROM manual_entry_requirement_items requirement LEFT JOIN field_definitions field USING(field_definition_id)
+    ORDER BY requirement.group_id,requirement.item_order`).all();
+  const requirementsByGroup = new Map();
+  for (const item of rawRequirements) {
+    const items = requirementsByGroup.get(item.group_id) ?? [];
+    items.push({ code:item.item_code,text:item.requirement_text,fieldCode:item.field_code });
+    requirementsByGroup.set(item.group_id,items);
+  }
+  const requirementCounts = new Map(db.prepare(`SELECT group_id,COUNT(*) AS count,
+      SUM(CASE WHEN field_definition_id IS NOT NULL THEN 1 ELSE 0 END) AS raw_capture_fields
+    FROM manual_entry_requirement_items GROUP BY group_id`).all().map(row => [row.group_id,row]));
+  for (const group of domains.flatMap(domain => domain.groups)) {
+    const counts = requirementCounts.get(group.id);
+    group.requirementItemCount = counts?.count ?? 0;
+    group.rawCaptureFieldCount = counts?.raw_capture_fields ?? 0;
+    group.rawRequirements = requirementsByGroup.get(group.id) ?? [];
+    group.rawCaptureAvailable = group.forms.some(form => form.rawCaptureOnly);
+  }
   return { version: CATALOG_VERSION, sourceNote: CATALOG_SOURCE, domains, fieldMappingNote: FIELD_CANDIDATE_NOTE };
 }
 
-module.exports = { CATALOG_VERSION, CATALOG_CODE, FIELD_CANDIDATE_VERSION, FIELD_CANDIDATE_LINKS, DOMAINS, migrate, listCatalog };
+module.exports = { CATALOG_VERSION, CATALOG_CODE, FIELD_CANDIDATE_VERSION, FIELD_CANDIDATE_LINKS, RAW_COLLECTION_VERSION, RAW_COLLECTION_CODE, DOMAINS, migrate, listCatalog };

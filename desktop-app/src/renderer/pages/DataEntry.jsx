@@ -12,7 +12,7 @@ const VALUE_STATE_LABELS = {
   not_applicable: 'لا ينطبق', not_collected: 'لم يُجمع', not_verified: 'غير متحقق منه',
 };
 
-export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onShowDatabase }) {
+export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onShowDatabase, initialEntry = {} }) {
   const [catalog, setCatalog] = useState(null);
   const [selectedDomainCode, setSelectedDomainCode] = useState('');
   const [selectedGroupCode, setSelectedGroupCode] = useState('');
@@ -28,6 +28,7 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   const [recordSearch, setRecordSearch] = useState('');
   const [recordStatus, setRecordStatus] = useState('all');
   const [recordFormVersionId, setRecordFormVersionId] = useState('');
+  const [recordFormRecordId, setRecordFormRecordId] = useState('');
   const [recordOffset, setRecordOffset] = useState(0);
   const [recordTotal, setRecordTotal] = useState(0);
   const [values, setValues] = useState({});
@@ -59,8 +60,9 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
     const query = catalogSearch.trim().toLocaleLowerCase();
     return !query || domain.name.toLocaleLowerCase().includes(query)
       || domain.groups.some((group) => group.name.toLocaleLowerCase().includes(query)
-        || group.fields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query)))
-      || domain.groups.some((group) => group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query)));
+        || group.fields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
+        || group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
+        || group.rawRequirements?.some((item) => item.text.toLocaleLowerCase().includes(query)));
   });
   const selectCatalogGroup = (domain, group) => {
     if (editingRecord) return;
@@ -97,6 +99,7 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
     try {
       const result = await window.localApp.dataRecords({
         formVersionId: recordFormVersionId || undefined,
+        formRecordId: recordFormRecordId || undefined,
         status: recordStatus === 'all' ? undefined : recordStatus,
         search: recordSearch,
         offset: recordOffset,
@@ -107,9 +110,32 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
     } catch (cause) {
       notify({ tone: 'bad', message: errText(cause) || 'تعذر تحميل السجلات.' });
     }
-  }, [notify, recordFormVersionId, recordOffset, recordSearch, recordStatus]);
+  }, [notify, recordFormRecordId, recordFormVersionId, recordOffset, recordSearch, recordStatus]);
 
   useEffect(() => { loadForms(); }, [loadForms]);
+  useEffect(() => {
+    if (!catalog || !forms.length) return;
+    const domain = catalog.domains.find((item) => item.code === initialEntry.domainCode);
+    const group = domain?.groups.find((item) => item.code === initialEntry.groupCode)
+      ?? catalog.domains.flatMap((item) => item.groups).find((item) => item.code === initialEntry.groupCode);
+    if (domain) setSelectedDomainCode(domain.code);
+    if (group) {
+      setSelectedGroupCode(group.code);
+      const groupForm = group.forms.find((item) => item.code === initialEntry.formCode && item.versionId);
+      if (groupForm) setFormVersionId(String(groupForm.versionId));
+    }
+    const form = forms.find((item) => item.form_code === initialEntry.formCode && item.version_status === 'published');
+    if (form) {
+      setFormVersionId(String(form.form_version_id));
+      setRecordFormVersionId(initialEntry.recordId ? String(form.form_version_id) : '');
+    }
+    if (initialEntry.recordId) {
+      setRecordFormRecordId(String(initialEntry.recordId));
+      setRecordStatus('all');
+      setRecordOffset(0);
+    }
+    if (initialEntry.parentRecordId) setParentRecordId(String(initialEntry.parentRecordId));
+  }, [catalog, forms, initialEntry.domainCode, initialEntry.groupCode, initialEntry.formCode, initialEntry.recordId, initialEntry.parentRecordId]);
   useEffect(() => { loadRecords(); }, [loadRecords, refreshKey]);
 
   useEffect(() => {
@@ -130,7 +156,9 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
         setGeoUnitId(record?.record?.geo_unit_id == null ? '' : String(record.record.geo_unit_id));
         setPeriodId(record?.record?.period_id == null ? '' : String(record.record.period_id));
         setPeriodYear(record?.record?.period_year == null ? '' : String(record.record.period_year));
-        setParentRecordId(record?.record?.parent_record_id == null ? '' : String(record.record.parent_record_id));
+        setParentRecordId(record?.record?.parent_record_id == null
+          ? (initialEntry.formCode === 'project_funding_v1' ? String(initialEntry.parentRecordId ?? '') : '')
+          : String(record.record.parent_record_id));
         setChangeReason('');
       })
       .catch((cause) => notify({ tone: 'bad', message: errText(cause) || 'تعذر تحميل النموذج.' }));
@@ -146,7 +174,7 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
     let active = true;
     window.localApp.dataProjectParents({
       search: projectParentSearch,
-      parentRecordId: editingRecord?.record?.parent_record_id ?? undefined,
+      parentRecordId: editingRecord?.record?.parent_record_id ?? initialEntry.parentRecordId ?? undefined,
       offset: projectParentOffset,
       limit: 50,
     }).then((result) => {
@@ -157,7 +185,7 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
       if (active) notify({ tone: 'bad', message: errText(cause) || 'تعذر تحميل المشاريع المعتمدة لربط التمويل.' });
     });
     return () => { active = false; };
-  }, [definition?.form_code,editingRecord,notify,projectFormVersionId,projectParentOffset,projectParentSearch]);
+  }, [definition?.form_code,editingRecord,initialEntry.parentRecordId,notify,projectFormVersionId,projectParentOffset,projectParentSearch]);
 
   const beginEdit = async (formRecordId) => {
     try {
@@ -269,11 +297,12 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   };
 
   const selectedForm = forms.find((form) => Number(form.form_version_id) === Number(formVersionId));
+  const rawCaptureOnly = selectedForm?.form_code?.startsWith('raw_collection_v1_') ?? false;
   const formOptions = (selectedGroup?.forms ?? []).map((catalogForm) => {
     const form = forms.find((item) => Number(item.form_version_id) === Number(catalogForm.versionId));
     return form ? {
       value: String(form.form_version_id),
-      label: `${form.name_ar} — إصدار ${form.version_number}${form.collection_mode === 'primary_collection' ? ' · جمع أولي' : ''}`,
+      label: `${form.name_ar} — إصدار ${form.version_number}${catalogForm.rawCaptureOnly ? ' · التقاط خام غير مصنف' : form.collection_mode === 'primary_collection' ? ' · جمع أولي' : ''}`,
       disabled: !form.is_active || form.version_status !== 'published',
     } : null;
   }).filter(Boolean);
@@ -316,7 +345,8 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
               const nextGroup = query
                 ? domain.groups.find((group) => group.name.toLocaleLowerCase().includes(query)
                   || group.fields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
-                  || group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query)))
+                  || group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
+                  || group.rawRequirements?.some((item) => item.text.toLocaleLowerCase().includes(query)))
                   ?? domain.groups.find((group) => group.forms.some((form) => form.versionId)) ?? domain.groups[0]
                 : domain.groups.find((group) => group.forms.some((form) => form.versionId)) ?? domain.groups[0];
               setSelectedGroupCode(nextGroup?.code ?? '');
@@ -330,18 +360,23 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
                 const query = catalogSearch.trim().toLocaleLowerCase();
                 return !query || selectedDomain.name.toLocaleLowerCase().includes(query) || group.name.toLocaleLowerCase().includes(query)
                   || group.fields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
-                  || group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query));
+                  || group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
+                  || group.rawRequirements?.some((item) => item.text.toLocaleLowerCase().includes(query));
               }).map((group) => <button key={group.code} type="button" className={`btn small ${selectedGroup?.code === group.code ? 'primary' : 'ghost'}`} aria-pressed={selectedGroup?.code === group.code} disabled={Boolean(editingRecord)} onClick={() => selectCatalogGroup(selectedDomain, group)}>
-                {group.name}<span className="dim"> · {group.forms.length ? 'نموذج جزئي' : 'قيد التعريف'}</span>
+                {group.name}<span className="dim"> · {group.forms.some((form) => !form.rawCaptureOnly) ? 'نموذج جزئي' : group.rawCaptureAvailable ? `جمع خام · ${group.rawCaptureFieldCount}` : 'قيد التعريف'}</span>
               </button>)}
             </div>
           </section>}
           {selectedGroup && <div className="stack tight">
             <div className="quote">
-              <strong>{selectedGroup.forms.length ? 'التغطية المنشورة جزئية:' : 'لا يوجد نموذج إدخال لهذه المجموعة بعد:'}</strong>{' '}{selectedGroup.forms.length ? `توجد ${selectedGroup.forms.length} نماذج متاحة لجمع البيانات؛ نطاقها لا يغطي عناصر المجال كاملة.` : 'يلزم إنشاء نموذج يحدد حقول المجموعة وأنواعها الأساسية. لا يلزم اعتماد منهجية المؤشر أو مرجع حكومي حتى يبدأ جمع القيم الخام.'}
+              <strong>{selectedGroup.forms.some((form) => !form.rawCaptureOnly) ? 'التغطية الدلالية المنشورة جزئية:' : selectedGroup.rawCaptureAvailable ? 'التقاط خام متاح لهذه المجموعة:' : 'لا يوجد نموذج إدخال لهذه المجموعة بعد:'}</strong>{' '}{selectedGroup.forms.some((form) => !form.rawCaptureOnly)
+                ? `توجد ${selectedGroup.forms.filter((form) => !form.rawCaptureOnly).length} نماذج لحقول موصوفة؛ ${selectedGroup.rawCaptureFieldCount} حقلاً خاماً إضافياً متاحاً للمراجعة. نطاق النماذج الموصوفة لا يغطي عناصر المجال كاملة.`
+                : selectedGroup.rawCaptureAvailable ? `أُنشئ نموذج عام يتيح التقاط ${selectedGroup.rawCaptureFieldCount} بنداً كما ورد في المواصفة، دون تحويلها إلى تعريفات أو وحدات أو أبعاد مفترضة.`
+                  : 'يلزم تعريف موثوق قبل إنشاء نموذج دلالي. نقص المنهجيات لا يمنع جمع القيم الخام الواضحة.'}
+              {selectedGroup.rawCaptureAvailable && <p>{selectedGroup.requirementItemCount} بنداً مفهرساً؛ تظهر العناصر غير المحسومة كحقول نصية للمراجعة، ولا تُستخدم في التحليل الرسمي.</p>}
               {!selectedGroup.forms.length && <p>{selectedGroup.fieldCoverageState === 'needs_domain_review'
-                ? `عُثر على ${selectedGroup.fields.length} تعريفات مرشحة تحتاج ربطاً دلالياً؛ يمكن اعتماد نموذج جمع أولي دون إتاحتها للتحليل.`
-                : 'لا توجد تعريفات حقول حالية مرتبطة بهذه المجموعة؛ يمكن بدء النمذجة من مواصفة البيانات المتاحة مع وسم التعريفات التي تحتاج مراجعة.'}</p>}
+                ? `عُثر على ${selectedGroup.fields.length} تعريفات مرشحة تحتاج ربطاً دلالياً؛ لم تُستخدم تلقائياً في النموذج الخام.`
+                : 'لا توجد تعريفات حقول حالية مرتبطة بهذه المجموعة؛ يمكن بدء النموذج الدلالي بعد مراجعة مواصفة البيانات المتاحة.'}</p>}
             </div>
             {selectedGroup.fields?.length > 0 && <div className="quote">
               <strong>حقول موجودة تحتاج مراجعة دلالية ({selectedGroup.fields.length}):</strong>
@@ -354,7 +389,9 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
         </div>
       </Card>
       <Card title={selectedGroup ? `إدخال البيانات — ${selectedGroup.name}` : 'الإدخال اليدوي'} subtitle="تعريفات النماذج والحقول تُقرأ من قاعدة البيانات؛ الحفظ ينشئ مسودة ومصدراً وسجل تغيير لكل تعديل.">
-        {!hasGroupForm ? (
+        {initialEntry.recordId && !editingRecord ? (
+          <div className="quote">فُتح سجل المشروع المركزي المحدد. راجع حالته في قائمة السجلات أدناه؛ إذا كان معتمداً، أعد فتحه للتصحيح ثم اختر «تعديل المسودة». كل تعديل يُحفظ للمراجعة ولا يغيّر سجل المشاريع قبل الاعتماد.</div>
+        ) : !hasGroupForm ? (
           <div className="quote"><ShieldAlert size={17} /> لم يُنشر نموذج جمع لهذه المجموعة بعد. نقص المنهجيات أو المراجع لا يمنع إنشاء نموذج أولي؛ المتاح حالياً هما السكان حسب العمر والجنس وسجل المنشآت التعليمية.</div>
         ) : (
           <form className="stack" onSubmit={submit}>
@@ -363,7 +400,9 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
                 <SelectInput value={formVersionId} onChange={(value) => { cancelEdit(); setFormVersionId(value); }} options={formOptions} />
               </Field>
               {(selectedForm?.collection_mode === 'primary_collection' || Number(selectedForm?.analysis_eligible) === 0) && <div className="quote" role="status">
-                <strong>نموذج جمع أولي — لا اعتماد تحليلي:</strong> يمكن حفظ البيانات ومراجعتها دون انتظار المنهجية أو المصدر الرسمي. لا تُستخدم هذه القيم في المؤشرات أو النتائج الرسمية؛ حالة المنهجية: {selectedForm.methodology_status || 'غير معرّفة'}، حالة التعريف: {selectedForm.definition_status || 'غير محددة'}.
+                <strong>{rawCaptureOnly ? 'جمع خام للمراجعة — غير مصنف وغير مؤهل للتحليل:' : 'نموذج جمع أولي — لا اعتماد تحليلي:'}</strong> {rawCaptureOnly
+                  ? `تُحفظ الإجابة كنص خام مطابق لبند المواصفة، لا كمتغير معرف أو قيمة ذات وحدة أو بُعد معتمد. ${selectedForm.methodology_status || 'المنهجية غير معرّفة'}؛ لا تدخل هذه السجلات التحليل الرسمي.`
+                  : `يمكن حفظ البيانات ومراجعتها دون انتظار المنهجية أو المصدر الرسمي. لا تُستخدم هذه القيم في المؤشرات أو النتائج الرسمية؛ حالة المنهجية: ${selectedForm.methodology_status || 'غير معرّفة'}، حالة التعريف: ${selectedForm.definition_status || 'غير محددة'}.`}
               </div>}
               {definition?.form_code === 'project_funding_v1' && <Field label="مشروع التمويل" required hint="تُعرض المشاريع المعتمدة فقط؛ يُحفظ سجل التمويل تابعاً للمشروع المختار.">
                 <div className="stack tight">
