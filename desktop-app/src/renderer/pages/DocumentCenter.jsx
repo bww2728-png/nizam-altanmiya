@@ -25,6 +25,14 @@ function candidateSourceLabel(candidate) {
   return [candidate.source_file_name,line].filter(Boolean).join(' · ') || 'موضع المصدر غير متاح';
 }
 
+function candidateGroupKey(candidate) {
+  const source = candidate.sourceLocation?.source ?? {};
+  const documentId = String(candidate.source_document_id ?? '');
+  if (source.sheet_name && source.row_number) return `${documentId}:sheet:${source.sheet_name}:row:${source.row_number}`;
+  if (candidate.page_number) return `${documentId}:page:${candidate.page_number}`;
+  return `${documentId}:document`;
+}
+
 function statusLabel(status) {
   return ({ staged: 'محفوظ للمراجعة', processing: 'جارٍ الاستخراج', extracted: 'مستخرج', review: 'بانتظار المراجعة', failed: 'فشل الاستخراج', unavailable: 'المحرك غير جاهز' })[status] ?? status;
 }
@@ -63,6 +71,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
   const [promotionGeoUnitId, setPromotionGeoUnitId] = useState('');
   const [promotionPeriodId, setPromotionPeriodId] = useState('');
   const [promotionPeriodYear, setPromotionPeriodYear] = useState('');
+  const [promotionGroupContexts, setPromotionGroupContexts] = useState({});
   const [promotionRecordLabel, setPromotionRecordLabel] = useState('');
 
   const load = useCallback(async () => {
@@ -80,7 +89,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
       if (page?.restricted || service?.restricted) throw new Error('مركز الوثائق متاح في وضع المالك فقط.');
       setDocuments(page);
       setRagflow(service);
-      setForms((formRows ?? []).filter(form => form.is_active && form.form_version_id && form.version_status === 'published'));
+      setForms((formRows ?? []).filter(form => form.is_active && form.form_version_id && form.version_status === 'published' && !form.form_code.startsWith('raw_collection_v1_')));
       setCatalog(catalogResult);
       setGeography(geographyResult?.rows ?? []);
       setPeriods(periodResult?.rows ?? []);
@@ -120,6 +129,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
     setPromotionGeoUnitId('');
     setPromotionPeriodId('');
     setPromotionPeriodYear('');
+    setPromotionGroupContexts({});
     setPromotionRecordLabel('');
     try {
       const details = await window.localApp.document(documentId);
@@ -149,6 +159,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
     setPromotionFormVersionId(value);
     setPromotionDefinition(null);
     setCandidateMappings({});
+    setPromotionGroupContexts({});
     if (!value) return;
     try {
       const definition = await window.localApp.dataFormDefinition(Number(value));
@@ -171,17 +182,27 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
     setBusyId(selected.document.id);
     setError('');
     try {
+      const candidateGroups = selectedCandidateGroups.map(group => {
+        const context = promotionGroupContexts[group.key] ?? {};
+        return {
+          candidateIds:group.candidates.map(candidate => candidate.id),
+          fieldMappings:Object.fromEntries(group.candidates.map(candidate => [candidate.id,candidateMappings[candidate.id] ?? ''])),
+          geoUnitId:context.geoUnitId || promotionGeoUnitId || null,
+          periodId:context.periodId || (context.periodYear ? null : promotionPeriodId) || null,
+          periodYear:context.periodYear || (context.periodId ? null : promotionPeriodYear) || null,
+          recordLabel:`${selected.document.file_name} · ${group.label}`.slice(0,240),
+        };
+      });
       const result = await window.localApp.promoteDocumentFieldCandidates({
         documentId:selected.document.id,
         formVersionId:Number(promotionFormVersionId),
-        candidateIds,
-        fieldMappings:Object.fromEntries(candidateIds.map(id => [id,candidateMappings[id] ?? ''])),
+        candidateGroups,
         geoUnitId:promotionGeoUnitId || null,
         periodId:promotionPeriodId || null,
         periodYear:promotionPeriodYear.trim() || null,
         recordLabel:promotionRecordLabel.trim() || selected.document.file_name,
       });
-      notify?.({ tone:'ok',message:`أُنشئ السجل المعياري ${fmtNumber(result.formRecordId,0)} وأُرسل للمراجعة والاعتماد؛ لم يصبح معتمدًا بعد.` });
+      notify?.({ tone:'ok',message:`أُنشئت ${fmtNumber(result.recordCount,0)} سجلات جديدة وأُرسلت للمراجعة؛ لم تصبح معتمدة بعد.` });
       setSelectedCandidateIds({});
       setPromotionRecordLabel('');
       await load();
@@ -238,12 +259,30 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
   };
 
   const rows = documents.rows ?? [];
+  const unsupportedCatalogGroups = (catalog?.domains ?? []).flatMap(domain => domain.groups.filter(group => !group.forms.some(form => !form.rawCaptureOnly)).map(group => `${domain.name} · ${group.name}`));
+  const unmodeledCatalogFields = (catalog?.domains ?? []).flatMap(domain => domain.groups.flatMap(group => group.fields
+    .filter(field => !group.publishedFields.some(published => published.code === field.code))
+    .map(field => `${group.name} · ${field.name}`)));
   const reviewedCandidates = (selected?.fieldReview?.rows ?? []).filter(candidate => candidate.review_status === 'reviewed' && !candidate.promoted_form_record_id);
   const selectedPromotionCandidates = reviewedCandidates.filter(candidate => selectedCandidateIds[candidate.id]);
-  const selectedTargetCodes = selectedPromotionCandidates.map(candidate => candidateMappings[candidate.id]).filter(Boolean);
-  const missingRequiredFields = (promotionDefinition?.fields ?? []).filter(field => field.is_required && !selectedTargetCodes.includes(field.field_code));
-  const selectedRequiresPeriod = selectedPromotionCandidates.some(candidate => promotionDefinition?.fields?.find(field => field.field_code === candidateMappings[candidate.id])?.storage_class === 'measurement');
-  const hasPromotionPeriod = Boolean(promotionPeriodId || promotionPeriodYear);
+  const selectedCandidateGroups = [...new Map(selectedPromotionCandidates.map(candidate => [candidateGroupKey(candidate),{
+    key:candidateGroupKey(candidate),candidates:[],label:candidateSourceLabel(candidate),
+  }])).values()];
+  for (const candidate of selectedPromotionCandidates) selectedCandidateGroups.find(group => group.key === candidateGroupKey(candidate)).candidates.push(candidate);
+  const reviewedGroupSummaries = [...new Map(reviewedCandidates.map(candidate => [candidateGroupKey(candidate),{
+    key:candidateGroupKey(candidate),label:candidateSourceLabel(candidate),count:reviewedCandidates.filter(item => candidateGroupKey(item) === candidateGroupKey(candidate)).length,
+  }])).values()];
+  const missingRequiredFields = selectedCandidateGroups.flatMap(group => {
+    const mappedCodes = group.candidates.map(candidate => candidateMappings[candidate.id]).filter(Boolean);
+    return (promotionDefinition?.fields ?? []).filter(field => field.is_required && !mappedCodes.includes(field.field_code))
+      .map(field => `${group.label}: ${field.label_ar}`);
+  });
+  const selectedRequiresPeriod = selectedCandidateGroups.some(group => group.candidates.some(candidate =>
+    promotionDefinition?.fields?.find(field => field.field_code === candidateMappings[candidate.id])?.storage_class === 'measurement'));
+  const groupsMissingPeriod = selectedCandidateGroups.filter(group => group.candidates.some(candidate =>
+    promotionDefinition?.fields?.find(field => field.field_code === candidateMappings[candidate.id])?.storage_class === 'measurement')
+    && !(promotionGroupContexts[group.key]?.periodId || promotionGroupContexts[group.key]?.periodYear || promotionPeriodId || promotionPeriodYear));
+  const hasPromotionPeriod = groupsMissingPeriod.length === 0;
   const hasUnmappedSelectedCandidates = selectedPromotionCandidates.some(candidate => !candidateMappings[candidate.id]);
   const totalPages = Math.max(1, Math.ceil((documents.total ?? 0) / PAGE_SIZE));
   const page = Math.floor((documents.offset ?? 0) / PAGE_SIZE) + 1;
@@ -290,8 +329,8 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
         </div>}
       </Card>
 
-      <Card title="الوثائق المحفوظة" subtitle="الأصل محفوظ داخل قاعدة البيانات المحلية، وهي ملف SQLite غير مشفّر يمكن فتحه بأي أداة SQLite. يُستخرج نص Word محليًا؛ أما PDF والصور فتحتاج إلى محركات معالجة محلية إضافية." actions={<button className="btn small ghost" onClick={load} disabled={loading}><RefreshCw size={14} /> تحديث</button>}>
-        {loading && !documents.rows ? <Loading /> : rows.length === 0 ? <Empty icon={FileText} title="لا توجد وثائق بعد" hint="أضف ملف PDF أو Word بصيغة DOCX أو صورة لبدء المكتبة المحلية." /> : <div className="stack">
+      <Card title="الوثائق المحفوظة" subtitle="الأصل محفوظ داخل قاعدة البيانات المحلية غير المشفّرة. يُقرأ Excel محليًا بواسطة ExcelJS؛ أما PDF والصور فتحتاج إلى محركات معالجة محلية إضافية." actions={<button className="btn small ghost" onClick={load} disabled={loading}><RefreshCw size={14} /> تحديث</button>}>
+        {loading && !documents.rows ? <Loading /> : rows.length === 0 ? <Empty icon={FileText} title="لا توجد وثائق بعد" hint="أضف ملف Excel XLSX/XLSM أو PDF أو DOCX أو صورة لبدء المكتبة المحلية." /> : <div className="stack">
           {rows.map(document => <article className="quote stack tight" key={document.id}>
             <div className="row between" style={{ flexWrap: 'wrap' }}>
               <button className="btn small ghost" onClick={() => openDocument(document.id)}><FileText size={14} />{document.file_name}</button>
@@ -314,10 +353,10 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
           <div><h3>حقول مقترحة للمراجعة</h3><p className="muted">المقترحات مستخرجة من أدلة الوثائق فقط. مراجعتها هنا لا تعتمدها ولا تغيّر قاعدة البيانات الرسمية.</p>
             <div className="chip-row"><Badge>{fmtNumber(selected.fieldReview.run.searched_count, 0)} حقلاً جرى فحصه</Badge><Badge tone="ok">{fmtNumber(selected.fieldReview.run.evidence_count, 0)} دليلًا</Badge><Badge tone="neutral">{fmtNumber(selected.fieldReview.run.no_evidence_count, 0)} بلا دليل</Badge></div>
           </div>
-          {(catalog?.domains ?? []).some(domain => domain.groups.some(group => !group.forms.length)) && <details className="quote" style={{ marginBottom: 16 }}>
-            <summary>مجالات غير متاحة للإدخال لعدم نشر نموذج ({fmtNumber((catalog?.domains ?? []).flatMap(domain => domain.groups).filter(group => !group.forms.length).length, 0)})</summary>
-            <p className="muted">لن تُحوّل الاقتراحات لهذه المجموعات إلى حقول إدخال أو سجلات حتى يُنشر نموذج مناسب.</p>
-            <div className="chip-row">{(catalog?.domains ?? []).flatMap(domain => domain.groups.filter(group => !group.forms.length).map(group => `${domain.name} · ${group.name}`)).map(label => <Badge key={label} tone="warn">{label}</Badge>)}</div>
+          {(unsupportedCatalogGroups.length > 0 || unmodeledCatalogFields.length > 0) && <details className="quote" style={{ marginBottom: 16 }}>
+            <summary>مجالات وحقول غير متاحة للإدخال لعدم نشر نموذج ({fmtNumber(unsupportedCatalogGroups.length + unmodeledCatalogFields.length, 0)})</summary>
+            <p className="muted">لن تُحوّل الاقتراحات لهذه المجموعات أو الحقول إلى سجلات حتى يُنشر نموذج إدخال مناسب.</p>
+            <div className="chip-row">{unsupportedCatalogGroups.map(label => <Badge key={label} tone="warn">{label}</Badge>)}{unmodeledCatalogFields.map(label => <Badge key={label} tone="warn">{label}</Badge>)}</div>
           </details>}
           {(selected.fieldReview.rows ?? []).filter(candidate => candidate.review_status === 'pending').map(candidate => <article className="quote stack tight" key={candidate.id}>
             <div className="row between" style={{ flexWrap: 'wrap' }}><strong>{candidate.field_label_ar}</strong><Badge>{candidateStatusLabel(candidate.review_status)}</Badge></div>
@@ -327,12 +366,12 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
             <label className="stack tight"><span>سبب قرار المراجعة (مطلوب)</span><input className="input" value={candidateNotes[candidate.id] ?? ''} onChange={event => setCandidateNotes(current => ({ ...current, [candidate.id]: event.target.value }))} maxLength={1000} /></label>
             <div className="row"><button className="btn small primary" onClick={() => reviewCandidate(candidate, 'reviewed')} disabled={busyId === selected.document.id || !(candidateNotes[candidate.id] ?? '').trim()}>تسجيل المراجعة</button><button className="btn small ghost" onClick={() => reviewCandidate(candidate, 'rejected')} disabled={busyId === selected.document.id || !(candidateNotes[candidate.id] ?? '').trim()}>رفض المرشح</button><span className="muted">لا يُرحّل إلى البيانات الرسمية تلقائيًا.</span></div>
           </article>)}
-          {reviewedCandidates.length > 0 && <section className="stack" style={{ marginBottom: 18 }}>
-            <div><h3>إنشاء سجل معياري من القيم المراجَعة</h3><p className="muted">اختر الحقول بعد التحقق من قيمها واربطها بنموذج منشور. سيُنشأ سجل «قيد المراجعة» فقط؛ لا تصبح القيم رسمية حتى يعتمدها المراجع في شاشة الإدخال المركزي.</p></div>
+          <section className="stack" style={{ marginBottom: 18 }}>
+            <div><h3>معاينة نموذج الإدخال وربط القيم المراجَعة</h3><p className="muted">اختر نموذجاً منشوراً لرؤية جميع حقوله ومقارنة ما عُثر عليه في الملف. سيُنشأ سجل جديد «قيد المراجعة» بعد اختيار القيم المراجَعة؛ لا يصبح معتمداً حتى يعتمد وفق المسار المركزي.</p></div>
             <label className="stack tight"><span>النموذج المستهدف</span><select className="input" value={promotionFormVersionId} onChange={event => choosePromotionForm(event.target.value)}><option value="">— اختر نموذجًا منشورًا —</option>{forms.map(form => <option key={form.form_version_id} value={form.form_version_id}>{form.form_code} — {form.name_ar}</option>)}</select></label>
             {promotionFormVersionId && promotionDefinition && <section className="stack" aria-label="معاينة نموذج الإدخال" style={{ marginBottom: 16 }}>
               <h4>معاينة نموذج الإدخال ونتائج البحث</h4>
-              <div className="quote">كل حقل هنا مرتبط بدليل الملف عند العثور عليه. القيم البديلة لا تُعتمد تلقائياً؛ افتح الدليل وراجع المصدر قبل اختيارها.</div>
+              <div className="quote">درجة المطابقة تقدير أولي لمدى تطابق العنوان مع الحقل، وليست ضماناً لصحة الرقم. راجع المقتطف والمصدر؛ القيم البديلة لا تُعتمد تلقائياً.</div>
               <div className="table-wrap"><table className="data"><thead><tr><th>حقل النموذج</th><th>القيمة المقترحة / الحالة</th><th>المصدر والمقتطف</th><th>الثقة</th></tr></thead>
                 <tbody>{promotionDefinition.fields.filter(field => field.field_code.split('.').at(-1) !== 'decision').map(field => {
                   const evidence = (selected.fieldReview?.rows ?? []).filter(candidate => candidate.field_code === field.field_code || candidateMappings[candidate.id] === field.field_code);
@@ -348,8 +387,12 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
               </table></div>
             </section>}
             {promotionFormVersionId && <form className="stack" onSubmit={event => { event.preventDefault(); promoteReviewedCandidates(); }}>
+              {reviewedGroupSummaries.length > 0 && <div className="stack tight"><div className="quote stack tight"><strong>السجلات/الصفوف المكتشفة ({fmtNumber(reviewedGroupSummaries.length,0)}):</strong><div className="chip-row">{reviewedGroupSummaries.map(group => <Badge key={group.key} tone={selectedCandidateGroups.some(selectedGroup => selectedGroup.key === group.key) ? 'ok' : 'neutral'}>{group.label} · {fmtNumber(group.count,0)} حقول مراجعة</Badge>)}</div><span className="muted">يمكن إنشاء سجل مستقل لكل صف Excel أو صفحة أو وثيقة. لكل سجل موقعه وفترته؛ القيم العامة أدناه افتراضية، ويمكن تخصيصها لكل سجل.</span></div>{selectedCandidateGroups.map(group => {
+                const context = promotionGroupContexts[group.key] ?? {};
+                return <article className="quote stack tight" key={group.key}><strong>سياق السجل: {group.label}</strong><div className="grid-2"><label className="stack tight"><span>الوحدة الجغرافية لهذا السجل</span><select className="input" value={context.geoUnitId ?? ''} onChange={event => setPromotionGroupContexts(current => ({ ...current,[group.key]:{ ...(current[group.key] ?? {}),geoUnitId:event.target.value } }))}><option value="">استخدم الموقع العام أدناه</option>{geography.filter(unit => unit.is_active).map(unit => <option key={unit.geo_unit_id} value={unit.geo_unit_id}>{unit.type_name_ar} — {unit.name_ar}{unit.parent_name_ar ? ` / ${unit.parent_name_ar}` : ''}</option>)}</select></label><label className="stack tight"><span>الفترة لهذا السجل</span><select className="input" value={context.periodId ?? ''} onChange={event => setPromotionGroupContexts(current => ({ ...current,[group.key]:{ ...(current[group.key] ?? {}),periodId:event.target.value,periodYear:'' } }))}><option value="">استخدم الفترة العامة أدناه</option>{periods.map(period => <option key={period.period_id} value={period.period_id}>{period.label_ar}</option>)}</select></label><label className="stack tight"><span>أو سنة لهذا السجل</span><input className="input" type="number" min="1900" max="2200" step="1" value={context.periodYear ?? ''} onChange={event => setPromotionGroupContexts(current => ({ ...current,[group.key]:{ ...(current[group.key] ?? {}),periodYear:event.target.value,periodId:'' } }))} placeholder="استخدم السنة العامة أدناه" /></label></div></article>;
+              })}</div>}
               {reviewedCandidates.map(candidate => {
-                const compatibleFields = (promotionDefinition?.fields ?? []).filter(field => compatibleFieldType(candidate.data_type,field.data_type_override ?? field.data_type) && field.is_importable && !field.is_derived && field.storage_class !== 'ignored_derived');
+                const compatibleFields = (promotionDefinition?.fields ?? []).filter(field => field.field_code === candidate.field_code && compatibleFieldType(candidate.data_type,field.data_type_override ?? field.data_type) && field.is_importable && !field.is_derived && field.storage_class !== 'ignored_derived');
                 return <article className="quote stack tight" key={candidate.id}>
                   <label className="row"><input type="checkbox" checked={Boolean(selectedCandidateIds[candidate.id])} onChange={event => setSelectedCandidateIds(current => ({ ...current,[candidate.id]:event.target.checked }))} /><strong>{candidate.field_label_ar}</strong><Badge>{candidate.data_type}</Badge></label>
                   <label className="stack tight"><span>العمود/الحقل المعياري المطابق</span><select className="input" value={candidateMappings[candidate.id] ?? ''} onChange={event => setCandidateMappings(current => ({ ...current,[candidate.id]:event.target.value }))}><option value="">— اختر الحقل المطابق —</option>{compatibleFields.map(field => <option key={field.form_field_id} value={field.field_code}>{field.label_ar} · {field.field_code}</option>)}</select></label>
@@ -362,11 +405,11 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
                 <label className="stack tight"><span>أو سنة ميلادية جديدة</span><input className="input" type="number" min="1900" max="2200" step="1" value={promotionPeriodYear} onChange={event => { setPromotionPeriodYear(event.target.value); setPromotionPeriodId(''); }} placeholder="2025" /></label>
                 <label className="stack tight"><span>عنوان السجل</span><input className="input" value={promotionRecordLabel} onChange={event => setPromotionRecordLabel(event.target.value)} maxLength={240} placeholder={selected.document.file_name} /></label>
               </div>
-              {selectedPromotionCandidates.length > 0 && missingRequiredFields.length > 0 && <div className="quote">النموذج يتطلب حقولًا لم تُربط بمرشحين مراجَعين: {missingRequiredFields.map(field => field.label_ar).join('، ')}.</div>}
+              {selectedPromotionCandidates.length > 0 && missingRequiredFields.length > 0 && <div className="quote">النموذج يتطلب حقولًا لم تُربط بمرشحين مراجَعين: {missingRequiredFields.join('، ')}.</div>}
               {selectedRequiresPeriod && !hasPromotionPeriod && <div className="quote">اختر فترة مرجعية أو سنة للقياسات المختارة.</div>}
               <button className="btn small primary" type="submit" disabled={busyId === selected.document.id || selectedPromotionCandidates.length === 0 || hasUnmappedSelectedCandidates || missingRequiredFields.length > 0 || (selectedRequiresPeriod && !hasPromotionPeriod)}><Check size={14} /> إنشاء السجل وإرساله للمراجعة ({fmtNumber(selectedPromotionCandidates.length,0)})</button>
             </form>}
-          </section>}
+          </section>
           {(selected.fieldReview.rows ?? []).some(candidate => ['reviewed','rejected'].includes(candidate.review_status)) && <details><summary>قرارات المراجعة السابقة ({fmtNumber((selected.fieldReview.rows ?? []).filter(candidate => ['reviewed','rejected'].includes(candidate.review_status)).length, 0)})</summary><div className="stack" style={{ marginTop: 10 }}>{(selected.fieldReview.rows ?? []).filter(candidate => ['reviewed','rejected'].includes(candidate.review_status)).map(candidate => <article className="quote stack tight" key={candidate.id}><div className="row between"><strong>{candidate.field_label_ar}</strong><Badge>{candidateStatusLabel(candidate.review_status)}</Badge></div>{candidate.promoted_form_record_id && <Badge tone="ok">مرتبطة بالسجل المعياري {fmtNumber(candidate.promoted_form_record_id,0)}</Badge>}{candidate.reviewedValue?.value && <span>القيمة التي راجعها المستخدم: {candidate.reviewedValue.value}</span>}<span>السبب: {candidate.review_note}</span><span className="muted">المراجع: {candidate.reviewed_by ?? 'غير مسجل'} · {fmtDateTime(candidate.reviewed_at)}</span></article>)}</div></details>}
           {(selected.fieldReview.rows ?? []).some(candidate => candidate.review_status === 'no_evidence') && <details><summary>الحقول التي لم يظهر لها دليل ({fmtNumber((selected.fieldReview.rows ?? []).filter(candidate => candidate.review_status === 'no_evidence').length, 0)})</summary><div className="chip-row" style={{ marginTop: 10 }}>{(selected.fieldReview.rows ?? []).filter(candidate => candidate.review_status === 'no_evidence').map(candidate => <Badge key={candidate.id}>{candidate.field_label_ar}</Badge>)}</div></details>}
         </section>}

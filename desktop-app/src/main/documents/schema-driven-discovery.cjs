@@ -101,6 +101,14 @@ function parseJson(value, fallback) {
   try { return value ? JSON.parse(value) : fallback; } catch { return fallback; }
 }
 
+function candidateRecordGroupKey(candidate) {
+  const source = parseJson(candidate.source_location_json,{}).source ?? {};
+  const documentId = String(candidate.source_document_id ?? '');
+  if (source.sheet_name && source.row_number) return `${documentId}:sheet:${source.sheet_name}:row:${source.row_number}`;
+  if (candidate.page_number) return `${documentId}:page:${candidate.page_number}`;
+  return `${documentId}:document`;
+}
+
 function aliasesFor(database, field) {
   const aliases = new Set([field.label_ar, field.field_key, field.field_code].map(normalizeSearchText).filter((value) => value.length >= 2));
   if (field.field_definition_id) {
@@ -135,7 +143,7 @@ function fieldRegistry(database) {
     unit.name_ar AS unit,form_field.storage_class AS field_class,definition.description
     FROM form_fields form_field
     JOIN form_versions version ON version.form_version_id=form_field.form_version_id AND version.status='published'
-    JOIN form_definitions form ON form.form_id=version.form_id
+    JOIN form_definitions form ON form.form_id=version.form_id AND form.form_code NOT LIKE 'raw_collection_v1_%'
     LEFT JOIN field_definitions definition ON definition.field_definition_id=form_field.field_definition_id
     LEFT JOIN measurement_units unit ON unit.unit_id=form_field.unit_id
     WHERE form_field.is_importable=1 AND form_field.is_derived=0 AND form_field.storage_class<>'ignored_derived'
@@ -383,6 +391,23 @@ function reviewCandidate(database, request = {}) {
   return { candidateId, status, reviewedBy, reviewedAt: now, officialDataChanged: false, updatedAt: now };
 }
 
+function promoteReviewedCandidateGroups(database, request = {}, options = {}) {
+  const groups = Array.isArray(request.candidateGroups) ? request.candidateGroups : [];
+  if (groups.length === 0 || groups.length > 100) throw new Error('حدد مجموعة سجل واحدة على الأقل وبحد أقصى 100 مجموعة.');
+  const saveAll = database.transaction(() => groups.map(group => promoteReviewedCandidates(database,{
+    ...request,
+    candidateGroups:undefined,
+    candidateIds:group.candidateIds,
+    fieldMappings:group.fieldMappings,
+    geoUnitId:group.geoUnitId ?? request.geoUnitId,
+    periodId:group.periodId ?? request.periodId,
+    periodYear:group.periodYear ?? request.periodYear,
+    recordLabel:String(group.recordLabel ?? request.recordLabel ?? '').trim().slice(0,240) || null,
+  },options)));
+  const records = saveAll();
+  return { records, recordCount:records.length, fieldCount:records.reduce((total,record) => total + record.fieldCount,0) };
+}
+
 function promoteReviewedCandidates(database, request = {}, options = {}) {
   const documentId = String(request.documentId ?? '');
   const formVersionId = Number(request.formVersionId);
@@ -412,6 +437,8 @@ function promoteReviewedCandidates(database, request = {}, options = {}) {
       throw new Error('اختر مرشحًا واحدًا فقط لكل حقل في السجل.');
     }
     const definition = recordService.getFormDefinition(database,formVersionId);
+    if (definition.form_code.startsWith('raw_collection_v1_')) throw new Error('لا يمكن ترحيل المرشحين إلى نموذج التقاط خام غير مصنف.');
+    if (new Set(candidates.map(candidateRecordGroupKey)).size !== 1) throw new Error('اختر القيم من صف أو صفحة مصدر واحدة لكل سجل جديد.');
     const fields = new Map(definition.fields.map((field) => [field.field_code,field]));
     const mappings = request.fieldMappings && typeof request.fieldMappings === 'object' && !Array.isArray(request.fieldMappings) ? request.fieldMappings : {};
     const values = {};
@@ -422,6 +449,7 @@ function promoteReviewedCandidates(database, request = {}, options = {}) {
       const targetCode = String(mappings[candidate.id] ?? candidate.field_code);
       const field = fields.get(targetCode);
       if (!field) throw new Error(`اربط الحقل «${candidate.field_label_ar}» بحقل موجود في النموذج المحدد.`);
+      if (targetCode !== candidate.field_code) throw new Error(`لا يمكن ربط المرشح «${candidate.field_label_ar}» بحقل مختلف دون مطابقة دلالية معتمدة.`);
       const targetType = field.data_type_override ?? field.data_type;
       if (!compatibleDataTypes(targetType,candidate.data_type)) throw new Error(`نوع الحقل «${field.label_ar}» لا يطابق نوع الحقل المستخرج «${candidate.data_type}».`);
       if (!field.is_importable || field.is_derived || field.storage_class === 'ignored_derived') {
@@ -444,6 +472,11 @@ function promoteReviewedCandidates(database, request = {}, options = {}) {
           sha256:candidate.source_sha256,
           pageNumber:candidate.page_number,
           elementId:candidate.source_element_id,
+          sourceLocation:parseJson(candidate.source_location_json,{}),
+          evidenceText:candidate.evidence_text,
+          rawValue:candidate.raw_value,
+          suggestedValue:candidate.suggested_value,
+          confidence:candidate.confidence,
           retrievalMethod:candidate.retrieval_method,
           retrievalReference:parseJson(candidate.retrieval_reference_json,{}),
           candidateId:candidate.id,
@@ -484,4 +517,5 @@ module.exports = {
   listCandidates,
   reviewCandidate,
   promoteReviewedCandidates,
+  promoteReviewedCandidateGroups,
 };

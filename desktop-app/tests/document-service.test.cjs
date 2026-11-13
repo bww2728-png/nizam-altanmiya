@@ -117,9 +117,12 @@ test('document center maps reviewed candidates through protected IPC without exp
   const mainSource = fs.readFileSync(path.join(__dirname, '../src/main/main.cjs'), 'utf8');
   assert.doesNotMatch(interfaceSource, /RAGFlow|API key|مفتاح API|Bearer API|معرّف مجموعة/);
   assert.match(interfaceSource, /promoteDocumentFieldCandidates/);
-  assert.match(interfaceSource, /لا تصبح القيم رسمية حتى يعتمدها المراجع/);
+  assert.match(interfaceSource, /candidateGroups/);
+  assert.match(interfaceSource, /لا يصبح معتمداً حتى يعتمد وفق المسار المركزي/);
+  assert.match(interfaceSource, /!form\.form_code\.startsWith\('raw_collection_v1_'\)/);
   assert.match(preloadSource, /promoteDocumentFieldCandidates: \(request\) => ipcRenderer\.invoke\('documents:field-candidates:promote', request\)/);
   assert.match(mainSource, /ipcMain\.handle\('documents:field-candidates:promote'[\s\S]*currentProfile\(\) !== 'owner'/);
+  assert.match(mainSource, /promoteReviewedCandidateGroups/);
   assert.doesNotMatch(preloadSource, /saveRagflowConfig|ragflow:save-config/);
 });
 

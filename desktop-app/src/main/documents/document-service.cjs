@@ -391,6 +391,7 @@ async function extractXlsxFile(filePath) {
   await workbook.xlsx.readFile(filePath);
   const elements = [];
   const warnings = [];
+  let totalContentBytes = 0;
   let skippedFormulaCells = 0;
   for (const worksheet of workbook.worksheets.slice(0, 200)) {
     const headers = new Map();
@@ -426,10 +427,13 @@ async function extractXlsxFile(filePath) {
       }
       if (!lines.length) continue;
       if (elements.length >= 50000) throw new Error('تجاوز عدد صفوف Excel حد الاستخراج الآمن.');
+      const content = lines.join('\n');
+      totalContentBytes += Buffer.byteLength(content);
+      if (totalContentBytes > MAX_OUTPUT_BYTES / 2) throw new Error('تجاوز حجم النص المستخرج من Excel الحد الآمن.');
       elements.push({
         type: 'spreadsheet-row',
         heading: worksheet.name,
-        content: lines.join('\n'),
+        content,
         source: { file_name: path.basename(filePath), sheet_name: worksheet.name, row_number: rowNumber, header_row: headerRow, cells: locations },
       });
     }
