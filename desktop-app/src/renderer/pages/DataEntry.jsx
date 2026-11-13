@@ -12,7 +12,7 @@ const VALUE_STATE_LABELS = {
   not_applicable: 'لا ينطبق', not_collected: 'لم يُجمع', not_verified: 'غير متحقق منه',
 };
 
-export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onShowDatabase }) {
+export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onShowDatabase, initialEntry = {} }) {
   const [catalog, setCatalog] = useState(null);
   const [selectedDomainCode, setSelectedDomainCode] = useState('');
   const [selectedGroupCode, setSelectedGroupCode] = useState('');
@@ -28,6 +28,7 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   const [recordSearch, setRecordSearch] = useState('');
   const [recordStatus, setRecordStatus] = useState('all');
   const [recordFormVersionId, setRecordFormVersionId] = useState('');
+  const [recordFormRecordId, setRecordFormRecordId] = useState('');
   const [recordOffset, setRecordOffset] = useState(0);
   const [recordTotal, setRecordTotal] = useState(0);
   const [values, setValues] = useState({});
@@ -98,6 +99,7 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
     try {
       const result = await window.localApp.dataRecords({
         formVersionId: recordFormVersionId || undefined,
+        formRecordId: recordFormRecordId || undefined,
         status: recordStatus === 'all' ? undefined : recordStatus,
         search: recordSearch,
         offset: recordOffset,
@@ -108,9 +110,32 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
     } catch (cause) {
       notify({ tone: 'bad', message: errText(cause) || 'تعذر تحميل السجلات.' });
     }
-  }, [notify, recordFormVersionId, recordOffset, recordSearch, recordStatus]);
+  }, [notify, recordFormRecordId, recordFormVersionId, recordOffset, recordSearch, recordStatus]);
 
   useEffect(() => { loadForms(); }, [loadForms]);
+  useEffect(() => {
+    if (!catalog || !forms.length) return;
+    const domain = catalog.domains.find((item) => item.code === initialEntry.domainCode);
+    const group = domain?.groups.find((item) => item.code === initialEntry.groupCode)
+      ?? catalog.domains.flatMap((item) => item.groups).find((item) => item.code === initialEntry.groupCode);
+    if (domain) setSelectedDomainCode(domain.code);
+    if (group) {
+      setSelectedGroupCode(group.code);
+      const groupForm = group.forms.find((item) => item.code === initialEntry.formCode && item.versionId);
+      if (groupForm) setFormVersionId(String(groupForm.versionId));
+    }
+    const form = forms.find((item) => item.form_code === initialEntry.formCode && item.version_status === 'published');
+    if (form) {
+      setFormVersionId(String(form.form_version_id));
+      setRecordFormVersionId(initialEntry.recordId ? String(form.form_version_id) : '');
+    }
+    if (initialEntry.recordId) {
+      setRecordFormRecordId(String(initialEntry.recordId));
+      setRecordStatus('all');
+      setRecordOffset(0);
+    }
+    if (initialEntry.parentRecordId) setParentRecordId(String(initialEntry.parentRecordId));
+  }, [catalog, forms, initialEntry.domainCode, initialEntry.groupCode, initialEntry.formCode, initialEntry.recordId, initialEntry.parentRecordId]);
   useEffect(() => { loadRecords(); }, [loadRecords, refreshKey]);
 
   useEffect(() => {
@@ -131,7 +156,9 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
         setGeoUnitId(record?.record?.geo_unit_id == null ? '' : String(record.record.geo_unit_id));
         setPeriodId(record?.record?.period_id == null ? '' : String(record.record.period_id));
         setPeriodYear(record?.record?.period_year == null ? '' : String(record.record.period_year));
-        setParentRecordId(record?.record?.parent_record_id == null ? '' : String(record.record.parent_record_id));
+        setParentRecordId(record?.record?.parent_record_id == null
+          ? (initialEntry.formCode === 'project_funding_v1' ? String(initialEntry.parentRecordId ?? '') : '')
+          : String(record.record.parent_record_id));
         setChangeReason('');
       })
       .catch((cause) => notify({ tone: 'bad', message: errText(cause) || 'تعذر تحميل النموذج.' }));
@@ -147,7 +174,7 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
     let active = true;
     window.localApp.dataProjectParents({
       search: projectParentSearch,
-      parentRecordId: editingRecord?.record?.parent_record_id ?? undefined,
+      parentRecordId: editingRecord?.record?.parent_record_id ?? initialEntry.parentRecordId ?? undefined,
       offset: projectParentOffset,
       limit: 50,
     }).then((result) => {
@@ -158,7 +185,7 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
       if (active) notify({ tone: 'bad', message: errText(cause) || 'تعذر تحميل المشاريع المعتمدة لربط التمويل.' });
     });
     return () => { active = false; };
-  }, [definition?.form_code,editingRecord,notify,projectFormVersionId,projectParentOffset,projectParentSearch]);
+  }, [definition?.form_code,editingRecord,initialEntry.parentRecordId,notify,projectFormVersionId,projectParentOffset,projectParentSearch]);
 
   const beginEdit = async (formRecordId) => {
     try {
@@ -362,7 +389,9 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
         </div>
       </Card>
       <Card title={selectedGroup ? `إدخال البيانات — ${selectedGroup.name}` : 'الإدخال اليدوي'} subtitle="تعريفات النماذج والحقول تُقرأ من قاعدة البيانات؛ الحفظ ينشئ مسودة ومصدراً وسجل تغيير لكل تعديل.">
-        {!hasGroupForm ? (
+        {initialEntry.recordId && !editingRecord ? (
+          <div className="quote">فُتح سجل المشروع المركزي المحدد. راجع حالته في قائمة السجلات أدناه؛ إذا كان معتمداً، أعد فتحه للتصحيح ثم اختر «تعديل المسودة». كل تعديل يُحفظ للمراجعة ولا يغيّر سجل المشاريع قبل الاعتماد.</div>
+        ) : !hasGroupForm ? (
           <div className="quote"><ShieldAlert size={17} /> لم يُنشر نموذج جمع لهذه المجموعة بعد. نقص المنهجيات أو المراجع لا يمنع إنشاء نموذج أولي؛ المتاح حالياً هما السكان حسب العمر والجنس وسجل المنشآت التعليمية.</div>
         ) : (
           <form className="stack" onSubmit={submit}>

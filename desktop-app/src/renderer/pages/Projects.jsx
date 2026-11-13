@@ -3,7 +3,7 @@ import { Briefcase, Plus, RefreshCw, Search } from 'lucide-react';
 import { Badge, Card, Empty, ErrorBanner, Loading, Modal } from '../components/ui.jsx';
 import { errText, fmtDate, fmtDateTime, fmtNumber } from '../lib/format.js';
 
-export default function Projects({ notify, refreshKey }) {
+export default function Projects({ notify, refreshKey, onNavigate }) {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [searchInput, setSearchInput] = useState('');
@@ -16,77 +16,42 @@ export default function Projects({ notify, refreshKey }) {
   const [selectedId, setSelectedId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [references, setReferences] = useState({ geographicUnits: [], sectors: [] });
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editorBusy, setEditorBusy] = useState(false);
-  const [editorError, setEditorError] = useState('');
-  const [form, setForm] = useState(emptyProjectForm());
-  const [fundingForm, setFundingForm] = useState({ partner_name: '', amount: '', currency_code: '', funding_date: '' });
-  const [fundingError, setFundingError] = useState('');
-  const [fundingBusy, setFundingBusy] = useState(false);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [exportingAttachmentId, setExportingAttachmentId] = useState(null);
   const [qualityResolutions, setQualityResolutions] = useState({});
   const [qualityBusyId, setQualityBusyId] = useState(null);
 
-  useEffect(() => {
-    window.localApp.canonicalProjectReferences()
-      .then(result => setReferences(result ?? { geographicUnits: [], sectors: [] }))
-      .catch(cause => setEditorError(errText(cause) || 'تعذر تحميل المراجع.'));
-  }, []);
+  const openProjectEntry = (entry) => onNavigate?.('data-entry', { entry });
 
-  const openEditor = (project = null) => {
-    setForm(project ? {
-      id: project.id,
-      name: project.name ?? '',
-      code: project.code ?? '',
-      description: project.description ?? '',
-      status: project.status ?? 'draft',
-      estimated_cost: project.estimated_cost ?? '',
-      actual_cost: project.actual_cost ?? '',
-      currency_code: project.currency_code ?? '',
-      start_date: project.start_date ?? '',
-      end_date: project.end_date ?? '',
-      geographic_unit_id: project.geographic_unit_id ?? '',
-      sector_id: project.sector_id ?? '',
-    } : emptyProjectForm());
-    setEditorError('');
-    setEditorOpen(true);
-  };
-
-  const saveProject = async (event) => {
-    event.preventDefault();
-    setEditorBusy(true);
-    setEditorError('');
+  const editProject = async (id) => {
     try {
-      const result = await window.localApp.saveCanonicalProject(form);
-      setEditorOpen(false);
-      notify?.({ tone: 'ok', message: result.action === 'created' ? 'تم إنشاء المشروع وحفظ مصدر الإدخال.' : 'تم تحديث المشروع وحفظ نسخة سابقة.' });
-      await load();
-      if (selectedId) setDetail(await window.localApp.canonicalProject(selectedId));
+      const result = await window.localApp.canonicalProject(id);
+      if (!result.project.form_record_id) {
+        notify?.({ tone: 'warn', message: 'هذا المشروع القديم غير مرتبط بسجل إدخال مركزي؛ لم يُنشأ سجل مكرر.' });
+        return;
+      }
+      openProjectEntry({
+        domainCode: 'projects-finance-revenues',
+        groupCode: 'projects',
+        formCode: 'project_v1',
+        recordId: result.project.form_record_id,
+      });
     } catch (cause) {
-      setEditorError(errText(cause) || 'تعذر حفظ المشروع.');
-    } finally {
-      setEditorBusy(false);
+      setError(errText(cause) || 'تعذر فتح سجل المشروع المركزي للتعديل.');
     }
   };
 
-  const saveFunding = async (event) => {
-    event.preventDefault();
-    if (!selectedId) return;
-    setFundingBusy(true);
-    setFundingError('');
-    try {
-      await window.localApp.addProjectFunding({ projectId: selectedId, ...fundingForm });
-      setFundingForm({ partner_name: '', amount: '', currency_code: '', funding_date: '' });
-      setDetail(await window.localApp.canonicalProject(selectedId));
-      await load();
-      notify?.({ tone: 'ok', message: 'تم تسجيل التمويل ومصدره.' });
-    } catch (cause) {
-      setFundingError(errText(cause) || 'تعذر تسجيل التمويل.');
-    } finally {
-      setFundingBusy(false);
+  const addFunding = () => {
+    if (!detail?.project?.form_record_id) {
+      notify?.({ tone: 'warn', message: 'لا يمكن ربط التمويل بهذا المشروع بسجل مركزي؛ لم يُحفظ أي تمويل.' });
+      return;
     }
+    openProjectEntry({
+      domainCode: 'projects-finance-revenues',
+      groupCode: 'project-funding',
+      formCode: 'project_funding_v1',
+      parentRecordId: detail.project.form_record_id,
+    });
   };
 
   const addAttachment = async () => {
@@ -181,15 +146,6 @@ export default function Projects({ notify, refreshKey }) {
     }
   };
 
-  const editProject = async (id) => {
-    try {
-      const result = await window.localApp.canonicalProject(id);
-      openEditor(result.project);
-    } catch (cause) {
-      setError(errText(cause) || 'تعذر تحميل بيانات المشروع للتحرير.');
-    }
-  };
-
   const submitSearch = (event) => {
     event?.preventDefault?.();
     setOffset(0);
@@ -209,8 +165,8 @@ export default function Projects({ notify, refreshKey }) {
         icon={Briefcase}
         actions={(
           <div className="btn-row">
-            <button className="btn small primary" onClick={() => openEditor()} disabled={restricted}>
-              <Plus size={14} /> مشروع جديد
+            <button className="btn small primary" onClick={() => openProjectEntry({ domainCode: 'projects-finance-revenues', groupCode: 'projects', formCode: 'project_v1' })} disabled={restricted}>
+              <Plus size={14} /> مشروع جديد في الإدخال المركزي
             </button>
             <button className="btn small ghost" onClick={load} disabled={loading}>
               <RefreshCw size={14} /> تحديث
@@ -301,7 +257,7 @@ export default function Projects({ notify, refreshKey }) {
                         <td className="nowrap dim" style={{ fontSize: '0.76rem' }}>{fmtDateTime(row.updated_at)}</td>
                         <td>
                           <div className="btn-row">
-                            <button className="btn small ghost" onClick={() => editProject(row.id)}>تعديل</button>
+                            <button className="btn small ghost" onClick={() => editProject(row.id)}>فتح الإدخال المركزي</button>
                             <button className="btn small ghost" onClick={() => openDetails(row.id)}>التفاصيل</button>
                           </div>
                         </td>
@@ -324,50 +280,15 @@ export default function Projects({ notify, refreshKey }) {
       )}
 
       {!restricted && (
-        <Card title="بيانات المشروع ومصدرها" subtitle="الإدخال اليدوي والتمويل والمرفقات وتسوية ملاحظات المشروع تحفظ المصدر وسجل التغيير.">
+        <Card title="بيانات المشروع ومصدرها" subtitle="إنشاء المشاريع والتعديلات والتمويل تمر من مركز الإدخال وتخضع للمراجعة؛ المرفقات وتسوية ملاحظات الجودة تبقى من هذه الشاشة.">
           <div className="chip-row">
-            <span className="chip">البيانات محفوظة في قاعدة المشاريع المعيارية</span>
+            <span className="chip">إنشاء وتعديل وتمويل عبر الإدخال المركزي</span>
             <span className="chip">مصدر وموضع الصف محفوظان عند الاستيراد</span>
             <span className="chip">التكاليف والتمويل بعملة صريحة</span>
             <span className="chip">تسوية الملاحظة تسجل سبب القرار وتاريخه</span>
           </div>
         </Card>
       )}
-
-      <Modal
-        open={editorOpen}
-        title={form.id ? 'تعديل بيانات المشروع' : 'إضافة مشروع يدويًا'}
-        subtitle="الحقول المقدمة تمر بالتحقق نفسه في الباكند، ويحفظ النظام مصدر الإدخال وتاريخ التعديل."
-        onClose={() => { if (!editorBusy) setEditorOpen(false); }}
-        wide
-        footer={(
-          <div className="btn-row">
-            <button className="btn ghost" type="button" onClick={() => setEditorOpen(false)} disabled={editorBusy}>إلغاء</button>
-            <button className="btn primary" type="submit" form="canonical-project-form" disabled={editorBusy}>{editorBusy ? 'جارٍ الحفظ...' : 'حفظ المشروع'}</button>
-          </div>
-        )}
-      >
-        <form id="canonical-project-form" className="stack" onSubmit={saveProject}>
-          {editorError && <ErrorBanner message={editorError} onDismiss={() => setEditorError('')} />}
-          <div className="grid-2">
-            <label className="stack tight"><span>اسم المشروع *</span><input className="input" required maxLength={240} value={form.name} onChange={event => setForm(current => ({ ...current, name: event.target.value }))} /></label>
-            <label className="stack tight"><span>رمز المشروع</span><input className="input" maxLength={80} value={form.code} onChange={event => setForm(current => ({ ...current, code: event.target.value }))} /></label>
-            <label className="stack tight"><span>الحالة</span><input className="input" maxLength={80} value={form.status} onChange={event => setForm(current => ({ ...current, status: event.target.value }))} /></label>
-            <label className="stack tight"><span>رمز العملة (مثل USD)</span><input className="input" maxLength={3} value={form.currency_code} onChange={event => setForm(current => ({ ...current, currency_code: event.target.value }))} /></label>
-            <label className="stack tight"><span>التكلفة التقديرية</span><input className="input" type="number" min="0" step="any" value={form.estimated_cost} onChange={event => setForm(current => ({ ...current, estimated_cost: event.target.value }))} /></label>
-            <label className="stack tight"><span>التكلفة الفعلية</span><input className="input" type="number" min="0" step="any" value={form.actual_cost} onChange={event => setForm(current => ({ ...current, actual_cost: event.target.value }))} /></label>
-            <label className="stack tight"><span>تاريخ البداية</span><input className="input" type="date" value={form.start_date} onChange={event => setForm(current => ({ ...current, start_date: event.target.value }))} /></label>
-            <label className="stack tight"><span>تاريخ النهاية</span><input className="input" type="date" value={form.end_date} onChange={event => setForm(current => ({ ...current, end_date: event.target.value }))} /></label>
-            <label className="stack tight"><span>الموقع الجغرافي</span><select className="input" value={form.geographic_unit_id} onChange={event => setForm(current => ({ ...current, geographic_unit_id: event.target.value }))}>
-              <option value="">غير مربوط</option>{references.geographicUnits.map(unit => <option key={unit.id} value={unit.id}>{unit.name} · {unit.unit_type}</option>)}
-            </select></label>
-            <label className="stack tight"><span>القطاع</span><select className="input" value={form.sector_id} onChange={event => setForm(current => ({ ...current, sector_id: event.target.value }))}>
-              <option value="">غير محدد</option>{references.sectors.map(sector => <option key={sector.id} value={sector.id}>{sector.name_ar}</option>)}
-            </select></label>
-          </div>
-          <label className="stack tight"><span>وصف المشروع</span><textarea className="input" rows={4} maxLength={4000} value={form.description} onChange={event => setForm(current => ({ ...current, description: event.target.value }))} /></label>
-        </form>
-      </Modal>
 
       <Modal
         open={Boolean(selectedId)}
@@ -393,15 +314,10 @@ export default function Projects({ notify, refreshKey }) {
             </div>
 
             <div className="stack tight">
-              <strong>جهات التمويل</strong>
-              <form className="grid-2" onSubmit={saveFunding}>
-                <label className="stack tight"><span>جهة التمويل *</span><input className="input" maxLength={240} required value={fundingForm.partner_name} onChange={event => setFundingForm(current => ({ ...current, partner_name: event.target.value }))} /></label>
-                <label className="stack tight"><span>المبلغ</span><input className="input" type="number" min="0" step="any" value={fundingForm.amount} onChange={event => setFundingForm(current => ({ ...current, amount: event.target.value }))} /></label>
-                <label className="stack tight"><span>العملة</span><input className="input" maxLength={3} value={fundingForm.currency_code} onChange={event => setFundingForm(current => ({ ...current, currency_code: event.target.value.toUpperCase() }))} /></label>
-                <label className="stack tight"><span>تاريخ التمويل</span><input className="input" type="date" value={fundingForm.funding_date} onChange={event => setFundingForm(current => ({ ...current, funding_date: event.target.value }))} /></label>
-                <div className="row"><button className="btn small primary" type="submit" disabled={fundingBusy}>{fundingBusy ? 'جارٍ الحفظ...' : 'إضافة تمويل'}</button></div>
-              </form>
-              {fundingError && <ErrorBanner message={fundingError} onDismiss={() => setFundingError('')} />}
+              <div className="row between">
+                <strong>جهات التمويل المعتمدة</strong>
+                <button className="btn small primary" type="button" onClick={addFunding}>إضافة تمويل عبر الإدخال المركزي</button>
+              </div>
               {detail.funding.length === 0 ? <span className="muted">لا توجد جهات تمويل مسجلة.</span> : (
                 <div className="table-wrap">
                   <table className="data">
@@ -476,21 +392,14 @@ export default function Projects({ notify, refreshKey }) {
             </div>
 
             <div className="row between">
-              <span className="muted">التعديلات اليدوية تسجل نسخة سابقة ولا تمس بيانات التمويل المرتبطة.</span>
-              <button className="btn primary" onClick={() => editProject(detail.project.id)}>تحرير هذا المشروع</button>
+              <span className="muted">التعديلات عبر مركز الإدخال تمر بالمراجعة والاعتماد قبل تحديث سجل المشروع.</span>
+              <button className="btn primary" onClick={() => editProject(detail.project.id)}>فتح السجل المركزي</button>
             </div>
           </div>
         ) : null}
       </Modal>
     </>
   );
-}
-
-function emptyProjectForm() {
-  return {
-    name: '', code: '', description: '', status: 'draft', estimated_cost: '', actual_cost: '',
-    currency_code: '', start_date: '', end_date: '', geographic_unit_id: '', sector_id: '',
-  };
 }
 
 function Mini({ label, value }) {

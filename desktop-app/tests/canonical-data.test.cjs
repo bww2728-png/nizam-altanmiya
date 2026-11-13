@@ -768,6 +768,7 @@ test('approved central project records are mirrored transactionally into canonic
       sectorCode:{ value:'water' },
     };
     const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,periodYear:'2025',values,actor:'operator' });
+    assert.deepEqual(recordService.listRecords(db,{ formRecordId:created.formRecordId }).rows.map(row => row.form_record_id),[created.formRecordId]);
     assert.equal(recordService.submitForReview(db,created.formRecordId,'reviewer').status,'pending_review');
     assert.equal(recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' }).status,'approved');
     const link = db.prepare("SELECT legacy_entity_id FROM form_record_legacy_links WHERE form_record_id=? AND legacy_entity_type='project'").get(created.formRecordId);

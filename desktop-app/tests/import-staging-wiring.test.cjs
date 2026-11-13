@@ -12,6 +12,8 @@ const ui = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/Import.jsx'), 'ut
 const shell = fs.readFileSync(path.join(ROOT, 'src/renderer/components/AppShell.jsx'), 'utf8');
 const app = fs.readFileSync(path.join(ROOT, 'src/renderer/App.jsx'), 'utf8');
 const projects = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/Projects.jsx'), 'utf8');
+const indicators = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/Indicators.jsx'), 'utf8');
+const dataEntry = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/DataEntry.jsx'), 'utf8');
 const sources = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/DataSources.jsx'), 'utf8');
 const documentsHub = fs.readFileSync(path.join(ROOT, 'src/renderer/pages/DocumentsHub.jsx'), 'utf8');
 
@@ -109,20 +111,33 @@ test('canonical project register is routed, paged, owner-gated and displays prov
   assert.match(preload, /addProjectAttachment: \(projectId\) => ipcRenderer\.invoke\('projects:add-attachment', projectId\)/);
   assert.match(preload, /exportProjectAttachment: \(request\) => ipcRenderer\.invoke\('projects:export-attachment', request\)/);
   assert.match(app, /case 'projects'/);
-  assert.match(app, /<Projects notify=\{notify\} refreshKey=\{refreshKey\} \/>/);
+  assert.match(app, /<Projects notify=\{notify\} refreshKey=\{refreshKey\} onNavigate=\{navigate\} \/>/);
   assert.match(shell, /id: 'projects', label: 'سجل المشاريع'/);
   assert.match(projects, /window\.localApp\.canonicalProjects/);
   assert.match(projects, /window\.localApp\.canonicalProject/);
   assert.match(projects, /مصدر البيانات/);
-  assert.match(projects, /saveCanonicalProject/);
-  assert.match(projects, /addProjectFunding/);
+  assert.doesNotMatch(projects, /saveCanonicalProject|addProjectFunding/);
+  assert.match(projects, /onNavigate\?\.\('data-entry', \{ entry \}\)/);
+  assert.match(projects, /groupCode: 'project-funding'/);
   assert.match(projects, /addProjectAttachment/);
   assert.match(projects, /window\.localApp\.exportProjectAttachment/);
   assert.match(projects, /حفظ نسخة/);
   assert.match(projects, /resolveProjectQualityIssue/);
   assert.match(projects, /تسوية الملاحظة تسجل سبب القرار وتاريخه/);
-  assert.match(projects, /تسوية ملاحظات المشروع تحفظ المصدر وسجل التغيير/);
+  assert.match(projects, /إنشاء المشاريع والتعديلات والتمويل تمر من مركز الإدخال/);
   assert.match(projects, /سجل التعديلات/);
+});
+
+test('central entry receives project and indicator context and refreshes approved consumers', () => {
+  assert.match(app, /<DataEntry[^>]*initialEntry=\{params\.entry \?\? \{\}\}[^>]*onDataChanged=\{refresh\}/);
+  assert.match(app, /<Indicators[^>]*onNavigate=\{navigate\}/);
+  assert.match(dataEntry, /formRecordId: recordFormRecordId/);
+  assert.match(dataEntry, /setRecordFormRecordId\(String\(initialEntry\.recordId\)\)/);
+  assert.match(dataEntry, /parentRecordId: editingRecord\?\.record\?\.parent_record_id \?\? initialEntry\.parentRecordId/);
+  assert.match(dataEntry, /onDataChanged\?\.\(\)/);
+  assert.match(indicators, /domainCode: 'development-indicators', groupCode: 'indicator-results', formCode: 'indicator_observation_v1'/);
+  assert.match(projects, /formCode: 'project_v1',\s*recordId: result\.project\.form_record_id/);
+  assert.match(projects, /formCode: 'project_funding_v1',\s*parentRecordId: detail\.project\.form_record_id/);
 });
 
 test('indicator observations and data-quality data remain available only as dashboard summaries', () => {
