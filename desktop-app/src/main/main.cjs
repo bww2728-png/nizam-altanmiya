@@ -25,6 +25,7 @@ const schemaDrivenDiscovery = require('./documents/schema-driven-discovery.cjs')
 const { RagflowAdapter } = require('./documents/ragflow-adapter.cjs');
 const recordService = require('./database/record-service.cjs');
 const domainService = require('./database/domain-service.cjs');
+const databaseBrowser = require('./database/database-browser-service.cjs');
 const analysisService = require('./database/analysis-service.cjs');
 const planningService = require('./database/planning-service.cjs');
 const financeService = require('./database/finance-service.cjs');
@@ -1087,6 +1088,42 @@ function registerHandlers() {
     const catalog = manualEntryCatalog.listCatalog(requireDatabase());
     auditRead('data:entry-catalog', { entity: 'manual_entry_domains', rowCount: catalog.domains.length, detail: `version=${catalog.version}` });
     return catalog;
+  });
+
+  ipcMain.handle('database-browser:overview', () => {
+    if (currentProfile() !== 'owner') throw new Error('مستعرض قاعدة البيانات متاح في وضع المالك فقط.');
+    const result = databaseBrowser.getOverview(requireDatabase());
+    auditRead('database-browser:overview', { entity: 'database_catalog', rowCount: result.totals.groups,
+      detail: `domains=${result.totals.domains};operational=${result.totals.operationalTables}` });
+    return result;
+  });
+  ipcMain.handle('database-browser:group', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('قراءة مجموعات البيانات متاحة في وضع المالك فقط.');
+    const result = databaseBrowser.listGroup(requireDatabase(), request);
+    auditRead('database-browser:group', { entity: request.groupCode ?? null, rowCount: result.rows.length,
+      detail: `source=${request.sourceKey ?? ''};offset=${result.offset ?? 0};limit=${result.limit ?? 0}` });
+    return result;
+  });
+  ipcMain.handle('database-browser:operational', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('قراءة الجداول التشغيلية متاحة في وضع المالك فقط.');
+    const result = databaseBrowser.listOperationalTable(requireDatabase(), request);
+    auditRead('database-browser:operational', { entity: result.table, rowCount: result.rows.length,
+      detail: `offset=${result.offset};limit=${result.limit}` });
+    return result;
+  });
+  ipcMain.handle('database-browser:unclassified', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('قراءة البيانات غير المصنفة متاحة في وضع المالك فقط.');
+    const result = databaseBrowser.listUnclassifiedDataset(requireDatabase(), request);
+    auditRead('database-browser:unclassified', { entity: request.dataset ?? null, rowCount: result.rows.length,
+      detail: `offset=${result.offset ?? 0};limit=${result.limit ?? 0}` });
+    return result;
+  });
+  ipcMain.handle('database-browser:legacy-table', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('قراءة السجلات القديمة متاحة في وضع المالك فقط.');
+    const result = databaseBrowser.listUnclassifiedTable(requireDatabase(), request);
+    auditRead('database-browser:legacy-table', { entity: result.table, rowCount: result.rows.length,
+      detail: `offset=${result.offset};limit=${result.limit}` });
+    return result;
   });
 
   ipcMain.handle('data:forms', () => {

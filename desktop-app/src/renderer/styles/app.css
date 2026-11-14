@@ -1423,6 +1423,23 @@ table.data .cell-actions { display: flex; gap: 6px; justify-content: flex-start;
 .data-entry-records-layout > .table-wrap { min-width: 0; }
 .data-entry-detail-panel { max-height: none; overflow: visible; }
 .data-entry-detail-panel > .card-head { align-items: flex-start; background: var(--bg-2); }
+.database-layout { display: grid; grid-template-columns: minmax(250px, 330px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.database-domain-list { scrollbar-width: thin; }
+.database-group-option { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; padding: 10px 11px; border: 1px solid transparent; border-radius: var(--r-sm); background: transparent; color: var(--text-2); text-align: start; cursor: pointer; }
+.database-group-option:hover { background: var(--bg-2); color: var(--text); }
+.database-group-option.active { border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); color: var(--text); }
+.database-group-option:disabled, .database-group-option[aria-disabled='true'] { cursor: default; opacity: .82; }
+.database-group-option > span:first-child { font-weight: 600; }
+.database-group-option small { grid-column: 1 / -1; color: var(--text-4); font-size: .68rem; }
+.database-group-count { min-width: 30px; padding: 2px 7px; border-radius: var(--r-pill); background: var(--bg-2); color: var(--text-3); font-size: .7rem; text-align: center; }
+
+@media (max-width: 860px) {
+  .database-layout { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .database-layout { gap: 10px; }
+  .database-domain-list { max-height: 42vh !important; }
+}
 
 @media (max-width: 1180px) {
   .data-entry-stats { grid-template-columns: repeat(3, minmax(110px, 1fr)); }

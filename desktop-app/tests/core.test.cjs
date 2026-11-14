@@ -236,3 +236,23 @@ test('app:status reports a plaintext store as plaintext and not encrypted', () =
     assert.equal(status.hasKey, false, 'a plaintext store keeps no legacy key');
   });
 });
+
+test('database browser IPC enforces owner access and records overview reads', () => {
+  withTemporaryDirectory((directory) => {
+    const handlers = loadMainHandlers(directory);
+    assert.equal(handlers.get('db:open')().success, true);
+    handlers.get('security:profile:set')(null, { profile: 'shared' });
+    assert.throws(() => handlers.get('database-browser:overview')(), /وضع المالك فقط/);
+    handlers.get('security:profile:set')(null, { profile: 'owner' });
+    const overview = handlers.get('database-browser:overview')();
+    assert.equal(overview.totals.domains, 18);
+    assert.equal(overview.totals.groups, 86);
+    const database = new Database(path.join(directory, 'development-data.db'));
+    try {
+      const audit = database.prepare("SELECT channel,row_count,result FROM audit_reads WHERE channel='database-browser:overview' ORDER BY id DESC LIMIT 1").get();
+      assert.deepEqual(audit, { channel: 'database-browser:overview', row_count: 86, result: 'ok' });
+    } finally {
+      database.close();
+    }
+  });
+});

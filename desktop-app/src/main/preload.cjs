@@ -19,6 +19,13 @@ contextBridge.exposeInMainWorld('localApp', {
 
   // Database-driven forms and the shared record/review write path
   dataEntryCatalog: () => ipcRenderer.invoke('data:entry-catalog'),
+  databaseBrowser: {
+    overview: () => ipcRenderer.invoke('database-browser:overview'),
+    group: (request) => ipcRenderer.invoke('database-browser:group', request),
+    operational: (request) => ipcRenderer.invoke('database-browser:operational', request),
+    unclassified: (request) => ipcRenderer.invoke('database-browser:unclassified', request),
+    legacyTable: (request) => ipcRenderer.invoke('database-browser:legacy-table', request),
+  },
   dataForms: () => ipcRenderer.invoke('data:forms'),
   dataFormDefinition: (formVersionId) => ipcRenderer.invoke('data:form-definition', formVersionId),
   dataRecords: (request) => ipcRenderer.invoke('data:records:list', request),
