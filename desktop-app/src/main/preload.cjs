@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('localApp', {
   dataForms: () => ipcRenderer.invoke('data:forms'),
   dataFormDefinition: (formVersionId) => ipcRenderer.invoke('data:form-definition', formVersionId),
   dataRecords: (request) => ipcRenderer.invoke('data:records:list', request),
+  dataRecordOverview: (request) => ipcRenderer.invoke('data:records:overview', request),
+
   dataProjectParents: (request) => ipcRenderer.invoke('data:project-parents:list', request),
   dataRecord: (recordId) => ipcRenderer.invoke('data:record:get', recordId),
   saveDataRecord: (request) => ipcRenderer.invoke('data:record:save', request),

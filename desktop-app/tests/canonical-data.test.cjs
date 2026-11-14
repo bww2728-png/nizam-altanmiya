@@ -165,6 +165,15 @@ test('central record writes validate values and keep revisions, provenance and r
     assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,values:{},valueSources:{ 'directorate.population':'مصدر بلا قيمة' } }),/دون حفظ قيمة أو حالة/);
     assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,values,valueSources:{ 'directorate.unknown':'مصدر مجهول' } }),/حقل مصدر غير معرّف/);
     const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,periodYear:'2025',values,actor:'tester',valueSources:{ 'directorate.population':'استمارة حصر 2025، ورقة السكان، الخلية C4' } });
+    const draftOverview = recordService.getRecordOverview(db,{ limit:1 });
+    assert.equal(draftOverview.total,1);
+    assert.equal(draftOverview.statusCounts.draft,1);
+    assert.equal(draftOverview.latest[0].form_record_id,created.formRecordId);
+    assert.equal(draftOverview.latest[0].record_status,'draft');
+    assert.equal(draftOverview.formVersionCounts[String(form.form_version_id)].recordCount,1);
+    assert.ok(draftOverview.formVersionCounts[String(form.form_version_id)].latestUpdatedAt);
+    assert.ok(draftOverview.latest[0].source_count > 0);
+    assert.equal(recordService.listRecords(db,{ limit:1 }).rows[0].source_count,draftOverview.latest[0].source_count);
     const firstObservation = db.prepare("SELECT value_integer,value_real FROM observations WHERE form_record_id=? AND form_field_id=(SELECT form_field_id FROM form_fields WHERE field_code='directorate.population')").get(created.formRecordId);
     assert.equal(firstObservation.value_integer,5000);
     assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].sourceLocator,'استمارة حصر 2025، ورقة السكان، الخلية C4');
@@ -184,6 +193,10 @@ test('central record writes validate values and keep revisions, provenance and r
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM value_provenance WHERE observation_id IN (SELECT observation_id FROM observations WHERE form_record_id=?) AND source_locator IN ('استمارة حصر 2025، ورقة السكان، الخلية C4','إفادة مكتب الإحصاء، الصفحة 2')").get(created.formRecordId).n,2);
     assert.equal(recordService.submitForReview(db,created.formRecordId,'reviewer').status,'pending_review');
     assert.equal(recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' }).status,'approved');
+    const approvedOverview = recordService.getRecordOverview(db);
+    assert.equal(approvedOverview.total,1);
+    assert.equal(approvedOverview.statusCounts.approved,1);
+    assert.equal(approvedOverview.latest[0].record_label,'المعافر');
     const normalizedDirectorates = persist.listDirectorates(db,{ periodKey:'2025',limit:20 });
     assert.equal(normalizedDirectorates.length,1);
     assert.equal(normalizedDirectorates[0].population,6500);

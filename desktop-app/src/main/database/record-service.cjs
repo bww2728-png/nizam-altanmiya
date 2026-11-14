@@ -715,6 +715,30 @@ function getRecord(db,recordId) {
   }
   return { record,values };
 }
+function getRecordOverview(db, request = {}) {
+  const limit = Math.min(12,Math.max(1,Number(request.limit)||6));
+  const statusCounts = Object.fromEntries(['draft','pending_review','approved','rejected','superseded','archived'].map(status => [status,0]));
+  for (const row of db.prepare('SELECT record_status,COUNT(*) AS count FROM form_records GROUP BY record_status').all()) {
+    if (Object.hasOwn(statusCounts,row.record_status)) statusCounts[row.record_status] = row.count;
+  }
+  const rows = db.prepare(`SELECT record.form_record_id,record.form_version_id,record.record_label,record.record_status,record.updated_at,
+      form.form_code,form.name_ar AS form_name,geo.name_ar AS geo_name,period.label_ar AS period_label,
+      (SELECT COUNT(*) FROM record_field_values value WHERE value.form_record_id=record.form_record_id)
+        +(SELECT COUNT(*) FROM observations observation WHERE observation.form_record_id=record.form_record_id) AS value_count,
+      (SELECT COUNT(*) FROM value_provenance provenance JOIN observations observation ON observation.observation_id=provenance.observation_id WHERE observation.form_record_id=record.form_record_id)
+        +(SELECT COUNT(*) FROM value_provenance provenance JOIN record_field_values value ON value.record_field_value_id=provenance.record_field_value_id WHERE value.form_record_id=record.form_record_id) AS source_count
+    FROM form_records record JOIN form_versions version USING(form_version_id) JOIN form_definitions form USING(form_id)
+    LEFT JOIN geographic_units geo ON geo.geo_unit_id=record.geo_unit_id
+    LEFT JOIN periods period ON period.period_id=record.period_id
+    ORDER BY record.updated_at DESC,record.form_record_id DESC LIMIT ?`).all(limit);
+  const formVersionCounts = Object.fromEntries(db.prepare(`SELECT record.form_version_id,form.form_code,COUNT(*) AS record_count,MAX(record.updated_at) AS latest_updated_at
+    FROM form_records record JOIN form_versions version USING(form_version_id) JOIN form_definitions form USING(form_id)
+    GROUP BY record.form_version_id,form.form_code`).all().map(row => [String(row.form_version_id),{
+      formCode:row.form_code,recordCount:row.record_count,latestUpdatedAt:row.latest_updated_at,
+    }]));
+  const total = db.prepare('SELECT COUNT(*) AS count FROM form_records').get().count;
+  return { total,statusCounts,formVersionCounts,latest:rows };
+}
 function listRecords(db, request = {}) {
   const formId = Number(request.formVersionId);
   const limit = Math.min(200,Math.max(1,Number(request.limit)||50));
@@ -738,7 +762,9 @@ function listRecords(db, request = {}) {
   const total = db.prepare(`SELECT COUNT(*) AS count ${from} ${where}`).get(...params).count;
   const rows = db.prepare(`SELECT r.form_record_id,r.form_version_id,r.geo_unit_id,g.name_ar AS geo_name,r.period_id,p.label_ar AS period_label,
     r.record_label,r.record_status,r.revision_number,r.created_at,r.updated_at,r.approved_at,f.form_code,f.name_ar AS form_name,
-    (SELECT COUNT(*) FROM record_field_values v WHERE v.form_record_id=r.form_record_id)+(SELECT COUNT(*) FROM observations o WHERE o.form_record_id=r.form_record_id) AS value_count
+    (SELECT COUNT(*) FROM record_field_values v WHERE v.form_record_id=r.form_record_id)+(SELECT COUNT(*) FROM observations o WHERE o.form_record_id=r.form_record_id) AS value_count,
+    (SELECT COUNT(*) FROM value_provenance provenance JOIN observations o ON o.observation_id=provenance.observation_id WHERE o.form_record_id=r.form_record_id)
+      +(SELECT COUNT(*) FROM value_provenance provenance JOIN record_field_values v ON v.record_field_value_id=provenance.record_field_value_id WHERE v.form_record_id=r.form_record_id) AS source_count
     ${from} ${where} ORDER BY r.updated_at DESC,r.form_record_id DESC LIMIT ? OFFSET ?`).all(...params,limit,offset);
   return { rows,total,limit,offset,hasPrevious:offset>0,hasNext:offset+rows.length<total };
 }
@@ -881,4 +907,4 @@ function migrateApprovedEducationFacilities(db) {
   return { version:EDUCATION_SYNC_VERSION,alreadyApplied:false,linked,deferred };
 }
 
-module.exports = { parseLocalizedNumber, parseValue, listForms, getFormDefinition, saveRecord, saveRecordFromDocument, getRecord, listRecords, listApprovedProjectParents, submitForReview, decideRecord, archiveLinkedDirectorate, listGeoUnits, listPeriods, migrateApprovedEducationFacilities };
+module.exports = { parseLocalizedNumber, parseValue, listForms, getFormDefinition, saveRecord, saveRecordFromDocument, getRecord, getRecordOverview, listRecords, listApprovedProjectParents, submitForReview, decideRecord, archiveLinkedDirectorate, listGeoUnits, listPeriods, migrateApprovedEducationFacilities };
