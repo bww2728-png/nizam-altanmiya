@@ -331,7 +331,7 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   };
 
   const buildRecordPayload = () => {
-    const fieldMap = new Map(definition.fields.map((field) => [field.field_code, field]));
+    const fieldMap = new Map((definition?.fields ?? []).map((field) => [field.field_code, field]));
     const codes = new Set([...Object.keys(values), ...Object.keys(valueStates)]);
     const payload = Object.fromEntries([...codes].filter((fieldCode) => {
       const state = valueStates[fieldCode];
@@ -351,7 +351,9 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   };
 
   const buildDraftSignature = (payload = buildRecordPayload()) => JSON.stringify({ formVersionId, payload, valueStates, dimensionValues, valueSources, recordLabel, notes, geoUnitId, periodId, periodYear, parentRecordId });
-  latestDraftSignatureRef.current = buildDraftSignature();
+  // Runs during render, before the form definition is fetched: definition is null on the
+  // first paint, so the signature must stay empty until a catalogue arrives.
+  latestDraftSignatureRef.current = definition ? buildDraftSignature() : '';
   latestDraftVersionRef.current = String(formVersionId);
 
   const persistDraft = async (automatic = false) => {
@@ -363,7 +365,7 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
       if (!automatic) notify({ tone:'ok',message:`المسودة ${draftRecordId} محفوظة بالفعل؛ يمكنك إرسالها للمراجعة من قائمة السجلات.` });
       return { unchanged:true };
     }
-    const requiredFields = definition.fields.filter((field) => field.is_required);
+    const requiredFields = (definition?.fields ?? []).filter((field) => field.is_required);
     if (Object.keys(payload).length === 0 || requiredFields.some((field) => !payload[field.field_code] || !['known','zero'].includes(payload[field.field_code].state))) {
       setAutoSaveState('incomplete');
       if (!automatic) notify({ tone:'warn',message:'أكمل الحقول المطلوبة قبل حفظ المسودة.' });
