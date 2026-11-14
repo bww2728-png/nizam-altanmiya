@@ -722,6 +722,13 @@ function registerHandlers() {
     return result;
   });
 
+  ipcMain.handle('documents:field-candidate-group:review', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('مراجعة القيم المرشحة تتطلب وضع المالك.');
+    const results = schemaDrivenDiscovery.reviewCandidateGroup(requireDatabase(),{ ...request,reviewedBy:sessionId });
+    auditRead('documents:field-candidate-group:review', { entity:'document_field_candidates',entityId:String(request.documentId ?? ''),rowCount:results.reduce((count,item) => count + item.updatedCount,0),detail:'officialDataChanged=false' });
+    return results;
+  });
+
   ipcMain.handle('documents:field-candidates:promote', (_event, request = {}) => {
     if (currentProfile() !== 'owner') throw new Error('ترحيل القيم المراجَعة يتطلب وضع المالك.');
     const result = Array.isArray(request.candidateGroups)
