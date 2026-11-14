@@ -1,13 +1,19 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
+const ExcelJS = require('exceljs');
 const Database = require('better-sqlite3-multiple-ciphers');
 const { migrate } = require('../src/main/analysis/store-schema.cjs');
 const dataArchitecture = require('../src/main/database/architecture.cjs');
 const browser = require('../src/main/database/database-browser-service.cjs');
 const manualEntryCatalog = require('../src/main/database/manual-entry-catalog.cjs');
 const recordService = require('../src/main/database/record-service.cjs');
+const manualEntryWorkflow = require('../src/main/database/manual-entry-workflow.cjs');
+const { exportFilteredWorkbook } = require('../src/main/analysis/report-exporter.cjs');
 const { DATASETS } = require('../src/main/database/domain-registry.cjs');
 
 function openDatabase() {
@@ -15,6 +21,19 @@ function openDatabase() {
   db.pragma('foreign_keys = ON');
   migrate(db);
   return db;
+}
+
+function addDirectorate(db, district = 'اختبار', governorate = 'تعز') {
+  const now = '2026-01-01T00:00:00.000Z';
+  const governorateTypeId = db.prepare("SELECT geo_unit_type_id FROM geo_unit_types WHERE type_code='governorate'").get().geo_unit_type_id;
+  const directorateTypeId = db.prepare("SELECT geo_unit_type_id FROM geo_unit_types WHERE type_code='directorate'").get().geo_unit_type_id;
+  const parent = db.prepare(`INSERT INTO geographic_units(unit_type,name,normalized_name,created_at,updated_at,name_ar,is_active,geo_unit_type_id)
+    VALUES('governorate',?,?,?,?,?,1,?)`).run(governorate, governorate.toLowerCase(), now, now, governorate, governorateTypeId);
+  db.prepare('UPDATE geographic_units SET geo_unit_id=id WHERE id=?').run(parent.lastInsertRowid);
+  const unit = db.prepare(`INSERT INTO geographic_units(parent_id,unit_type,name,normalized_name,created_at,updated_at,name_ar,is_active,geo_unit_type_id,parent_geo_unit_id)
+    VALUES(?,'district',?,?,?,?,?,1,?,?)`).run(parent.lastInsertRowid, district, district.toLowerCase(), now, now, district, directorateTypeId, parent.lastInsertRowid);
+  db.prepare('UPDATE geographic_units SET geo_unit_id=id WHERE id=?').run(unit.lastInsertRowid);
+  return Number(unit.lastInsertRowid);
 }
 
 test('database browser mirrors catalog order and reports linked, empty and unlinked groups', () => {
@@ -66,11 +85,19 @@ test('group and operational reads are paged, provenance-labeled and reject unapp
     assert.throws(() => browser.listUnclassifiedDataset(db, { dataset: 'projects' }), /غير مصنفة/);
 
     const catalog = manualEntryCatalog.listCatalog(db);
+    const overview = browser.getOverview(db);
+    const geoUnitId = addDirectorate(db);
     const firstGroup = catalog.domains[0].groups[0];
-    const result = browser.listGroup(db, { groupCode: firstGroup.code, sourceKey: `form:${firstGroup.forms[0].versionId}`, limit: 1 });
+    assert.throws(() => browser.listGroup(db, { groupCode: firstGroup.code, sourceKey: `form:${firstGroup.forms[0].versionId}`, limit: 1 }), /اختر المديرية/);
+    const result = browser.listGroup(db, { groupCode: firstGroup.code, sourceKey: `form:${firstGroup.forms[0].versionId}`, geoUnitId, limit: 1 });
     assert.equal(result.limit, 1);
     assert.equal(result.source.type, 'form');
     assert.equal(result.total, 0);
+    const datasetGroup = overview.domains.flatMap(domain => domain.groups).find(group => group.sources.some(item => item.type === 'dataset'));
+    const datasetSource = datasetGroup.sources.find(item => item.type === 'dataset');
+    const blockedDataset = browser.listGroup(db, { groupCode: datasetGroup.code, sourceKey: datasetSource.key, geoUnitId });
+    assert.equal(blockedDataset.requiresApproval, true);
+    assert.equal(blockedDataset.total, 0);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM data_sources').get().count, 1);
     assert.throws(() => browser.listGroup(db, { groupCode: firstGroup.code, sourceKey: 'table:users' }), /غير مربوط/);
   } finally {
@@ -85,8 +112,10 @@ test('central group records expose real values and retain a path to the authorit
     const group = catalog.domains.flatMap(domain => domain.groups).find(item => item.code === 'administrative-geography.current-directorate-compatibility');
     const form = group.forms.find(item => item.code === 'legacy_directorate_v1');
     assert.ok(form?.versionId);
+    const geoUnitId = addDirectorate(db, 'المعافر', 'تعز');
     const created = recordService.saveRecord(db, {
       formVersionId: form.versionId,
+      geoUnitId,
       periodYear: '2025',
       actor: 'browser-test',
       values: {
@@ -96,7 +125,11 @@ test('central group records expose real values and retain a path to the authorit
       },
       valueSources: { 'directorate.population': 'استمارة اختبار، الخلية C3' },
     });
-    const result = browser.listGroup(db, { groupCode: group.code, sourceKey: `form:${form.versionId}`, limit: 10 });
+    const request = { groupCode: group.code, sourceKey: `form:${form.versionId}`, geoUnitId, limit: 10 };
+    assert.equal(browser.listGroup(db, request).total, 0);
+    recordService.submitForReview(db, created.formRecordId, 'browser-reviewer');
+    recordService.decideRecord(db, created.formRecordId, { decision: 'approve', actor: 'browser-reviewer' });
+    const result = browser.listGroup(db, request);
     assert.equal(result.total, 1);
     assert.equal(result.rows[0].form_record_id, created.formRecordId);
     assert.equal(result.rows[0]['value:directorate.population'], '5000');
@@ -106,6 +139,54 @@ test('central group records expose real values and retain a path to the authorit
   } finally {
     db.close();
   }
+});
+
+test('manual entry is approved, reread from its directorate, and exported with the same filter', async t => {
+  const db = openDatabase();
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(),'ldi-approved-database-export-'));
+  t.after(() => {
+    db.close();
+    fs.rmSync(directory,{ recursive:true,force:true });
+  });
+  const catalog = manualEntryCatalog.listCatalog(db);
+  const group = catalog.domains.flatMap(domain => domain.groups).find(item => item.code === 'administrative-geography.current-directorate-compatibility');
+  const form = group.forms.find(item => item.code === 'legacy_directorate_v1');
+  const created = manualEntryWorkflow.saveWorkspace(db,{
+    district:'المعافر',governorate:'تعز',periodYear:'2025',actor:'integration-test',sourceNote:'استمارة اختبار، الصفحة 1',
+    forms:[{ formVersionId:form.versionId,values:{
+      'directorate.districtName':{ value:'المعافر' },
+      'directorate.governorate':{ value:'تعز' },
+      'directorate.population':{ value:'5000' },
+    } }],
+  });
+  assert.equal(created.duplicate,false);
+  assert.ok(created.geoUnitId > 0);
+  const savedRecord = created.records[0];
+  const request = { groupCode:group.code,sourceKey:`form:${form.versionId}`,geoUnitId:created.geoUnitId,periodId:null,limit:20,search:'5000' };
+  assert.equal(browser.listGroup(db,request).total,0);
+  assert.equal(recordService.getRecord(db,savedRecord.formRecordId).record.geo_unit_id,created.geoUnitId);
+  recordService.submitForReview(db,savedRecord.formRecordId,'integration-reviewer');
+  recordService.decideRecord(db,savedRecord.formRecordId,{ decision:'approve',actor:'integration-reviewer' });
+  const readback = browser.listGroup(db,request);
+  assert.equal(readback.total,1);
+  assert.equal(readback.rows[0].form_record_id,savedRecord.formRecordId);
+  assert.equal(readback.rows[0]['value:directorate.population'],'5000');
+  assert.equal(readback.rows[0]._sourceType,'إدخال يدوي موثق');
+  assert.equal(readback.rows[0].geo_unit_id,created.geoUnitId);
+
+  const filePath = path.join(directory,'approved-directorate.xlsx');
+  await exportFilteredWorkbook(filePath,{
+    title:'المديرية المعتمدة',generatedAt:'2026-01-01T00:00:00.000Z',
+    columns:readback.fields.map(field => ({ key:field.name,header:field.name })),rows:readback.rows,
+    filters:{ labels:['المديرية: المعافر','الفترة: 2025','المجموعة: المديريات'] },summary:{ total:readback.total },
+  });
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(filePath);
+  const exportedRows = workbook.getWorksheet('النتائج المطابقة');
+  const populationColumn = readback.fields.findIndex(field => field.name === 'value:directorate.population') + 1;
+  assert.equal(exportedRows.getCell(2,populationColumn).value,'5000');
+  const summary = workbook.getWorksheet('ملخص التقرير');
+  assert.ok(summary.getColumn(2).values.includes('المديرية: المعافر'));
 });
 
 test('all physical tables are explicitly cataloged, safely browsed, or count-only', () => {

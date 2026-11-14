@@ -20,6 +20,8 @@ const canonicalData = require('./analysis/canonical-data.cjs');
 const fileArchive = require('./database/file-archive.cjs');
 const dataArchitecture = require('./database/architecture.cjs');
 const manualEntryCatalog = require('./database/manual-entry-catalog.cjs');
+const manualEntryWorkflow = require('./database/manual-entry-workflow.cjs');
+const { createManualEntryDraftStore } = require('./database/manual-entry-draft-store.cjs');
 const documentService = require('./documents/document-service.cjs');
 const schemaDrivenDiscovery = require('./documents/schema-driven-discovery.cjs');
 const { RagflowAdapter } = require('./documents/ragflow-adapter.cjs');
@@ -46,6 +48,11 @@ const { inspectXlsxPackage } = require('./analysis/xlsx-preflight.cjs');
 
 let mainWindow;
 let database;
+let manualEntryDraftStore;
+let manualEntryDraftNeedsFlush = false;
+let manualEntryDraftAvailable = false;
+let draftQuitPromptOpen = false;
+let allowQuitAfterDraftDecision = false;
 /** Workbook read and turned into a plan, but not yet applied to the database. */
 let pendingPlan = null;
 /** Last analysis held in memory so exports never recompute silently. */
@@ -638,6 +645,7 @@ function createWindow() {
 }
 
 function registerHandlers() {
+  manualEntryDraftStore = createManualEntryDraftStore({ safeStorage, userDataPath: app.getPath('userData') });
   ipcMain.handle('app:status', () => {
     const profile = database ? security.getAccessProfile(database) : security.DEFAULT_PROFILE;
     const filePath = getDatabasePath();
@@ -1090,6 +1098,44 @@ function registerHandlers() {
     return catalog;
   });
 
+  ipcMain.handle('data:manual-entry:workspace', () => {
+    if (currentProfile() !== 'owner') throw new Error('نموذج الإدخال المركزي متاح في وضع المالك فقط.');
+    const catalog = manualEntryWorkflow.listWorkspaceCatalog(requireDatabase());
+    auditRead('data:manual-entry:workspace', { entity: 'manual_entry_domains', rowCount: catalog.domains.length, detail: `groups=${catalog.domains.reduce((count, domain) => count + domain.groups.length, 0)}` });
+    return catalog;
+  });
+  ipcMain.handle('data:manual-entry:save', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('حفظ الإدخال المركزي يتطلب وضع المالك.');
+    const result = manualEntryWorkflow.saveWorkspace(requireDatabase(), { ...request, actor: sessionId, sessionId });
+    if (!result.duplicate) persist.logAccess(requireDatabase(), { action: 'manual-entry-workspace-save', entity: 'geographic_unit', entityId: result.geoUnitId, detail: `records=${result.records.length}` });
+    return result;
+  });
+  ipcMain.handle('data:manual-entry:draft:load', () => {
+    if (currentProfile() !== 'owner') throw new Error('استعادة المسودة تتطلب وضع المالك.');
+    const result = manualEntryDraftStore.load();
+    manualEntryDraftAvailable = Boolean(result.draft);
+    return result;
+  });
+  ipcMain.handle('data:manual-entry:draft:save', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('حفظ المسودة يتطلب وضع المالك.');
+    const result = manualEntryDraftStore.save(request.draft);
+    manualEntryDraftNeedsFlush = false;
+    manualEntryDraftAvailable = true;
+    return result;
+  });
+  ipcMain.handle('data:manual-entry:draft:dirty', () => {
+    if (currentProfile() !== 'owner') throw new Error('تعديل المسودة يتطلب وضع المالك.');
+    manualEntryDraftNeedsFlush = true;
+    return { dirty: true };
+  });
+  ipcMain.handle('data:manual-entry:draft:clear', () => {
+    if (currentProfile() !== 'owner') throw new Error('حذف المسودة يتطلب وضع المالك.');
+    const result = manualEntryDraftStore.clear();
+    manualEntryDraftNeedsFlush = false;
+    manualEntryDraftAvailable = false;
+    return result;
+  });
+
   ipcMain.handle('database-browser:overview', () => {
     if (currentProfile() !== 'owner') throw new Error('مستعرض قاعدة البيانات متاح في وضع المالك فقط.');
     const result = databaseBrowser.getOverview(requireDatabase());
@@ -1124,6 +1170,64 @@ function registerHandlers() {
     auditRead('database-browser:legacy-table', { entity: result.table, rowCount: result.rows.length,
       detail: `offset=${result.offset};limit=${result.limit}` });
     return result;
+  });
+  ipcMain.handle('database-browser:export', async (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('تصدير قاعدة البيانات متاح في وضع المالك فقط.');
+    const format = request.format === 'excel' ? 'xlsx' : String(request.format ?? 'xlsx');
+    if (!['xlsx','csv','pdf'].includes(format)) throw new Error('صيغة التصدير غير مدعومة.');
+    const section = String(request.section ?? '');
+    if (section !== 'catalog') throw new Error('التصدير الرسمي متاح من عرض المجالات والمجموعات بعد اختيار مديرية.');
+    const search = String(request.search ?? '').trim().slice(0, 120);
+    const scopedRequest = { groupCode: request.groupCode, sourceKey: request.sourceKey, geoUnitId: request.geoUnitId, periodId: request.periodId, search };
+    const load = databaseBrowser.listGroup;
+    const db = requireDatabase();
+    const firstPage = load(db, { ...scopedRequest, limit: 200, offset: 0 });
+    if (firstPage.requiresApproval) throw new Error('لا يمكن تصدير هذا المصدر قبل وجود حالة اعتماد موثقة.');
+    if (firstPage.requiresGeography) throw new Error('لا يمكن تصدير هذا المصدر دون رابط موثق للمديرية.');
+    const rowLimit = 10000;
+    if (firstPage.total > rowLimit) throw new Error(`عدد النتائج يتجاوز حد التصدير الآمن (${rowLimit.toLocaleString('ar')}). أضف عبارة بحث أو اختر مجموعة أصغر.`);
+    const rows = [...firstPage.rows];
+    for (let offset = rows.length; offset < firstPage.total; offset += 200) {
+      rows.push(...load(db, { ...scopedRequest, limit: 200, offset }).rows);
+    }
+    const baseFields = firstPage.fields ?? [];
+    const columns = baseFields.map(field => ({ key: field.name, dbColumn: field.name, header: field.labelAr ?? field.name, type: field.type }));
+    if (rows.some(row => Object.hasOwn(row, '_sourceType'))) columns.push({ key: '_sourceType', dbColumn: '_sourceType', header: 'المصدر' });
+    for (const [key, header] of [['record_status','حالة السجل'],['quality_status','حالة الجودة'],['row_status','حالة الصف']]) {
+      if (rows.some(row => Object.hasOwn(row, key)) && !columns.some(column => column.key === key)) columns.push({ key, dbColumn: key, header });
+    }
+    const directorate = section === 'catalog'
+      ? recordService.listGeoUnits(db, '').find(unit => Number(unit.geo_unit_id) === Number(request.geoUnitId))
+      : null;
+    const period = section === 'catalog' ? recordService.listPeriods(db).find(item => Number(item.period_id) === Number(request.periodId)) : null;
+    const filters = {
+      search,
+      directorate: directorate ? `${directorate.name_ar}${directorate.parent_name_ar ? ` — ${directorate.parent_name_ar}` : ''}` : '',
+      period: period?.label_ar ?? 'كل الفترات',
+      group: request.groupCode ?? '',
+    };
+    const report = {
+      title: section === 'catalog' ? `قاعدة البيانات — ${request.groupCode}` : firstPage.labelAr ?? firstPage.table,
+      generatedAt: new Date().toISOString(),
+      rows,
+      columns,
+      filters: { labels: Object.entries(filters).filter(([, value]) => value).map(([key, value]) => `${key}: ${value}`) },
+      summary: { total: firstPage.total },
+      total: firstPage.total,
+    };
+    const extension = format === 'xlsx' ? 'xlsx' : format;
+    const { canceled, filePath: selectedPath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'تصدير النتائج المعروضة',
+      defaultPath: `database-export-${new Date().toISOString().slice(0,10)}.${extension}`,
+      filters: [{ name: extension.toUpperCase(), extensions: [extension] }],
+    });
+    if (canceled || !selectedPath) return { canceled: true };
+    const filePath = path.extname(selectedPath).toLowerCase() === `.${extension}` ? selectedPath : `${selectedPath}.${extension}`;
+    const exported = format === 'pdf'
+      ? await exportDatabaseReportPdf({ BrowserWindow }, filePath, report)
+      : format === 'csv' ? await exportFilteredCsv(filePath, report) : await exportFilteredWorkbook(filePath, report);
+    auditRead(`database-browser:export:${format}`, { entity: section, rowCount: rows.length, detail: `geoUnitId=${request.geoUnitId ?? ''};periodId=${request.periodId ?? ''};search=${search}` });
+    return { ...exported, rowCount: rows.length, canceled: false };
   });
 
   ipcMain.handle('data:forms', () => {
@@ -2349,7 +2453,70 @@ if (!gotSingleInstanceLock) {
   });
 }
 
+async function confirmManualEntryDraftQuit() {
+  const options = {
+    type: 'question',
+    title: 'مسودة الإدخال اليدوي',
+    message: 'هل تريد حفظ مسودة الإدخال قبل إغلاق التطبيق؟',
+    detail: 'المسودة تحفظ محلياً بشكل مشفر، ولا تُرسل للمراجعة أو إلى قاعدة البيانات الرسمية.',
+    buttons: ['حفظ المسودة ثم الإغلاق', 'إغلاق دون حفظ المسودة', 'متابعة العمل'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  };
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  const choice = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+  if (choice.response === 2) return false;
+  if (choice.response === 1) {
+    manualEntryDraftStore?.clear();
+    manualEntryDraftNeedsFlush = false;
+    manualEntryDraftAvailable = false;
+    return true;
+  }
+  for (let attempt = 0; attempt < 40 && manualEntryDraftNeedsFlush; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  if (manualEntryDraftNeedsFlush) {
+    const failureOptions = {
+      type: 'warning',
+      title: 'تعذر حفظ المسودة',
+      message: 'لم يكتمل حفظ المسودة المشفرة؛ سيبقى التطبيق مفتوحاً.',
+      detail: 'تحقق من توفر التخزين الآمن ثم حاول الإغلاق مجدداً، أو اختر صراحةً الإغلاق دون حفظ.',
+      buttons: ['العودة إلى التطبيق'],
+      noLink: true,
+    };
+    if (parent) await dialog.showMessageBox(parent, failureOptions);
+    else await dialog.showMessageBox(failureOptions);
+    return false;
+  }
+  const stored = manualEntryDraftStore?.load();
+  if (!stored?.draft) {
+    const failureOptions = { type: 'warning', title: 'المسودة غير موجودة', message: 'لم تُعثر على مسودة محفوظة؛ سيبقى التطبيق مفتوحاً.', buttons: ['العودة إلى التطبيق'], noLink: true };
+    if (parent) await dialog.showMessageBox(parent, failureOptions);
+    else await dialog.showMessageBox(failureOptions);
+    return false;
+  }
+  return true;
+}
+
 app.on('before-quit', (event) => {
+  if ((manualEntryDraftNeedsFlush || manualEntryDraftAvailable) && !allowQuitAfterDraftDecision) {
+    event.preventDefault();
+    if (!draftQuitPromptOpen) {
+      draftQuitPromptOpen = true;
+      confirmManualEntryDraftQuit().then(shouldQuit => {
+        if (shouldQuit) {
+          allowQuitAfterDraftDecision = true;
+          app.quit();
+        }
+      }).catch(error => {
+        dialog.showErrorBox('تعذر إغلاق التطبيق بأمان', String(error?.message ?? error));
+      }).finally(() => {
+        draftQuitPromptOpen = false;
+      });
+    }
+    return;
+  }
   stopAutoUpdate();
   if (activeDocumentJobs.size && !drainingDocumentTasks) {
     event.preventDefault();

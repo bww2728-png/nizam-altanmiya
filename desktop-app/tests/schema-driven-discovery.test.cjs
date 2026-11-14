@@ -147,7 +147,7 @@ test('reviewed document candidates create a linked standard record awaiting appr
     assert.throws(() => discovery.promoteReviewedCandidates(database,{
       documentId:staged.id,formVersionId:form.form_version_id,candidateIds:[candidate.id],
       fieldMappings:{ [candidate.id]:candidate.field_code },periodYear:2025,
-    },{ actor:'owner-test' }),/اسم المديرية/);
+    },{ actor:'owner-test' }),/حدّد المديرية/);
     assert.equal(database.prepare('SELECT COUNT(*) AS count FROM form_records').get().count,0);
     assert.throws(() => discovery.promoteReviewedCandidates(database,{
       documentId:staged.id,formVersionId:form.form_version_id,candidateIds:firstRowCandidates.map(item => item.id),
@@ -170,10 +170,21 @@ test('reviewed document candidates create a linked standard record awaiting appr
 
     const firstRowMappings = Object.fromEntries(firstRowCandidates.map(item => [item.id,item.field_code]));
     const secondRowMappings = Object.fromEntries(secondRowCandidates.map(item => [item.id,item.field_code]));
-    const candidateGroups = [
+    const candidateGroupsOriginal = [
       { candidateIds:firstRowCandidates.map(item => item.id),fieldMappings:firstRowMappings,recordLabel:'بيانات الصفحة الأولى',periodYear:2025 },
       { candidateIds:secondRowCandidates.map(item => item.id),fieldMappings:secondRowMappings,recordLabel:'بيانات الصفحة الثانية',periodYear:2024 },
     ];
+    const geographic = require('../src/main/database/manual-entry-workflow.cjs');
+    const firstGeoUnitId = geographic.ensureDirectorateGeography(database,'مديرية الاختبار','صنعاء','2026-01-01T00:00:00.000Z').geoUnitId;
+    const secondGeoUnitId = geographic.ensureDirectorateGeography(database,'مديرية ثانية','عدن','2026-01-01T00:00:00.000Z').geoUnitId;
+    const candidateGroups = [
+      { ...candidateGroupsOriginal[0],geoUnitId:firstGeoUnitId },
+      { ...candidateGroupsOriginal[1],geoUnitId:secondGeoUnitId },
+    ];
+    assert.throws(() => discovery.promoteReviewedCandidateGroups(database,{
+      documentId:staged.id,formVersionId:form.form_version_id,candidateGroups:candidateGroupsOriginal,periodYear:2025,
+    },{ actor:'owner-test' }),/حدّد المديرية/);
+    assert.equal(database.prepare('SELECT COUNT(*) AS count FROM form_records').get().count,0);
     assert.throws(() => discovery.promoteReviewedCandidateGroups(database,{
       documentId:staged.id,formVersionId:form.form_version_id,candidateGroups:[candidateGroups[0],{
         ...candidateGroups[1],fieldMappings:{ ...secondRowMappings,[secondRowCandidates.find(item => item.field_code === 'directorate.population').id]:'directorate.schools' },
@@ -241,11 +252,12 @@ test('reviewed candidates can be saved as drafts without submitting for central 
       ['directorate.districtName','directorate.governorate','directorate.population'].includes(candidate.field_code) && candidate.review_status === 'pending');
     for (const candidate of candidates) discovery.reviewCandidate(database,{ candidateId:candidate.id,status:'reviewed',value:candidate.raw_value,note:'تم التحقق من بيانات المصدر' });
     const form = records.listForms(database).find(row => row.form_code === 'legacy_directorate_v1' && row.version_status === 'published');
+    const geoUnitId = require('../src/main/database/manual-entry-workflow.cjs').ensureDirectorateGeography(database,'مسودة الاختبار','صنعاء','2026-01-01T00:00:00.000Z').geoUnitId;
     const result = discovery.promoteReviewedCandidateGroups(database,{
       documentId:staged.id,formVersionId:form.form_version_id,submitForReview:false,
       candidateGroups:[{
         candidateIds:candidates.map(candidate => candidate.id),
-        fieldMappings:Object.fromEntries(candidates.map(candidate => [candidate.id,candidate.field_code])),periodYear:2025,
+        fieldMappings:Object.fromEntries(candidates.map(candidate => [candidate.id,candidate.field_code])),periodYear:2025,geoUnitId,
       }],
     },{ actor:'owner-test' });
     assert.equal(result.records[0].status,'draft');

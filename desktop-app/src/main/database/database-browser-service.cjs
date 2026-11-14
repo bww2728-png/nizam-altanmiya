@@ -328,13 +328,28 @@ function catalogIndex(catalog) {
   return groups;
 }
 
+function approvedDatasetStats(db, key, listed) {
+  const definition = DATASETS[key];
+  if (!definition || !listed?.available || !tablePresent(db, definition.table)) return { count: 0, pendingCount: 0, latestUpdatedAt: null };
+  const description = domainService.describe(db, key);
+  const statusField = description.fields.find(field => ['approval_status','review_status','record_status'].includes(field.name));
+  if (!statusField) return { count: 0, pendingCount: Number(listed.count ?? 0), latestUpdatedAt: null, approvalUnavailable: true };
+  const columns = new Set(description.fields.map(field => field.name));
+  const dateField = ['updated_at','created_at'].find(field => columns.has(field));
+  const row = db.prepare(`SELECT SUM(CASE WHEN ${quote(statusField.name)}='approved' THEN 1 ELSE 0 END) AS approved,
+    SUM(CASE WHEN ${quote(statusField.name)}<>'approved' OR ${quote(statusField.name)} IS NULL THEN 1 ELSE 0 END) AS pending,
+    ${dateField ? `MAX(CASE WHEN ${quote(statusField.name)}='approved' THEN ${quote(dateField)} END)` : 'NULL'} AS latest
+    FROM ${quote(definition.table)}`).get();
+  return { count: Number(row.approved ?? 0), pendingCount: Number(row.pending ?? 0), latestUpdatedAt: row.latest ?? null, approvalUnavailable: false };
+}
+
 function formCounts(db, group) {
   if (!group.forms.length || !tablePresent(db, 'form_records')) return { count: 0, latestUpdatedAt: null, duplicates: 0 };
   const formCodes = [...new Set(group.forms.map(form => form.code))];
   const placeholders = formCodes.map(() => '?').join(',');
   const counts = db.prepare(`SELECT COUNT(*) AS count,MAX(record.updated_at) AS latest
     FROM form_records record JOIN form_versions version USING(form_version_id)
-    JOIN form_definitions form USING(form_id) WHERE form.form_code IN (${placeholders}) AND version.status='published'`).get(...formCodes);
+    JOIN form_definitions form USING(form_id) WHERE form.form_code IN (${placeholders}) AND version.status='published' AND record.record_status='approved'`).get(...formCodes);
   let duplicates = 0;
   for (const code of formCodes) {
     const compatibility = FORM_LEGACY_LINKS[code];
@@ -362,15 +377,16 @@ function getOverview(db) {
       const definition = DATASETS[key];
       const listed = datasetsByKey.get(key);
       if (!definition || !listed) return null;
-      const stats = listed.available ? tableStats(db, definition.table) : { count: 0, latestUpdatedAt: null };
-      return { ...listed, latestUpdatedAt: stats.latestUpdatedAt };
+      const stats = approvedDatasetStats(db, key, listed);
+      return { ...listed, rawCount: Number(listed.count ?? 0), ...stats };
     }).filter(Boolean);
     const forms = formCounts(db, group);
     const tableRecords = datasets.reduce((sum, item) => sum + item.count, 0);
+    const pendingDatasetRecords = datasets.reduce((sum, item) => sum + item.pendingCount, 0);
     const count = tableRecords + forms.count;
     const latestUpdatedAt = [...datasets.map(item => item.latestUpdatedAt), forms.latestUpdatedAt].filter(Boolean).sort().at(-1) ?? null;
     const hasStorage = datasets.length > 0 || group.forms.length > 0;
-    const state = !hasStorage ? 'unlinked' : count ? 'filled' : 'empty';
+    const state = !hasStorage ? 'unlinked' : count ? 'filled' : pendingDatasetRecords ? 'awaiting_approval' : 'empty';
     groupSummaries.set(code, {
       code,
       name: group.name,
@@ -384,7 +400,7 @@ function getOverview(db) {
       forms: group.forms.map(form => ({ ...form, count: formCountsForCode(db, form.code) })),
       sources: [
         ...datasets.map(dataset => ({ key: `dataset:${dataset.key}`, type: 'dataset', label: dataset.labelAr, count: dataset.count,
-          latestUpdatedAt: dataset.latestUpdatedAt, datasetKey: dataset.key })),
+          pendingCount: dataset.pendingCount, approvalUnavailable: dataset.approvalUnavailable, latestUpdatedAt: dataset.latestUpdatedAt, datasetKey: dataset.key })),
         ...group.forms.map(form => ({ key: `form:${form.versionId}`, type: 'form', label: form.name, count: formCountsForCode(db, form.code),
           formVersionId: form.versionId, formCode: form.code, rawCaptureOnly: form.rawCaptureOnly })),
       ],
@@ -465,7 +481,7 @@ function formCountsForCode(db, formCode) {
   if (!tablePresent(db, 'form_records')) return 0;
   return Number(db.prepare(`SELECT COUNT(*) AS count FROM form_records record
     JOIN form_versions version USING(form_version_id) JOIN form_definitions form USING(form_id)
-    WHERE form.form_code=? AND version.status='published'`).get(formCode).count ?? 0);
+    WHERE form.form_code=? AND version.status='published' AND record.record_status='approved'`).get(formCode).count ?? 0);
 }
 
 function sourceTypePresence(db, table) {
@@ -491,13 +507,27 @@ function listGroup(db, request = {}) {
   if (!group) throw new Error('المجموعة المطلوبة غير موجودة في كتالوج الإدخال.');
   const source = group.sources.find(item => item.key === sourceKey);
   if (!source) throw new Error('مصدر البيانات غير مربوط بهذه المجموعة.');
+  const geoUnitId = Number(request.geoUnitId);
+  if (!Number.isSafeInteger(geoUnitId) || geoUnitId <= 0) throw new Error('اختر المديرية قبل استعراض بياناتها.');
+  const periodId = Number(request.periodId);
+  const geo = db.prepare(`SELECT geo_unit_id,name_ar FROM geographic_units WHERE geo_unit_id=? AND is_active=1
+    AND geo_unit_type_id=(SELECT geo_unit_type_id FROM geo_unit_types WHERE type_code='directorate')`).get(geoUnitId);
+  if (!geo) throw new Error('المديرية المطلوبة غير موجودة أو غير نشطة.');
   const limitNumber = Number(request.limit);
   const limit = Number.isFinite(limitNumber) ? Math.min(MAX_LIMIT, Math.max(1, Math.trunc(limitNumber))) : 50;
   const offsetNumber = Number(request.offset);
   const offset = Number.isFinite(offsetNumber) ? Math.min(1000000, Math.max(0, Math.trunc(offsetNumber))) : 0;
   const search = String(request.search ?? '').trim().slice(0, 120);
   if (source.type === 'dataset') {
-    const result = domainService.list(db, { dataset: source.datasetKey, limit, offset, search });
+    const description = domainService.describe(db, source.datasetKey);
+    const approvalField = description.fields.find(field => ['approval_status','review_status','record_status'].includes(field.name));
+    if (!approvalField) return { rows: [], total: 0, limit, offset, fields: description.fields,
+      source: { ...source, sourceType: 'recorded_when_present', unlinkedForDirectorate: true }, requiresApproval: true };
+    const hasGeo = description.fields.some(field => field.name === 'geo_unit_id');
+    if (!hasGeo) return { rows: [], total: 0, limit, offset, fields: description.fields, source: { ...source, sourceType: 'recorded_when_present', unlinkedForDirectorate: true }, requiresGeography: true };
+    const filters = [{ field: 'geo_unit_id', value: geoUnitId }, { field: approvalField.name, value: 'approved' }];
+    if (Number.isSafeInteger(periodId) && periodId > 0 && description.fields.some(field => field.name === 'period_id')) filters.push({ field: 'period_id', value: periodId });
+    const result = domainService.list(db, { dataset: source.datasetKey, limit, offset, search, filters });
     const sourceTypes = sourceTypeLabels(db, result.rows);
     return {
       ...result,
@@ -506,7 +536,7 @@ function listGroup(db, request = {}) {
     };
   }
   const definition = recordService.getFormDefinition(db, source.formVersionId);
-  const result = recordService.listRecords(db, { formVersionId: source.formVersionId, limit, offset, search });
+  const result = recordService.listRecords(db, { formVersionId: source.formVersionId, geoUnitId, periodId, status: 'approved', limit, offset, search });
   const fields = [
     { name: 'record_label', labelAr: 'اسم السجل' },
     { name: 'geo_name', labelAr: 'الوحدة الجغرافية' },

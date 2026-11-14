@@ -131,9 +131,8 @@ test('canonical project register is routed, paged, owner-gated and displays prov
 test('central entry receives project and indicator context and refreshes approved consumers', () => {
   assert.match(app, /<DataEntry[^>]*initialEntry=\{params\.entry \?\? \{\}\}[^>]*onDataChanged=\{refresh\}/);
   assert.match(app, /<Indicators[^>]*onNavigate=\{navigate\}/);
-  assert.match(dataEntry, /formRecordId: recordFormRecordId/);
-  assert.match(dataEntry, /setRecordFormRecordId\(String\(initialEntry\.recordId\)\)/);
-  assert.match(dataEntry, /parentRecordId: editingRecord\?\.record\?\.parent_record_id \?\? initialEntry\.parentRecordId/);
+  assert.match(dataEntry, /forms\.push\(\{[^\n]*parentRecordId: initialEntry\.parentRecordId/);
+  assert.match(dataEntry, /setRecordDetail\(detail\)/);
   assert.match(dataEntry, /onDataChanged\?\.\(\)/);
   assert.match(indicators, /domainCode: 'development-indicators', groupCode: 'indicator-results', formCode: 'indicator_observation_v1'/);
   assert.match(projects, /formCode: 'project_v1',\s*recordId: result\.project\.form_record_id/);

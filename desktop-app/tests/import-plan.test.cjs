@@ -383,6 +383,10 @@ test('applyImportPlan writes the created/updated counts and returns every applie
     assert.equal(createdIds.length, 1);
     assert.deepEqual(updatedIds, [stored.id]);
     assert.equal(persist.countDirectorates(database), 2);
+    const importedGeo = database.prepare(`SELECT unit.geo_unit_id FROM geographic_units unit JOIN geo_unit_types type USING(geo_unit_type_id)
+      WHERE type.type_code='directorate' AND unit.name_ar='مديرية جديدة'`).get();
+    assert.ok(importedGeo?.geo_unit_id);
+    assert.ok(database.prepare('SELECT 1 FROM form_records WHERE geo_unit_id=? LIMIT 1').get(importedGeo.geo_unit_id));
 
     const updated = database.prepare('SELECT schools FROM directorates WHERE id = ?').get(stored.id);
     assert.equal(updated.schools, 45, 'the newer value must win on update');

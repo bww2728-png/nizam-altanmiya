@@ -175,7 +175,10 @@ function getFormDefinition(db, formVersionId) {
 function resolveGeo(db, id) {
   if (id == null || id === '') return null;
   const number = Number(id);
-  if (!Number.isSafeInteger(number) || number <= 0 || !db.prepare('SELECT 1 FROM geographic_units WHERE geo_unit_id=?').get(number)) throw new Error('الوحدة الجغرافية غير موجودة.');
+  if (!Number.isSafeInteger(number) || number <= 0) throw new Error('اختر مديرية جغرافية صالحة.');
+  const unit = db.prepare(`SELECT unit.is_active,type.type_code FROM geographic_units unit
+    JOIN geo_unit_types type USING(geo_unit_type_id) WHERE unit.geo_unit_id=?`).get(number);
+  if (!unit || unit.type_code !== 'directorate' || unit.is_active !== 1) throw new Error('اختر مديرية موجودة ونشطة قبل حفظ السجل.');
   return number;
 }
 function resolvePeriod(db, id, requestedYear) {
@@ -249,6 +252,7 @@ function saveRecordWithSource(db, request, sourceContext) {
   if (definition.version_status !== 'published') throw new Error('لا يمكن إدخال بيانات إلى إصدار نموذج غير منشور.');
   const requestedGeoUnitId = resolveGeo(db,request.geoUnitId);
   const isProjectFunding = definition.form_code === 'project_funding_v1';
+  if (!isProjectFunding && requestedGeoUnitId == null) throw new Error('حدّد المديرية قبل حفظ السجل.');
   if (!isProjectFunding && request.parentRecordId != null && request.parentRecordId !== '') throw new Error('لا يقبل هذا النموذج سجلاً أباً.');
   const values = request.values && typeof request.values === 'object' && !Array.isArray(request.values) ? request.values : {};
   const fields = new Map(definition.fields.map(field => [field.field_code,field]));
@@ -287,10 +291,11 @@ function saveRecordWithSource(db, request, sourceContext) {
       if (previous?.parent_record_id && request.parentRecordId != null
         && Number(request.parentRecordId) !== Number(previous.parent_record_id)) throw new Error('لا يمكن تغيير المشروع الأب لسجل تمويل قائم.');
       const parent = resolveApprovedProjectParent(db,parentRecordId);
+      if (!parent.geo_unit_id) throw new Error('المشروع الأب غير مرتبط بمديرية؛ لا يمكن حفظ بيانات التمويل.');
       if (requestedGeoUnitId != null && Number(requestedGeoUnitId) !== Number(parent.geo_unit_id)) {
         throw new Error('موقع سجل التمويل يجب أن يطابق موقع المشروع الأب.');
       }
-      geoUnitId = parent.geo_unit_id;
+      geoUnitId = resolveGeo(db,parent.geo_unit_id);
     }
     if (parsed.some(item => item.field.storage_class === 'measurement' && ['known','zero'].includes(item.value.state))
       && !request.periodId && !request.periodYear) throw new Error('حدّد الفترة المرجعية للقياسات قبل حفظ السجل.');
@@ -750,10 +755,14 @@ function listRecords(db, request = {}) {
   const params = [];
   if (Number.isSafeInteger(formId) && formId > 0) { conditions.push('r.form_version_id=?'); params.push(formId); }
   if (Number.isSafeInteger(formRecordId) && formRecordId > 0) { conditions.push('r.form_record_id=?'); params.push(formRecordId); }
+  const geoUnitId = Number(request.geoUnitId);
+  if (Number.isSafeInteger(geoUnitId) && geoUnitId > 0) { conditions.push('r.geo_unit_id=?'); params.push(geoUnitId); }
+  const periodId = Number(request.periodId);
+  if (Number.isSafeInteger(periodId) && periodId > 0) { conditions.push('r.period_id=?'); params.push(periodId); }
   if (status) { conditions.push('r.record_status=?'); params.push(status); }
   if (search) {
-    conditions.push("(instr(lower(coalesce(r.record_label,'')),lower(?))>0 OR instr(lower(coalesce(g.name_ar,'')),lower(?))>0 OR instr(lower(coalesce(p.label_ar,'')),lower(?))>0 OR instr(lower(f.form_code),lower(?))>0 OR instr(lower(f.name_ar),lower(?))>0)");
-    params.push(search,search,search,search,search);
+    conditions.push("(instr(lower(coalesce(r.record_label,'')),lower(?))>0 OR instr(lower(coalesce(g.name_ar,'')),lower(?))>0 OR instr(lower(coalesce(p.label_ar,'')),lower(?))>0 OR instr(lower(f.form_code),lower(?))>0 OR instr(lower(f.name_ar),lower(?))>0 OR EXISTS(SELECT 1 FROM record_field_values value JOIN form_fields field ON field.form_field_id=value.form_field_id WHERE value.form_record_id=r.form_record_id AND (instr(lower(coalesce(field.label_ar,'')),lower(?))>0 OR instr(lower(coalesce(value.value_text,'')),lower(?))>0 OR instr(lower(coalesce(value.raw_value_text,'')),lower(?))>0 OR instr(lower(coalesce(value.normalized_value_text,'')),lower(?))>0 OR instr(lower(coalesce(value.value_date,'')),lower(?))>0 OR instr(CAST(value.value_boolean AS TEXT),?)>0)) OR EXISTS(SELECT 1 FROM observations observation WHERE observation.form_record_id=r.form_record_id AND (instr(CAST(coalesce(observation.value_integer,observation.value_real) AS TEXT),?)>0 OR instr(lower(coalesce(observation.value_text,'')),lower(?))>0)))");
+    params.push(search,search,search,search,search,search,search,search,search,search,search,search,search);
   }
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   const from = `FROM form_records r JOIN form_versions version ON version.form_version_id=r.form_version_id

@@ -18,6 +18,10 @@ const PAGE_SIZE = 100;
 export default function Database({ catalogue, accessProfile, notify, refreshKey, onOpenCard, onDataChanged }) {
   const api = typeof window === 'undefined' ? null : window.localApp?.databaseBrowser;
   const [overview, setOverview] = useState(null);
+  const [directorates, setDirectorates] = useState([]);
+  const [periods, setPeriods] = useState([]);
+  const [selectedGeoUnitId, setSelectedGeoUnitId] = useState('');
+  const [selectedPeriodId, setSelectedPeriodId] = useState('');
   const [section, setSection] = useState('catalog');
   const [selectedGroup, setSelectedGroup] = useState('');
   const [selectedSource, setSelectedSource] = useState('');
@@ -29,6 +33,7 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
   const [search, setSearch] = useState('');
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState('');
   const pageSize = 50;
 
@@ -36,7 +41,14 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
     if (!api || accessProfile !== 'owner') return;
     setLoading(true);
     try {
-      setOverview(await api.overview());
+      const [nextOverview, geography, nextPeriods] = await Promise.all([
+        api.overview(),
+        window.localApp.dataGeography(''),
+        window.localApp.dataPeriods(),
+      ]);
+      setOverview(nextOverview);
+      setDirectorates((geography.rows ?? []).filter(unit => unit.type_code === 'directorate' && Number(unit.is_active) === 1));
+      setPeriods(nextPeriods.rows ?? []);
       setError('');
     } catch (cause) {
       setError(errText(cause) || 'تعذر تحميل فهرس قاعدة البيانات.');
@@ -55,7 +67,7 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
   const selectedUnclassifiedItem = unclassifiedDatasets.find(item => item.key === selectedUnclassified);
 
   const loadRows = useCallback(async () => {
-    if (!api || accessProfile !== 'owner' || section === 'legacy' || section === 'catalog' && !activeSource
+    if (!api || accessProfile !== 'owner' || section === 'legacy' || section === 'catalog' && (!activeSource || !selectedGeoUnitId)
       || section === 'operational' && !selectedOperational || section === 'unclassified' && !selectedUnclassifiedItem && !selectedUnclassifiedTable) {
       setResult(null);
       return;
@@ -64,7 +76,7 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
     try {
       const request = { search, limit: pageSize, offset };
       const payload = section === 'catalog'
-        ? await api.group({ ...request, groupCode: activeGroup.code, sourceKey: activeSource.key })
+        ? await api.group({ ...request, groupCode: activeGroup.code, sourceKey: activeSource.key, geoUnitId: Number(selectedGeoUnitId), periodId: selectedPeriodId ? Number(selectedPeriodId) : undefined })
         : section === 'operational'
           ? await api.operational({ ...request, table: selectedOperational })
           : section === 'unclassified'
@@ -80,20 +92,39 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
     } finally {
       setLoading(false);
     }
-  }, [api, accessProfile, section, activeGroup, activeSource, selectedOperational, selectedUnclassifiedItem, search, offset]);
+  }, [api, accessProfile, section, activeGroup, activeSource, selectedOperational, selectedUnclassifiedItem, selectedGeoUnitId, selectedPeriodId, search, offset]);
 
   useEffect(() => { loadRows(); }, [loadRows, refreshKey]);
+
+  async function exportDatabase(format) {
+    if (!api || !result || result.requiresApproval || result.requiresGeography) return;
+    setExporting(true);
+    try {
+      const request = { format, section, search };
+      if (section === 'catalog') Object.assign(request, { groupCode: activeGroup.code, sourceKey: activeSource.key, geoUnitId: Number(selectedGeoUnitId), periodId: selectedPeriodId ? Number(selectedPeriodId) : undefined });
+      if (section === 'operational') request.table = selectedOperational;
+      if (section === 'unclassified') Object.assign(request, selectedUnclassifiedTable ? { table: selectedUnclassifiedTable } : { dataset: selectedUnclassifiedItem.key });
+      const response = await api.export(request);
+      if (!response?.canceled) notify({ tone: 'success', message: `تم تصدير ${fmtNumber(response.rowCount ?? 0, 0)} سجل.` });
+    } catch (cause) {
+      notify({ tone: 'error', message: errText(cause) || 'تعذر تصدير النتائج.' });
+    } finally {
+      setExporting(false);
+    }
+  }
 
   function chooseGroup(group) {
     setSection('catalog');
     setSelectedGroup(group.code);
     setSelectedSource(group.sources[0]?.key ?? '');
+    setSelectedRecordId(null);
     setOffset(0);
     setSearch('');
   }
 
   function chooseSection(next) {
     setSection(next);
+    if (next !== 'entry') setSelectedRecordId(null);
     setResult(null);
     setOffset(0);
     setSearch('');
@@ -112,7 +143,7 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
       </Card>
       <DataEntry notify={notify} refreshKey={refreshKey} onDataChanged={onDataChanged} onShowDatabase={() => chooseSection('catalog')}
         initialEntry={activeGroup ? { domainCode: activeGroup.domainCode, groupCode: activeGroup.code, formCode: activeSource?.formCode,
-          recordId: selectedRecordId ?? undefined } : {}} />
+          geoUnitId: selectedGeoUnitId || undefined, recordId: selectedRecordId ?? undefined } : { geoUnitId: selectedGeoUnitId || undefined }} />
     </div>
   );
 
@@ -141,6 +172,16 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
           <button className={`seg-btn${section === 'unclassified' ? ' active' : ''}`} onClick={() => chooseSection('unclassified')}>غير مصنفة / قديمة</button>
           <button className={`seg-btn${section === 'legacy' ? ' active' : ''}`} onClick={() => chooseSection('legacy')}>سجلات المديريات القديمة</button>
         </div>
+        {section === 'catalog' && <div className="toolbar" style={{ marginTop: 14 }}>
+          <label className="stack tight" style={{ minWidth: 220 }}><span>المديرية *</span><select className="input" value={selectedGeoUnitId} onChange={event => { setSelectedGeoUnitId(event.target.value); setOffset(0); setResult(null); }}>
+            <option value="">اختر المديرية لعرض بياناتها</option>
+            {directorates.map(unit => <option key={unit.geo_unit_id} value={unit.geo_unit_id}>{unit.name_ar}{unit.parent_name_ar ? ` — ${unit.parent_name_ar}` : ''}</option>)}
+          </select></label>
+          <label className="stack tight" style={{ minWidth: 220 }}><span>الفترة المرجعية (اختيارية)</span><select className="input" value={selectedPeriodId} onChange={event => { setSelectedPeriodId(event.target.value); setOffset(0); setResult(null); }}>
+            <option value="">كل الفترات</option>
+            {periods.map(period => <option key={period.period_id} value={period.period_id}>{period.label_ar}</option>)}
+          </select></label>
+        </div>}
       </Card>
 
       {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
@@ -169,9 +210,10 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
             {activeGroup?.sources?.length > 0 ? (
               <div className="toolbar" style={{ marginBottom: 10 }}>
                 {activeGroup.sources.map(source => <button key={source.key} type="button" className={`btn small${activeSource?.key === source.key ? ' primary' : ''}`}
-                  onClick={() => { setSelectedSource(source.key); setOffset(0); }}>{source.label} · {fmtNumber(source.count, 0)}</button>)}
+                  onClick={() => { setSelectedSource(source.key); setOffset(0); setResult(null); }}>{source.label} · {fmtNumber(source.count, 0)}</button>)}
               </div>
             ) : <Empty icon={DatabaseIcon} title="لا توجد سجلات في هذا المصدر" hint="لا نعرض هذه المجموعة كجدول فارغ؛ لا يوجد ربط تخزين مثبت لها حالياً." />}
+            {!selectedGeoUnitId && activeGroup?.sources?.length > 0 && <p className="field-hint">اختر المديرية أعلاه لعرض السجلات المعتمدة التابعة لها فقط.</p>}
             {activeGroup?.duplicateCount > 0 && <p className="field-hint">يوجد {fmtNumber(activeGroup.duplicateCount, 0)} ربط توافق بين سجل مركزي وسجل قديم؛ لا يُحسب السجل مرتين.</p>}
             {activeGroup?.fieldCoverageState === 'needs_domain_review' && <p className="field-hint">تعريف بعض الحقول المرشحة يحتاج مراجعة؛ الروابط المعروضة لا تعني اعتماداً دلالياً.</p>}
           </Card>
@@ -207,11 +249,15 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
 
       {section === 'legacy' && <LegacyDirectorates catalogue={catalogue} accessProfile={accessProfile} notify={notify} refreshKey={refreshKey} onOpenCard={onOpenCard} onDataChanged={onDataChanged} />}
 
-      {section !== 'legacy' && section !== 'entry' && (activeSource || section === 'operational' && selectedOperational || section === 'unclassified' && (selectedUnclassifiedItem || selectedUnclassifiedTable)) && (
+      {section !== 'legacy' && section !== 'entry' && (section === 'catalog' && activeSource && selectedGeoUnitId || section === 'operational' && selectedOperational || section === 'unclassified' && (selectedUnclassifiedItem || selectedUnclassifiedTable)) && (
         <Card title={`السجلات — ${listTitle}`} flush>
           <div className="toolbar" style={{ padding: 12 }}>
             <TextInput value={search} onChange={value => { setSearch(value); setOffset(0); }} placeholder="بحث في السجلات المعروضة..." />
             <span className="chip">{fmtNumber(result?.total ?? 0, 0)} سجل</span>
+            {result && !result.requiresApproval && !result.requiresGeography && <div className="btn-row">
+              <button className="btn small" disabled={exporting || loading} onClick={() => exportDatabase('xlsx')}><FileSpreadsheet size={15} /> Excel</button>
+              <button className="btn small" disabled={exporting || loading} onClick={() => exportDatabase('pdf')}><FileText size={15} /> PDF</button>
+            </div>}
           </div>
           {loading && !result ? <div style={{ padding: 20 }}><Loading /> </div> : result?.rows?.length ? (
             <div className="table-wrap" style={{ maxHeight: '65vh' }}><table className="data"><thead><tr>
@@ -222,7 +268,7 @@ export default function Database({ catalogue, accessProfile, notify, refreshKey,
               <td>{row._sourceType ?? 'المصدر غير موثق'}</td><td>{row.record_status ?? row.quality_status ?? row.row_status ?? '—'}</td>
               {section === 'catalog' && activeSource?.type === 'form' && <td><button type="button" className="btn small" onClick={() => { setSelectedRecordId(row.form_record_id); setSection('entry'); }}>فتح السجل ومراجعة مصدره</button></td>}
             </tr>)}</tbody></table></div>
-          ) : <Empty icon={DatabaseIcon} title={result ? 'لا توجد سجلات مطابقة' : 'اختر مصدراً لعرض السجلات'} hint="المجموعات الفارغة والروابط غير المثبتة معروضة بحالات منفصلة." />}
+          ) : <Empty icon={DatabaseIcon} title={result?.requiresApproval ? 'المصدر لا يثبت حالة الاعتماد' : result?.requiresGeography ? 'المصدر غير مرتبط بمديرية' : result ? 'لا توجد سجلات مطابقة' : 'جارٍ تجهيز العرض'} hint={result?.requiresApproval ? 'لا يمكن إدراج هذا الجدول ضمن قاعدة البيانات المعتمدة حتى يدعم مسار مراجعة واعتماد واضحاً.' : result?.requiresGeography ? 'لا تُعرض هذه البيانات ضمن مديرية بعينها لأن مصدر التخزين لا يحتوي رابطاً جغرافياً موثقاً.' : 'تعرض هذه القائمة السجلات المعتمدة فقط؛ المسودات والسجلات قيد المراجعة تبقى في مسار المراجعة.'} />}
           {result && <div className="report-pagination"><span>عرض {result.total ? offset + 1 : 0}–{Math.min(offset + pageSize, result.total)} من {fmtNumber(result.total, 0)}</span>
             <div className="btn-row"><button className="btn small" disabled={!offset || loading} onClick={() => setOffset(Math.max(0, offset - pageSize))}>السابق</button>
               <span className="chip">صفحة {fmtNumber(Math.floor(offset / pageSize) + 1, 0)} / {fmtNumber(pageCount, 0)}</span>

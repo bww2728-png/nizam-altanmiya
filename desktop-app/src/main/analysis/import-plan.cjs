@@ -25,6 +25,7 @@
 const crypto = require('node:crypto');
 const { INPUT_FIELDS, FIELD_BY_KEY, MANDATORY_FIELDS } = require('./schema.cjs');
 const { DIRECTORATE_COLUMNS } = require('./store-schema.cjs');
+const manualEntryWorkflow = require('../database/manual-entry-workflow.cjs');
 
 const MANDATORY_BY_KEY = new Map(MANDATORY_FIELDS.map((field) => [field.key, field]));
 
@@ -498,6 +499,7 @@ function applyImportPlan(database, plan, request = {}) {
         continue;
       }
 
+      manualEntryWorkflow.ensureDirectorateGeography(database,row.districtName,row.governorate,nowIso());
       const result = persist.upsertDirectorate(database, {
         districtName: row.districtName,
         governorate: row.governorate,

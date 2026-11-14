@@ -95,7 +95,9 @@ test('quitting disarms the retry and the poll', () => {
   assert.match(stop.slice(0, 600), /updateStopped = true;/);
   assert.match(stop.slice(0, 600), /clearTimeout\(updateTimers\.retry\)/);
   assert.match(stop.slice(0, 600), /clearInterval\(updateTimers\.interval\)/);
-  assert.match(mainSource, /app\.on\('before-quit', \((?:event)?\) => \{\s*stopAutoUpdate\(\);/);
+  const quitHandler = mainSource.slice(mainSource.indexOf("app.on('before-quit',"), mainSource.indexOf("app.on('window-all-closed',"));
+  assert.match(quitHandler, /stopAutoUpdate\(\);/);
+  assert.ok(quitHandler.indexOf('stopAutoUpdate();') > quitHandler.indexOf('confirmManualEntryDraftQuit()'), 'updater timers stop after the draft decision allows shutdown');
 });
 
 test('a rejected download promise is handled instead of reaching the process', () => {

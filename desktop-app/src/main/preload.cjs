@@ -19,12 +19,21 @@ contextBridge.exposeInMainWorld('localApp', {
 
   // Database-driven forms and the shared record/review write path
   dataEntryCatalog: () => ipcRenderer.invoke('data:entry-catalog'),
+  manualEntryWorkspace: () => ipcRenderer.invoke('data:manual-entry:workspace'),
+  saveManualEntryWorkspace: (request) => ipcRenderer.invoke('data:manual-entry:save', request),
+  manualEntryDraft: {
+    load: () => ipcRenderer.invoke('data:manual-entry:draft:load'),
+    save: (draft) => ipcRenderer.invoke('data:manual-entry:draft:save', { draft }),
+    clear: () => ipcRenderer.invoke('data:manual-entry:draft:clear'),
+    markDirty: () => ipcRenderer.invoke('data:manual-entry:draft:dirty'),
+  },
   databaseBrowser: {
     overview: () => ipcRenderer.invoke('database-browser:overview'),
     group: (request) => ipcRenderer.invoke('database-browser:group', request),
     operational: (request) => ipcRenderer.invoke('database-browser:operational', request),
     unclassified: (request) => ipcRenderer.invoke('database-browser:unclassified', request),
     legacyTable: (request) => ipcRenderer.invoke('database-browser:legacy-table', request),
+    export: (request) => ipcRenderer.invoke('database-browser:export', request),
   },
   dataForms: () => ipcRenderer.invoke('data:forms'),
   dataFormDefinition: (formVersionId) => ipcRenderer.invoke('data:form-definition', formVersionId),

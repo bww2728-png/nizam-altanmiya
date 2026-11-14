@@ -33,6 +33,19 @@ function openDatabase() {
   return db;
 }
 
+function addTestDirectorate(db, district = 'مديرية اختبار', governorate = 'تعز') {
+  const now = '2026-01-01T00:00:00.000Z';
+  const governorateTypeId = db.prepare("SELECT geo_unit_type_id FROM geo_unit_types WHERE type_code='governorate'").get().geo_unit_type_id;
+  const directorateTypeId = db.prepare("SELECT geo_unit_type_id FROM geo_unit_types WHERE type_code='directorate'").get().geo_unit_type_id;
+  const parent = db.prepare(`INSERT INTO geographic_units(unit_type,name,normalized_name,created_at,updated_at,name_ar,is_active,geo_unit_type_id)
+    VALUES('governorate',?,?,?,?,?,1,?)`).run(governorate,governorate.toLowerCase(),now,now,governorate,governorateTypeId);
+  db.prepare('UPDATE geographic_units SET geo_unit_id=id WHERE id=?').run(parent.lastInsertRowid);
+  const unit = db.prepare(`INSERT INTO geographic_units(parent_id,unit_type,name,normalized_name,created_at,updated_at,name_ar,is_active,geo_unit_type_id,parent_geo_unit_id)
+    VALUES(?,'district',?,?,?,?,?,1,?,?)`).run(parent.lastInsertRowid,district,district.toLowerCase(),now,now,district,directorateTypeId,parent.lastInsertRowid);
+  db.prepare('UPDATE geographic_units SET geo_unit_id=id WHERE id=?').run(unit.lastInsertRowid);
+  return Number(unit.lastInsertRowid);
+}
+
 test('canonical model migrations are additive and idempotent', () => {
   const db = openDatabase();
   try {
@@ -156,15 +169,17 @@ test('central record writes validate values and keep revisions, provenance and r
     dataArchitecture.migrate(db);
     const form = recordService.listForms(db).find(item => item.form_code === 'legacy_directorate_v1');
     assert.ok(form?.form_version_id);
+    const geoUnitId = addTestDirectorate(db,'المعافر','تعز');
     const values = {
       'directorate.districtName': { value:'المعافر' },
       'directorate.governorate': { value:'تعز' },
       'directorate.population': { value:'٥٬٠٠٠' },
     };
-    assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,values:{ ...values,'directorate.population':{ value:'-2' } } }),/الحد الأدنى/);
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,values }),/حدّد المديرية/);
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,geoUnitId,values:{ ...values,'directorate.population':{ value:'-2' } } }),/الحد الأدنى/);
     assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,values:{},valueSources:{ 'directorate.population':'مصدر بلا قيمة' } }),/دون حفظ قيمة أو حالة/);
     assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,values,valueSources:{ 'directorate.unknown':'مصدر مجهول' } }),/حقل مصدر غير معرّف/);
-    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,periodYear:'2025',values,actor:'tester',valueSources:{ 'directorate.population':'استمارة حصر 2025، ورقة السكان، الخلية C4' } });
+    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,geoUnitId,periodYear:'2025',values,actor:'tester',valueSources:{ 'directorate.population':'استمارة حصر 2025، ورقة السكان، الخلية C4' } });
     const draftOverview = recordService.getRecordOverview(db,{ limit:1 });
     assert.equal(draftOverview.total,1);
     assert.equal(draftOverview.statusCounts.draft,1);
@@ -180,7 +195,7 @@ test('central record writes validate values and keep revisions, provenance and r
     assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].sourceType,'manual_entry');
     assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].provenanceType,'manual_entry');
     assert.equal(recordService.getRecord(db,created.formRecordId).values['directorate.population'].enteredBy,'tester');
-    recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,periodYear:'2025',values:{
+    recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,geoUnitId,periodYear:'2025',values:{
       'directorate.districtName':{ value:'المعافر' },
       'directorate.governorate':{ value:'تعز' },
       'directorate.population':{ value:'6500' },
@@ -205,7 +220,7 @@ test('central record writes validate values and keep revisions, provenance and r
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM observations WHERE form_record_id=? AND geo_unit_id=(SELECT geo_unit_id FROM form_records WHERE form_record_id=?)").get(created.formRecordId,created.formRecordId).n,1);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM record_reviews WHERE form_record_id=?').get(created.formRecordId).n,2);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE resource_type='form_record' AND resource_id=?").get(String(created.formRecordId)).n,4);
-    assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,values,changeReason:'محاولة تعديل' }),/قيد المراجعة أو معتمد/);
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,geoUnitId,values,changeReason:'محاولة تعديل' }),/قيد المراجعة أو معتمد/);
   } finally {
     db.close();
   }
@@ -215,6 +230,7 @@ test('primary collection forms persist dimensions, provenance and review revisio
   const db = openDatabase();
   try {
     dataArchitecture.migrate(db);
+    const geoUnitId = addTestDirectorate(db);
     const populationForm = recordService.listForms(db).find(item => item.form_code === 'population_age_sex_collection_v1');
     const schoolForm = recordService.listForms(db).find(item => item.form_code === 'education_school_collection_v1');
     assert.ok(populationForm?.form_version_id);
@@ -228,10 +244,10 @@ test('primary collection forms persist dimensions, provenance and review revisio
     assert.ok(populationField.dimensions.every(dimension => dimension.required && dimension.values.length > 0));
     const officialIndicatorCount = db.prepare('SELECT COUNT(*) AS count FROM indicator_observations').get().count;
     const populationValues = { 'population.age_sex':{ value:'37',state:'known' } };
-    assert.throws(() => recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,periodYear:'2025',values:populationValues }),/اختر/);
-    assert.throws(() => recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,periodYear:'2025',values:populationValues,
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,geoUnitId,periodYear:'2025',values:populationValues }),/اختر/);
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,geoUnitId,periodYear:'2025',values:populationValues,
       dimensionValues:{ 'population.age_sex':{ sex:'6_14',age_group:'male' } } }),/قيمة البعد/);
-    const created = recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,periodYear:'2025',actor:'collector',
+    const created = recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,geoUnitId,periodYear:'2025',actor:'collector',
       values:populationValues,dimensionValues:{ 'population.age_sex':{ sex:'female',age_group:'6_14' } },
       valueSources:{ 'population.age_sex':'استمارة السكان، ورقة العمر والجنس، الخلية B7' } });
     const observation = db.prepare("SELECT observation_id,dimension_signature FROM observations WHERE form_record_id=? AND form_field_id=(SELECT form_field_id FROM form_fields WHERE field_code='population.age_sex')")
@@ -252,7 +268,7 @@ test('primary collection forms persist dimensions, provenance and review revisio
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM indicator_observations').get().count,officialIndicatorCount);
 
     recordService.decideRecord(db,created.formRecordId,{ decision:'reopen',actor:'reviewer',reason:'استكمال التصنيف.' });
-    recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,formRecordId:created.formRecordId,periodYear:'2025',actor:'collector',
+    recordService.saveRecord(db,{ formVersionId:populationForm.form_version_id,formRecordId:created.formRecordId,geoUnitId,periodYear:'2025',actor:'collector',
       changeReason:'تصحيح الفئة العمرية والقيمة.',values:{ 'population.age_sex':{ value:'39',state:'known' } },
       dimensionValues:{ 'population.age_sex':{ sex:'female',age_group:'15_17' } },
       valueSources:{ 'population.age_sex':'تحديث الاستمارة، الخلية B8' } });
@@ -268,10 +284,10 @@ test('primary collection forms persist dimensions, provenance and review revisio
     const schoolType = school.fields.find(field => field.field_code === 'education.school.type');
     assert.equal(schoolType.referenceValues.length,2);
     const schoolTypeId = schoolType.referenceValues.find(option => option.code === 'school').id;
-    assert.throws(() => recordService.saveRecord(db,{ formVersionId:schoolForm.form_version_id,values:{
+    assert.throws(() => recordService.saveRecord(db,{ formVersionId:schoolForm.form_version_id,geoUnitId,values:{
       'education.school.name':{ value:'مدرسة اختبار' },'education.school.type':{ value:999999 },
     } }),/قيمة التصنيف غير صالحة/);
-    const schoolRecord = recordService.saveRecord(db,{ formVersionId:schoolForm.form_version_id,periodYear:'2025',actor:'collector',values:{
+    const schoolRecord = recordService.saveRecord(db,{ formVersionId:schoolForm.form_version_id,geoUnitId,periodYear:'2025',actor:'collector',values:{
       'education.school.name':{ value:'مدرسة اختبار' },'education.school.type':{ value:schoolTypeId },
       'education.school.gender_reported':{ value:'بنين كما ورد في الاستمارة' },'education.school.classrooms':{ value:'6' },
     },valueSources:{ 'education.school.name':'سجل المدارس، الصفحة 4','education.school.gender_reported':'سجل المدارس، الصفحة 4' } });
@@ -299,7 +315,7 @@ test('primary collection forms persist dimensions, provenance and review revisio
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_code='education_facility_sync' AND resource_id=?").get(String(linkedSchool.entity_id)).count,3);
 
     const kindergartenTypeId = schoolType.referenceValues.find(option => option.code === 'kindergarten').id;
-    const kindergartenRecord = recordService.saveRecord(db,{ formVersionId:schoolForm.form_version_id,actor:'collector',values:{
+    const kindergartenRecord = recordService.saveRecord(db,{ formVersionId:schoolForm.form_version_id,geoUnitId,actor:'collector',values:{
       'education.school.name':{ value:'روضة اختبار' },'education.school.type':{ value:kindergartenTypeId },
     } });
     recordService.submitForReview(db,kindergartenRecord.formRecordId,'reviewer');
@@ -316,11 +332,12 @@ test('primary collection forms persist dimensions, provenance and review revisio
 test('approved education records are backfilled into canonical entities idempotently', () => {
   const db = openDatabase();
   try {
+    const geoUnitId = addTestDirectorate(db);
     const form = recordService.listForms(db).find(item => item.form_code === 'education_school_collection_v1');
     const definition = recordService.getFormDefinition(db,form.form_version_id);
     const typeId = definition.fields.find(field => field.field_code === 'education.school.type').referenceValues
       .find(option => option.code === 'kindergarten').id;
-    const record = recordService.saveRecord(db,{ formVersionId:form.form_version_id,actor:'collector',values:{
+    const record = recordService.saveRecord(db,{ formVersionId:form.form_version_id,geoUnitId,actor:'collector',values:{
       'education.school.name':{ value:'روضة ترحيل' },'education.school.type':{ value:typeId },
     } });
     db.prepare("UPDATE form_records SET record_status='approved' WHERE form_record_id=?").run(record.formRecordId);
@@ -536,6 +553,10 @@ test('project regions require explicit row approval and preserve project/funding
       'تعز', 'المعافر', 'المياه', '',
     ];
     await workbook.xlsx.writeFile(filePath);
+    const now = '2026-01-01T00:00:00.000Z';
+    const governorate = db.prepare("INSERT INTO geographic_units (unit_type,name,normalized_name,created_at,updated_at) VALUES ('governorate','تعز','تعز',?,?)").run(now, now);
+    db.prepare("INSERT INTO geographic_units (parent_id,unit_type,name,normalized_name,created_at,updated_at) VALUES (?,'district','المعافر','المعافر',?,?)")
+      .run(governorate.lastInsertRowid, now, now);
 
     const staged = await canonical.stageWorkbook(db, filePath);
     const catalog = canonical.listWorkbookImportRegions(db, staged.batchId);
@@ -584,28 +605,28 @@ test('project regions require explicit row approval and preserve project/funding
     assert.equal(registry.rows.length, 1);
     assert.equal(registry.rows[0].name, 'تأهيل شبكة مياه');
     assert.equal(registry.rows[0].fundingCount, 1);
-    assert.equal(registry.rows[0].openQualityIssues, 2);
+    assert.equal(registry.rows[0].openQualityIssues, 1);
 
     const projectDetails = canonical.getCanonicalProject(db, project.id);
     assert.equal(projectDetails.project.name, 'تأهيل شبكة مياه');
     assert.equal(projectDetails.funding.length, 1);
     assert.equal(projectDetails.funding[0].currency_code, 'USD');
     assert.match(projectDetails.provenance.source_location, /المشاريع!row-2/);
-    assert.equal(projectDetails.issues.length, 2);
+    assert.equal(projectDetails.issues.length, 1);
     const resolvedIssue = canonical.resolveProjectQualityIssue(db, project.id, projectDetails.issues[0].id, 'تم التحقق من المصدر وتصحيح السجل.');
     assert.equal(resolvedIssue.status, 'resolved');
     assert.throws(() => canonical.resolveProjectQualityIssue(db, project.id, projectDetails.issues[0].id, 'محاولة تسوية ثانية'), /سبق تسويتها/);
-    assert.throws(() => canonical.resolveProjectQualityIssue(db, project.id + 1, projectDetails.issues[1].id, 'مرجع مشروع خاطئ'), /لا ترتبط بهذا المشروع/);
+    assert.throws(() => canonical.resolveProjectQualityIssue(db, project.id + 1, projectDetails.issues[0].id, 'مرجع مشروع خاطئ'), /لا ترتبط بهذا المشروع/);
     const resolvedDetails = canonical.getCanonicalProject(db, project.id);
     assert.equal(resolvedDetails.issues.find(issue => issue.id === resolvedIssue.issueId).resolution, 'تم التحقق من المصدر وتصحيح السجل.');
-    assert.equal(canonical.listCanonicalProjects(db, { search: 'تأهيل شبكة', limit: 10 }).rows[0].openQualityIssues, 1);
+    assert.equal(canonical.listCanonicalProjects(db, { search: 'تأهيل شبكة', limit: 10 }).rows[0].openQualityIssues, 0);
     assert.throws(() => canonical.getCanonicalProject(db, 0), /معرّف المشروع غير صالح/);
 
     const promotion = db.prepare('SELECT * FROM workbook_import_promotions').get();
     assert.equal(promotion.entity_type, 'project');
     assert.match(promotion.source_location, /المشاريع!row-2/);
     assert.deepEqual(JSON.parse(promotion.mapping_json), columnMap);
-    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM data_quality_issues WHERE issue_code LIKE 'unmatched-project-%'").get().n, 2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM data_quality_issues WHERE issue_code LIKE 'unmatched-project-%'").get().n, 1);
     assert.equal(canonical.readWorkbookImportRegion(db, staged.batchId, region.id).rows.find(row => row.rowNumber === 2).promoted, true);
     let batchResult = JSON.parse(db.prepare('SELECT result_json FROM workbook_import_batches WHERE id = ?').get(staged.batchId).result_json);
     assert.equal(batchResult.directorateImport.applied, 20);
@@ -642,20 +663,30 @@ test('project promotion rejects ambiguous mappings and foreign batch/region pair
   try {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('المشاريع');
-    sheet.getRow(1).values = ['اسم المشروع', 'رمز المشروع', 'التكلفة التقديرية'];
-    sheet.getRow(2).values = ['تأهيل طريق', 'P-1', '1000'];
+    sheet.getRow(1).values = ['اسم المشروع', 'رمز المشروع', 'التكلفة التقديرية', 'المحافظة', 'المديرية'];
+    sheet.getRow(2).values = ['تأهيل طريق', 'P-1', '1000', 'تعز', 'اسم غير معتمد'];
     await workbook.xlsx.writeFile(filePath);
     const staged = await canonical.stageWorkbook(db, filePath);
     const region = canonical.listWorkbookImportRegions(db, staged.batchId).regions.find(item => item.candidateType === 'project-candidate');
     assert.ok(region);
     assert.throws(() => canonical.promoteProjectRegion(db, {
       batchId: staged.batchId, regionId: region.id,
-      columnMap: { project_name: 1, project_code: 1 }, approvedRows: [2],
+      columnMap: { project_name: 1, project_code: 1, governorate: 4, district: 5 }, approvedRows: [2],
     }), /العمود نفسه/);
     assert.throws(() => canonical.promoteProjectRegion(db, {
-      batchId: staged.batchId + 1, regionId: region.id,
+      batchId: staged.batchId, regionId: region.id,
       columnMap: { project_name: 1 }, approvedRows: [2],
+    }), /عمودي المحافظة والمديرية/);
+    assert.throws(() => canonical.promoteProjectRegion(db, {
+      batchId: staged.batchId + 1, regionId: region.id,
+      columnMap: { project_name: 1, governorate: 4, district: 5 }, approvedRows: [2],
     }), /لا تنتمي/);
+    const unmatched = canonical.promoteProjectRegion(db, {
+      batchId: staged.batchId, regionId: region.id,
+      columnMap: { project_name: 1, governorate: 4, district: 5 }, approvedRows: [2],
+    });
+    assert.equal(unmatched.applied.length, 0);
+    assert.match(unmatched.refused[0].reason, /لم يُحفظ المشروع بلا مديرية/);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM projects').get().n, 0);
   } finally {
     db.close();
@@ -768,6 +799,7 @@ test('approved central project records are mirrored transactionally into canonic
   try {
     dataArchitecture.migrate(db);
     db.prepare("INSERT INTO sectors(code,name_ar,created_at) VALUES('water','المياه','2026-01-01')").run();
+    const geoUnitId = addTestDirectorate(db);
     const form = recordService.listForms(db).find(item => item.form_code === 'project_v1');
     assert.ok(form?.form_version_id);
     const values = {
@@ -780,7 +812,7 @@ test('approved central project records are mirrored transactionally into canonic
       startDate:{ value:'2025-01-01' },
       sectorCode:{ value:'water' },
     };
-    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,periodYear:'2025',values,actor:'operator' });
+    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,geoUnitId,periodYear:'2025',values,actor:'operator' });
     assert.deepEqual(recordService.listRecords(db,{ formRecordId:created.formRecordId }).rows.map(row => row.form_record_id),[created.formRecordId]);
     assert.equal(recordService.submitForReview(db,created.formRecordId,'reviewer').status,'pending_review');
     assert.equal(recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' }).status,'approved');
@@ -793,7 +825,7 @@ test('approved central project records are mirrored transactionally into canonic
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM application_migration_log WHERE migration_code='domain-records-v1' AND source_table='projects' AND source_id=? AND target_id=?").get(String(link.legacy_entity_id),String(created.formRecordId)).n,1);
 
     recordService.decideRecord(db,created.formRecordId,{ decision:'reopen',actor:'reviewer',reason:'تحديث البيانات.' });
-    recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,periodYear:'2025',changeReason:'تحديث اسم المشروع.',actor:'operator',values:{
+    recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,geoUnitId,periodYear:'2025',changeReason:'تحديث اسم المشروع.',actor:'operator',values:{
       ...values,projectName:{ value:'تأهيل شبكة مياه مطور' },estimatedCost:{ value:'1,500' },
     } });
     recordService.submitForReview(db,created.formRecordId,'reviewer');
@@ -813,6 +845,7 @@ test('approved central project funding stays linked through save, review, edit a
   try {
     dataArchitecture.migrate(db);
     db.prepare("INSERT INTO sectors(code,name_ar,created_at) VALUES('water','المياه','2026-01-01')").run();
+    const geoUnitId = addTestDirectorate(db);
     const projectForm = recordService.listForms(db).find(item => item.form_code === 'project_v1');
     const fundingForm = recordService.listForms(db).find(item => item.form_code === 'project_funding_v1');
     assert.ok(projectForm?.form_version_id);
@@ -821,7 +854,7 @@ test('approved central project funding stays linked through save, review, edit a
       projectCode:{ value:'CENTRAL-FUNDING-1' },projectName:{ value:'مشروع اختبار تمويل' },
       projectStatus:{ value:'مقترح' },estimatedCost:{ value:'800' },currencyCode:{ value:'YER' },sectorCode:{ value:'water' },
     };
-    const projectRecord = recordService.saveRecord(db,{ formVersionId:projectForm.form_version_id,periodYear:'2025',values:projectValues,actor:'operator' });
+    const projectRecord = recordService.saveRecord(db,{ formVersionId:projectForm.form_version_id,geoUnitId,periodYear:'2025',values:projectValues,actor:'operator' });
     assert.equal(recordService.listApprovedProjectParents(db,{}).total,0);
     recordService.submitForReview(db,projectRecord.formRecordId,'reviewer');
     recordService.decideRecord(db,projectRecord.formRecordId,{ decision:'approve',actor:'reviewer' });
