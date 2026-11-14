@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { Check, ClipboardList, RefreshCw, Search, Send, ShieldAlert } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Activity, Check, ChevronDown, ClipboardList, FileText, Filter, Plus, RefreshCw, Search, Send, ShieldAlert, Star } from 'lucide-react';
 import { Card, Field, Loading, SelectInput, TextInput } from '../components/ui.jsx';
 import { errText } from '../lib/format.js';
 import { FIELD_GROUPS, DECISION_KEY } from '../lib/fields.js';
@@ -17,6 +17,15 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   const [selectedDomainCode, setSelectedDomainCode] = useState('');
   const [selectedGroupCode, setSelectedGroupCode] = useState('');
   const [catalogSearch, setCatalogSearch] = useState('');
+  const [catalogStatusFilter, setCatalogStatusFilter] = useState('all');
+  const [catalogTypeFilter, setCatalogTypeFilter] = useState('all');
+  const [catalogFavoriteFilter, setCatalogFavoriteFilter] = useState(false);
+  const [workspaceTab, setWorkspaceTab] = useState('overview');
+  const [favorites, setFavorites] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('manual-entry-favorites') ?? '[]')); } catch { return new Set(); }
+  });
+  const [expandedDomains, setExpandedDomains] = useState(() => new Set());
+  const [overview, setOverview] = useState(null);
   const [forms, setForms] = useState([]);
   const [formVersionId, setFormVersionId] = useState('');
   const [definition, setDefinition] = useState(null);
@@ -31,6 +40,17 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   const [recordFormRecordId, setRecordFormRecordId] = useState('');
   const [recordOffset, setRecordOffset] = useState(0);
   const [recordTotal, setRecordTotal] = useState(0);
+  const [entryMode, setEntryMode] = useState('single');
+  const [showOptionalFields, setShowOptionalFields] = useState(false);
+  const [autoSaveState, setAutoSaveState] = useState('idle');
+  const [autoSaveError, setAutoSaveError] = useState('');
+  const [draftRecordId, setDraftRecordId] = useState(null);
+  const saveTimerRef = useRef(null);
+  const persistDraftRef = useRef(null);
+  const latestDraftSignatureRef = useRef('');
+  const latestDraftVersionRef = useRef('');
+  const savingRef = useRef(false);
+  const lastSavedPayloadRef = useRef('');
   const [values, setValues] = useState({});
   const [valueStates, setValueStates] = useState({});
   const [dimensionValues, setDimensionValues] = useState({});
@@ -56,20 +76,78 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   const domains = catalog?.domains ?? [];
   const selectedDomain = domains.find((domain) => domain.code === selectedDomainCode) ?? domains[0] ?? null;
   const selectedGroup = selectedDomain?.groups.find((group) => group.code === selectedGroupCode) ?? selectedDomain?.groups[0] ?? null;
-  const matchingDomains = domains.filter((domain) => {
+  const groupType = (group) => {
+    const fields = [...(group.fields ?? []),...(group.publishedFields ?? [])];
+    if (fields.some((field) => field.semanticType === 'measurement' || field.storage === 'measurement')) return 'measurement';
+    if (fields.some((field) => ['attribute','classification','narrative'].includes(field.semanticType))) return 'descriptive';
+    return 'unclassified';
+  };
+  const groupReadiness = (group) => group.forms.some((form) => !form.rawCaptureOnly)
+    ? 'available' : group.rawCaptureAvailable ? 'raw' : 'unresolved';
+  const visibleGroups = (domain) => domain.groups.filter((group) => {
     const query = catalogSearch.trim().toLocaleLowerCase();
-    return !query || domain.name.toLocaleLowerCase().includes(query)
-      || domain.groups.some((group) => group.name.toLocaleLowerCase().includes(query)
-        || group.fields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
-        || group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
-        || group.rawRequirements?.some((item) => item.text.toLocaleLowerCase().includes(query)));
+    const matchesSearch = !query || domain.name.toLocaleLowerCase().includes(query)
+      || group.name.toLocaleLowerCase().includes(query)
+      || group.fields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
+      || group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
+      || group.rawRequirements?.some((item) => item.text.toLocaleLowerCase().includes(query));
+    return matchesSearch && (catalogStatusFilter === 'all' || groupReadiness(group) === catalogStatusFilter)
+      && (catalogTypeFilter === 'all' || groupType(group) === catalogTypeFilter)
+      && (!catalogFavoriteFilter || favorites.has(group.code));
   });
-  const selectCatalogGroup = (domain, group) => {
+  const matchingDomains = domains.filter((domain) => visibleGroups(domain).length > 0);
+  const getGroupStats = (group) => {
+    if (!overview || overview.restricted) return { recordCount: null,latestUpdatedAt: null };
+    const linkedForms = group.forms.map((form) => overview.formVersionCounts?.[String(form.versionId)]).filter(Boolean);
+    return {
+      recordCount: linkedForms.reduce((count, form) => count + form.recordCount, 0),
+      latestUpdatedAt: linkedForms.map((form) => form.latestUpdatedAt).filter(Boolean).sort().at(-1) ?? null,
+    };
+  };
+  const selectCatalogGroup = async (domain, group) => {
     if (editingRecord) return;
+    const hasStartedRecord = Object.keys(values).length || Object.keys(valueStates).length || recordLabel || notes || geoUnitId || periodId || periodYear || parentRecordId;
+    if (definition && hasStartedRecord) {
+      const saved = await persistDraft(true);
+      if (!saved && !window.confirm('تعذر حفظ المسودة؛ هل تريد ترك هذه المجموعة والتخلص من المدخلات الحالية؟')) return;
+    }
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     setSelectedDomainCode(domain.code);
     setSelectedGroupCode(group.code);
+    setWorkspaceTab('group');
+    setRecordFormRecordId('');
+    setRecordOffset(0);
+    setDraftRecordId(null);
+    lastSavedPayloadRef.current = '';
+    setAutoSaveState('idle');
+    setValues({});
+    setValueStates({});
+    setDimensionValues({});
+    setValueSources({});
+    setRecordLabel('');
+    setNotes('');
+    setGeoUnitId('');
+    setPeriodId('');
+    setPeriodYear('');
+    setParentRecordId('');
+    setChangeReason('');
     setFormVersionId(String(group.forms.find((form) => form.versionId)?.versionId ?? ''));
   };
+  const toggleFavorite = (groupCode) => setFavorites((current) => {
+    const next = new Set(current);
+    if (next.has(groupCode)) next.delete(groupCode); else next.add(groupCode);
+    try { localStorage.setItem('manual-entry-favorites', JSON.stringify([...next])); } catch {}
+    return next;
+  });
+
+  const loadOverview = useCallback(async () => {
+    try {
+      const result = await window.localApp.dataRecordOverview({ limit: 6 });
+      setOverview(result ?? null);
+    } catch (cause) {
+      notify({ tone: 'bad', message: errText(cause) || 'تعذر تحميل ملخص السجلات.' });
+    }
+  }, [notify]);
 
   const loadForms = useCallback(async () => {
     setLoading(true);
@@ -85,6 +163,7 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
         .find(({ group }) => group.forms.some((form) => form.versionId));
       setSelectedDomainCode((current) => current || firstPublishedGroup?.domain.code || catalogResult?.domains[0]?.code || '');
       setSelectedGroupCode((current) => current || firstPublishedGroup?.group.code || '');
+      setExpandedDomains((current) => current.size ? current : new Set([firstPublishedGroup?.domain.code ?? catalogResult?.domains[0]?.code].filter(Boolean)));
       const active = (formRows ?? []).find((form) => form.is_active && form.form_version_id && form.version_status === 'published');
       const initialFormVersionId = firstPublishedGroup?.group.forms.find((form) => form.versionId)?.versionId ?? active?.form_version_id ?? '';
       setFormVersionId((current) => current || String(initialFormVersionId));
@@ -113,6 +192,18 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   }, [notify, recordFormRecordId, recordFormVersionId, recordOffset, recordSearch, recordStatus]);
 
   useEffect(() => { loadForms(); }, [loadForms]);
+  useEffect(() => { loadRecords(); }, [loadRecords, refreshKey]);
+  useEffect(() => { loadOverview(); }, [loadOverview, refreshKey]);
+  useEffect(() => () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); }, []);
+  useEffect(() => {
+    const hasInput = Object.keys(values).length || Object.keys(valueStates).length || recordLabel || notes || geoUnitId || periodId || periodYear || parentRecordId;
+    if (!definition || !hasInput || (editingRecord && !changeReason.trim())) return undefined;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    setAutoSaveState('pending');
+    saveTimerRef.current = setTimeout(() => { persistDraft(true); }, 900);
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
+  }, [definition,editingRecord,changeReason,formVersionId,values,valueStates,dimensionValues,valueSources,recordLabel,notes,geoUnitId,periodId,periodYear,parentRecordId]);
+
   useEffect(() => {
     if (!catalog || !forms.length) return;
     const domain = catalog.domains.find((item) => item.code === initialEntry.domainCode);
@@ -197,7 +288,9 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
         setSelectedGroupCode(location.group.code);
       }
       setEditingRecord(record);
+      setWorkspaceTab('group');
       setFormVersionId(String(record.record.form_version_id));
+      requestAnimationFrame(() => document.getElementById('data-entry-form')?.scrollIntoView({ behavior:'smooth',block:'start' }));
     } catch (cause) {
       notify({ tone: 'bad', message: errText(cause) || 'تعذر تحميل السجل للتعديل.' });
     }
@@ -209,13 +302,19 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
       const form = await window.localApp.dataFormDefinition(Number(record.record.form_version_id));
       setViewingRecord(record);
       setViewingDefinition(form);
+      setWorkspaceTab('records');
+      requestAnimationFrame(() => document.getElementById('data-entry-detail')?.scrollIntoView({ behavior:'smooth',block:'start' }));
     } catch (cause) {
       notify({ tone: 'bad', message: errText(cause) || 'تعذر تحميل تفاصيل السجل ومصادر قيمه.' });
     }
   };
 
   const cancelEdit = () => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     setEditingRecord(null);
+    setDraftRecordId(null);
+    lastSavedPayloadRef.current = '';
+    setAutoSaveState('idle');
     setValues({});
     setValueStates({});
     setDimensionValues({});
@@ -231,52 +330,126 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
     setChangeReason('');
   };
 
+  const buildRecordPayload = () => {
+    const fieldMap = new Map(definition.fields.map((field) => [field.field_code, field]));
+    const codes = new Set([...Object.keys(values), ...Object.keys(valueStates)]);
+    const payload = Object.fromEntries([...codes].filter((fieldCode) => {
+      const state = valueStates[fieldCode];
+      return state && !['known', 'zero'].includes(state)
+        ? true
+        : values[fieldCode] !== '' && values[fieldCode] !== null && values[fieldCode] !== undefined;
+    }).map((fieldCode) => {
+      const field = fieldMap.get(fieldCode);
+      const type = field?.data_type_override ?? field?.data_type;
+      const state = valueStates[fieldCode];
+      if (state && !['known', 'zero'].includes(state)) return [fieldCode, { value: null, state }];
+      const numericZero = ['integer', 'decimal'].includes(type) && Number(values[fieldCode]) === 0;
+      const value = state === 'zero' ? '0' : values[fieldCode];
+      return [fieldCode, { value, state: state === 'zero' || numericZero ? 'zero' : 'known' }];
+    }));
+    return payload;
+  };
+
+  const buildDraftSignature = (payload = buildRecordPayload()) => JSON.stringify({ formVersionId, payload, valueStates, dimensionValues, valueSources, recordLabel, notes, geoUnitId, periodId, periodYear, parentRecordId });
+  latestDraftSignatureRef.current = buildDraftSignature();
+  latestDraftVersionRef.current = String(formVersionId);
+
+  const persistDraft = async (automatic = false) => {
+    if (!definition || Number(definition.form_version_id) !== Number(formVersionId) || savingRef.current) return null;
+    const payload = buildRecordPayload();
+    const signature = buildDraftSignature(payload);
+    const persistedVersionId = Number(formVersionId);
+    if (signature === lastSavedPayloadRef.current) {
+      if (!automatic) notify({ tone:'ok',message:`المسودة ${draftRecordId} محفوظة بالفعل؛ يمكنك إرسالها للمراجعة من قائمة السجلات.` });
+      return { unchanged:true };
+    }
+    const requiredFields = definition.fields.filter((field) => field.is_required);
+    if (Object.keys(payload).length === 0 || requiredFields.some((field) => !payload[field.field_code] || !['known','zero'].includes(payload[field.field_code].state))) {
+      setAutoSaveState('incomplete');
+      if (!automatic) notify({ tone:'warn',message:'أكمل الحقول المطلوبة قبل حفظ المسودة.' });
+      return null;
+    }
+    const editId = editingRecord?.record?.form_record_id;
+    const existingId = editId ?? draftRecordId;
+    const reason = changeReason.trim() || (automatic ? 'حفظ تلقائي لمسودة قيد الإدخال.' : 'استكمال المسودة يدوياً.');
+    if (editId && !changeReason.trim()) {
+      setAutoSaveState('reason');
+      if (!automatic) notify({ tone:'warn',message:'أدخل سبب التعديل قبل حفظ السجل.' });
+      return null;
+    }
+    if (definition.form_code === 'project_funding_v1' && !Number(parentRecordId)) {
+      setAutoSaveState('incomplete');
+      if (!automatic) notify({ tone:'warn',message:'اختر المشروع المعتمد المرتبط بسجل التمويل.' });
+      return null;
+    }
+    savingRef.current = true;
+    setSaving(true);
+    setAutoSaveError('');
+    setAutoSaveState('saving');
+    try {
+      const saved = await window.localApp.saveDataRecord({
+        formVersionId:Number(formVersionId),formRecordId:existingId,
+        geoUnitId:geoUnitId || null,periodId:periodId || null,periodYear:periodYear.trim() || null,
+        parentRecordId:definition.form_code === 'project_funding_v1' ? Number(parentRecordId) || null : undefined,
+        recordLabel:recordLabel.trim() || null,notes:notes.trim() || null,values:payload,dimensionValues,valueSources,
+        changeReason:existingId ? reason : null,
+      });
+      setDraftRecordId(saved.formRecordId);
+      lastSavedPayloadRef.current = signature;
+      setAutoSaveState('saved');
+      await loadRecords();
+      if (!automatic) {
+        notify({ tone:'ok',message:`${existingId ? 'حُدّث' : 'حُفظ'} السجل ${saved.formRecordId} كمسودة، مع توثيق مصدر الإدخال.` });
+        setEditingRecord(null);
+        setDraftRecordId(null);
+        setValues({});
+        setValueStates({});
+        setDimensionValues({});
+        setValueSources({});
+        setRecordLabel('');
+        setNotes('');
+        setGeoUnitId('');
+        setPeriodId('');
+        setPeriodYear('');
+        setParentRecordId('');
+        setChangeReason('');
+        lastSavedPayloadRef.current = '';
+        setAutoSaveState('idle');
+        onDataChanged?.();
+        if (entryMode === 'single') {
+          setWorkspaceTab('records');
+          requestAnimationFrame(() => document.getElementById('data-entry-records')?.scrollIntoView({ behavior:'smooth',block:'start' }));
+        }
+      }
+      return saved;
+    } catch (cause) {
+      setAutoSaveError(errText(cause) || 'تعذر الحفظ التلقائي. أعد المحاولة قبل مغادرة النموذج.');
+      setAutoSaveState('error');
+      if (!automatic) notify({ tone:'bad',message:errText(cause) || 'تعذر حفظ المسودة.' });
+      return null;
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+      if (automatic && latestDraftVersionRef.current === String(persistedVersionId) && latestDraftSignatureRef.current !== signature) {
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = setTimeout(() => { persistDraftRef.current?.(true); }, 350);
+      }
+    }
+  };
+  persistDraftRef.current = persistDraft;
+
   const submit = async (event) => {
     event.preventDefault();
-    if (!definition) return;
-    setSaving(true);
-    try {
-      const fieldMap = new Map(definition.fields.map((field) => [field.field_code, field]));
-      const codes = new Set([...Object.keys(values), ...Object.keys(valueStates)]);
-      const payload = Object.fromEntries([...codes].filter((fieldCode) => {
-        const state = valueStates[fieldCode];
-        return state && !['known', 'zero'].includes(state)
-          ? true
-          : values[fieldCode] !== '' && values[fieldCode] !== null && values[fieldCode] !== undefined;
-      }).map((fieldCode) => {
-        const field = fieldMap.get(fieldCode);
-        const type = field?.data_type_override ?? field?.data_type;
-        const state = valueStates[fieldCode];
-        if (state && !['known', 'zero'].includes(state)) return [fieldCode, { value: null, state }];
-        const numericZero = ['integer', 'decimal'].includes(type) && Number(values[fieldCode]) === 0;
-        const value = state === 'zero' ? '0' : values[fieldCode];
-        return [fieldCode, { value, state: state === 'zero' || numericZero ? 'zero' : 'known' }];
-      }));
-      const saved = await window.localApp.saveDataRecord({
-        formVersionId: Number(formVersionId), formRecordId: editingRecord?.record?.form_record_id,
-        geoUnitId: geoUnitId || null, periodId: periodId || null, periodYear: periodYear.trim() || null,
-        parentRecordId: definition.form_code === 'project_funding_v1' ? Number(parentRecordId) || null : undefined,
-        recordLabel: recordLabel.trim() || null, notes: notes.trim() || null, values: payload, dimensionValues, valueSources, changeReason: changeReason.trim() || null,
-      });
-      notify({ tone: 'ok', message: `${editingRecord ? 'حُدّث' : 'حُفظ'} السجل ${saved.formRecordId} كمسودة، مع توثيق مصدر الإدخال.` });
-      setEditingRecord(null);
-      setValues({});
-      setValueStates({});
-      setValueSources({});
-      setRecordLabel('');
-      setNotes('');
-      setGeoUnitId('');
-      setPeriodId('');
-      setPeriodYear('');
-      setParentRecordId('');
-      setChangeReason('');
-      await loadRecords();
-      onDataChanged?.();
-    } catch (cause) {
-      notify({ tone: 'bad', message: errText(cause) || 'تعذر حفظ المسودة.' });
-    } finally {
-      setSaving(false);
-    }
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    await persistDraft(false);
+  };
+
+  const saveAndSubmitDraft = async () => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    const saved = await persistDraft(true);
+    if (!saved) return;
+    const formRecordId = saved.formRecordId ?? (saved.unchanged ? draftRecordId : null);
+    if (formRecordId) await review(formRecordId,'submit');
   };
 
   const review = async (formRecordId, decision) => {
@@ -319,6 +492,8 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   const groupedFieldCodes = new Set(groupedFields.flatMap((group) => group.fields.map((field) => field.field_code)));
   const additionalFields = entryFields.filter((field) => !groupedFieldCodes.has(field.field_code));
   if (additionalFields.length) groupedFields.push({ id: 'other', title: 'حقول إضافية في النموذج', hint: '', fields: additionalFields });
+  const renderedGroups = groupedFields.map((group) => ({ ...group, fields: group.fields.filter((field) => showOptionalFields || field.is_required) })).filter((group) => group.fields.length);
+  const optionalFieldCount = entryFields.filter((field) => !field.is_required).length;
   const hasKnownMeasurements = entryFields.some((field) => field.storage_class === 'measurement'
     && ['known','zero'].includes(valueStates[field.field_code] ?? 'known')
     && ((values[field.field_code] !== '' && values[field.field_code] !== null && values[field.field_code] !== undefined)
@@ -327,67 +502,88 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
   if (loading && forms.length === 0) return <Card><Loading label="جارٍ تحميل كتالوج البيانات..." /></Card>;
 
   return (
-    <div className="stack">
-      <Card title="مركز إدارة وإدخال البيانات التنموية الموحد" subtitle="اختر المجال والمجموعة؛ يمكن نشر نماذج الجمع الأولي قبل اعتماد المنهجية التحليلية.">
-        <div className="row between">
-          <span className="muted">إدخال ومراجعة السجلات وفق قاموس النماذج المركزي.</span>
-          {onShowDatabase && <button type="button" className="btn small" onClick={onShowDatabase}>عرض قاعدة البيانات الشاملة</button>}
+    <div className="stack data-entry-page">
+      <header className="data-entry-hero">
+        <div>
+          <span className="eyebrow">إدارة البيانات التنموية</span>
+          <h1>مركز الإدخال اليدوي</h1>
+          <p>استعرض المجالات، اختر نموذجاً، وتابع السجلات من مكان واحد.</p>
         </div>
-        <div className="stack tight">
-          <div className="quote"><strong>نطاق الكتالوج:</strong> يعرض {domains.length} مجالاً من المواصفة. قد تكون النماذج الأولية صالحة لجمع القيم الخام مع بقاء التعريفات أو الوحدات أو المراجع قيد المراجعة؛ هذا لا يجعل القيم معتمدة للتحليل الرسمي.</div>
-          <Field label="ابحث عن مجال أو مجموعة">
-            <TextInput value={catalogSearch} onChange={setCatalogSearch} placeholder="مثال: السكان، المدارس، الإيرادات" />
-          </Field>
-          <div className="row" role="group" aria-label="المجالات التنموية">
-            {matchingDomains.map((domain) => <button key={domain.code} type="button" className={`btn small ${selectedDomain?.code === domain.code ? 'primary' : 'ghost'}`} aria-pressed={selectedDomain?.code === domain.code} onClick={() => {
-              setSelectedDomainCode(domain.code);
-              const query = catalogSearch.trim().toLocaleLowerCase();
-              const nextGroup = query
-                ? domain.groups.find((group) => group.name.toLocaleLowerCase().includes(query)
-                  || group.fields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
-                  || group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
-                  || group.rawRequirements?.some((item) => item.text.toLocaleLowerCase().includes(query)))
-                  ?? domain.groups.find((group) => group.forms.some((form) => form.versionId)) ?? domain.groups[0]
-                : domain.groups.find((group) => group.forms.some((form) => form.versionId)) ?? domain.groups[0];
-              setSelectedGroupCode(nextGroup?.code ?? '');
-              setFormVersionId(String(nextGroup?.forms.find((form) => form.versionId)?.versionId ?? ''));
-            }}>{domain.name}<span className="dim"> · {domain.groups.length}</span></button>)}
+        <div className="btn-row">
+          {onShowDatabase && <button type="button" className="btn" onClick={onShowDatabase}><ClipboardList size={15} /> قاعدة البيانات الشاملة</button>}
+          <button type="button" className="btn primary" onClick={() => document.getElementById('data-entry-form')?.scrollIntoView({ behavior:'smooth',block:'start' })}><Plus size={15} /> بدء إدخال جديد</button>
+        </div>
+      </header>
+
+      <nav className="data-entry-workspace-tabs" aria-label="أقسام مركز الإدخال">
+        <button type="button" className={workspaceTab === 'overview' ? 'active' : ''} onClick={() => { setWorkspaceTab('overview'); document.querySelector('.data-entry-overview')?.scrollIntoView({ behavior:'smooth',block:'start' }); }}><Activity size={15} /> الملخص</button>
+        <button type="button" className={workspaceTab === 'group' ? 'active' : ''} onClick={() => { setWorkspaceTab('group'); document.querySelector('.data-entry-layout')?.scrollIntoView({ behavior:'smooth',block:'start' }); }}><ClipboardList size={15} /> المجالات والنماذج</button>
+        <button type="button" className={workspaceTab === 'records' ? 'active' : ''} onClick={() => { setWorkspaceTab('records'); document.getElementById('data-entry-records')?.scrollIntoView({ behavior:'smooth',block:'start' }); }}><FileText size={15} /> السجلات والمراجعة</button>
+      </nav>
+
+      <section className="data-entry-overview" aria-label="ملخص السجلات">
+        <div className="data-entry-overview-head"><div><h2>ملخص العمل</h2><p>إحصاءات مباشرة من سجلات قاعدة البيانات المحلية.</p></div><button type="button" className="btn small ghost" onClick={() => { loadOverview(); loadRecords(); }}><RefreshCw size={14} /> تحديث</button></div>
+        {overview?.restricted ? <div className="quote">عرض ملخص السجلات وإدارتها يتطلب وضع المالك.</div> : overview ? <div className="data-entry-stats">
+          <button type="button" className="data-entry-stat" onClick={() => { setRecordStatus('all'); document.getElementById('data-entry-records')?.scrollIntoView({ behavior:'smooth' }); }}><span>كل السجلات</span><strong>{new Intl.NumberFormat('ar').format(overview.total)}</strong></button>
+          {Object.entries({ draft:'مسودات',pending_review:'قيد المراجعة',approved:'معتمدة',rejected:'معادة',superseded:'مستبدلة',archived:'مؤرشفة' }).map(([status,label]) => <button key={status} type="button" className={`data-entry-stat status-${status}`} onClick={() => { setRecordStatus(status); document.getElementById('data-entry-records')?.scrollIntoView({ behavior:'smooth' }); }}><span>{label}</span><strong>{new Intl.NumberFormat('ar').format(overview.statusCounts?.[status] ?? 0)}</strong></button>)}
+        </div> : <Loading label="جارٍ تحميل ملخص السجلات..." />}
+        {!overview?.restricted && overview?.latest?.length > 0 && <div className="data-entry-recent"><strong>آخر السجلات</strong><div className="data-entry-recent-list">{overview.latest.slice(0,4).map((record) => <button type="button" key={record.form_record_id} onClick={() => openRecord(record.form_record_id)}><span className="data-entry-recent-title">{record.record_label || `${record.form_name} · ${record.form_record_id}`}</span><span>{record.geo_name || 'دون موقع'} · {record.period_label || 'دون فترة'}</span><span>تحديث {record.updated_at ? new Date(record.updated_at).toLocaleDateString('ar') : 'غير محدد'}</span><span className={`data-entry-status status-${record.record_status}`}>{STATUS_LABELS[record.record_status] ?? record.record_status}</span></button>)}</div></div>}
+      </section>
+
+      <section className="data-entry-layout">
+        <aside className="data-entry-catalog" aria-label="مجالات ومجموعات الإدخال">
+          <div className="data-entry-catalog-head"><div><span className="eyebrow">الكتالوج المركزي</span><h2>المجالات والمجموعات</h2></div><span className="chip">{domains.length} مجالاً</span></div>
+          <div className="search-box"><Search size={16} /><input className="input" value={catalogSearch} onChange={(event) => setCatalogSearch(event.target.value)} placeholder="ابحث عن مجال أو مجموعة" aria-label="ابحث عن مجال أو مجموعة" /></div>
+          <div className="data-entry-filters">
+            <label><span><Filter size={13} /> حالة الإتاحة</span><select className="select" value={catalogStatusFilter} onChange={(event) => setCatalogStatusFilter(event.target.value)}><option value="all">كل الحالات</option><option value="available">نموذج منشور</option><option value="raw">جمع خام</option><option value="unresolved">قيد التعريف</option></select></label>
+            <label><span>طبيعة البيانات الموصوفة</span><select className="select" value={catalogTypeFilter} onChange={(event) => setCatalogTypeFilter(event.target.value)}><option value="all">كل الأنواع</option><option value="measurement">قياس</option><option value="descriptive">حقول وصفية أو تصنيفية</option><option value="unclassified">لا يوجد تصنيف دلالي كافٍ</option></select></label>
           </div>
-          {selectedDomain && <section className="stack tight" aria-label="المجموعات الفرعية">
-            <strong>{selectedDomain.name}</strong>
-            <div className="row">
-              {selectedDomain.groups.filter((group) => {
-                const query = catalogSearch.trim().toLocaleLowerCase();
-                return !query || selectedDomain.name.toLocaleLowerCase().includes(query) || group.name.toLocaleLowerCase().includes(query)
-                  || group.fields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
-                  || group.publishedFields?.some((field) => `${field.name} ${field.code}`.toLocaleLowerCase().includes(query))
-                  || group.rawRequirements?.some((item) => item.text.toLocaleLowerCase().includes(query));
-              }).map((group) => <button key={group.code} type="button" className={`btn small ${selectedGroup?.code === group.code ? 'primary' : 'ghost'}`} aria-pressed={selectedGroup?.code === group.code} disabled={Boolean(editingRecord)} onClick={() => selectCatalogGroup(selectedDomain, group)}>
-                {group.name}<span className="dim"> · {group.forms.some((form) => !form.rawCaptureOnly) ? 'نموذج جزئي' : group.rawCaptureAvailable ? `جمع خام · ${group.rawCaptureFieldCount}` : 'قيد التعريف'}</span>
-              </button>)}
-            </div>
-          </section>}
-          {selectedGroup && <div className="stack tight">
-            <div className="quote">
-              <strong>{selectedGroup.forms.some((form) => !form.rawCaptureOnly) ? 'التغطية الدلالية المنشورة جزئية:' : selectedGroup.rawCaptureAvailable ? 'التقاط خام متاح لهذه المجموعة:' : 'لا يوجد نموذج إدخال لهذه المجموعة بعد:'}</strong>{' '}{selectedGroup.forms.some((form) => !form.rawCaptureOnly)
-                ? `توجد ${selectedGroup.forms.filter((form) => !form.rawCaptureOnly).length} نماذج لحقول موصوفة؛ ${selectedGroup.rawCaptureFieldCount} حقلاً خاماً إضافياً متاحاً للمراجعة. نطاق النماذج الموصوفة لا يغطي عناصر المجال كاملة.`
-                : selectedGroup.rawCaptureAvailable ? `أُنشئ نموذج عام يتيح التقاط ${selectedGroup.rawCaptureFieldCount} بنداً كما ورد في المواصفة، دون تحويلها إلى تعريفات أو وحدات أو أبعاد مفترضة.`
-                  : 'يلزم تعريف موثوق قبل إنشاء نموذج دلالي. نقص المنهجيات لا يمنع جمع القيم الخام الواضحة.'}
-              {selectedGroup.rawCaptureAvailable && <p>{selectedGroup.requirementItemCount} بنداً مفهرساً؛ تظهر العناصر غير المحسومة كحقول نصية للمراجعة، ولا تُستخدم في التحليل الرسمي.</p>}
-              {!selectedGroup.forms.length && <p>{selectedGroup.fieldCoverageState === 'needs_domain_review'
-                ? `عُثر على ${selectedGroup.fields.length} تعريفات مرشحة تحتاج ربطاً دلالياً؛ لم تُستخدم تلقائياً في النموذج الخام.`
-                : 'لا توجد تعريفات حقول حالية مرتبطة بهذه المجموعة؛ يمكن بدء النموذج الدلالي بعد مراجعة مواصفة البيانات المتاحة.'}</p>}
-            </div>
-            {selectedGroup.fields?.length > 0 && <div className="quote">
-              <strong>حقول موجودة تحتاج مراجعة دلالية ({selectedGroup.fields.length}):</strong>
-              <p>هذه روابط مرشحة من قاموس النظام، وليست حقول إدخال معتمدة ولا تظهر في التحليلات قبل مراجعتها ونشر نموذج موثق.</p>
-              <div className="row">{selectedGroup.fields.map((field) => <span className="chip" key={field.code} title={`${field.code} · ${field.semanticType} · ${field.dataType}`}>
-                {field.name}{field.unit ? ` (${field.unit})` : ''}
-              </span>)}</div>
-            </div>}
-          </div>}
-        </div>
-      </Card>
+          <button type="button" className={`data-entry-favorites-toggle ${catalogFavoriteFilter ? 'active' : ''}`} onClick={() => setCatalogFavoriteFilter((current) => !current)}><Star size={14} fill={catalogFavoriteFilter ? 'currentColor' : 'none'} /> {catalogFavoriteFilter ? 'عرض كل المجموعات' : `المفضلة (${favorites.size})`}</button>
+          <nav className="data-entry-domain-list">
+            {matchingDomains.map((domain) => {
+              const groups = visibleGroups(domain);
+              const expanded = expandedDomains.has(domain.code) || Boolean(catalogSearch.trim());
+              return <section className="data-entry-domain" key={domain.code}>
+                <button type="button" className={`data-entry-domain-toggle ${selectedDomainCode === domain.code ? 'active' : ''}`} aria-expanded={expanded} onClick={() => setExpandedDomains((current) => { const next = new Set(current); if (next.has(domain.code)) next.delete(domain.code); else next.add(domain.code); return next; })}>
+                  <ChevronDown size={15} className={expanded ? '' : 'collapsed'} /><span>{domain.name}</span><small>{groups.length}/{domain.groups.length}</small>
+                </button>
+                {expanded && <div className="data-entry-group-list">{groups.map((group) => {
+                  const stats = getGroupStats(group);
+                  return <div className={`data-entry-group-item ${selectedGroup?.code === group.code ? 'active' : ''}`} key={group.code}>
+                    <button type="button" className="data-entry-group-select" disabled={Boolean(editingRecord)} onClick={() => selectCatalogGroup(domain,group)}>
+                      <span className="data-entry-group-name">{group.name}</span>
+                      <small>{groupReadiness(group) === 'available' ? 'نموذج منشور' : groupReadiness(group) === 'raw' ? 'جمع خام' : 'قيد التعريف'}</small>
+                      <span className="data-entry-group-metrics"><span>{stats.recordCount == null ? '—' : new Intl.NumberFormat('ar').format(stats.recordCount)} سجل</span><span>{stats.latestUpdatedAt ? `آخر تحديث ${new Date(stats.latestUpdatedAt).toLocaleDateString('ar')}` : 'لا تحديثات بعد'}</span></span>
+                    </button>
+                    <button type="button" className="data-entry-favorite" aria-label={favorites.has(group.code) ? `إزالة ${group.name} من المفضلة` : `إضافة ${group.name} للمفضلة`} aria-pressed={favorites.has(group.code)} onClick={() => toggleFavorite(group.code)}><Star size={14} fill={favorites.has(group.code) ? 'currentColor' : 'none'} /></button>
+                  </div>;
+                })}</div>}
+              </section>;
+            })}
+            {matchingDomains.length === 0 && <p className="data-entry-no-results">لا توجد مجموعات تطابق البحث والمرشحات.</p>}
+          </nav>
+        </aside>
+
+        <main className="data-entry-main">
+          <div className="data-entry-content-heading"><div><span className="eyebrow">{selectedDomain?.name ?? 'المواصفة'}</span><h2>{selectedGroup?.name ?? 'اختر مجموعة للبدء'}</h2><p>يعرض الكتالوج عناصر المواصفة وحالة النماذج كما هي في النظام.</p></div>
+            {selectedGroup && <button type="button" className="btn primary" onClick={() => document.getElementById('data-entry-form')?.scrollIntoView({ behavior:'smooth',block:'start' })}><Plus size={15} /> فتح نموذج الإدخال</button>}
+          </div>
+          <div className="data-entry-status-banner">
+            <ShieldAlert size={17} />
+            <span><strong>حالة الكتالوج:</strong> {domains.length} مجالاً مرتبة وفق المواصفة. النموذج المنشور قد يغطي جزءاً من المجموعة؛ الجمع الخام للمراجعة لا يعني اعتماد تعريف أو وحدة أو صلاحية تحليلية.</span>
+          </div>
+          {selectedGroup ? <div className="data-entry-group-summary">
+            <div className="data-entry-summary-status"><span className={`data-entry-status status-${groupReadiness(selectedGroup)}`}>{groupReadiness(selectedGroup) === 'available' ? 'نموذج منشور — تغطية جزئية' : groupReadiness(selectedGroup) === 'raw' ? 'جمع خام — غير معتمد تحليلياً' : 'قيد التعريف'}</span><span>{selectedGroup.requirementItemCount ?? 0} بنداً في المواصفة</span></div>
+            <p>{selectedGroup.forms.some((form) => !form.rawCaptureOnly)
+              ? `توجد ${selectedGroup.forms.filter((form) => !form.rawCaptureOnly).length} نماذج لحقول موصوفة؛ ${selectedGroup.rawCaptureFieldCount} حقلاً خاماً إضافياً متاحاً للمراجعة، ولا يعني ذلك تغطية المجموعة كاملة.`
+              : selectedGroup.rawCaptureAvailable ? `يمكن تسجيل ${selectedGroup.rawCaptureFieldCount} بنداً كما ورد في المواصفة دون افتراض معنى أو وحدة أو منهجية.`
+                : 'لا يوجد نموذج منشور أو جمع خام لهذه المجموعة بعد؛ لا تُعرض تعريفات غير محسومة على أنها حقول معتمدة.'}</p>
+            {selectedGroup.fields?.length > 0 && <div className="data-entry-candidate-fields"><strong>تعريفات مرشحة للمراجعة الدلالية</strong><div className="chip-row">{selectedGroup.fields.map((field) => <span className="chip" key={field.code} title={`${field.code} · ${field.semanticType} · ${field.dataType}`}>{field.name}{field.unit ? ` (${field.unit})` : ''}</span>)}</div></div>}
+          </div> : <div className="empty-state"><ClipboardList size={22} /><strong>اختر مجالاً ومجموعة</strong><span>يمكنك البحث أو تصفية القائمة، ثم اختيار المجموعة لإظهار وضعها ونموذجها.</span></div>}
+        </main>
+      </section>
+
+      <section id="data-entry-form" className="data-entry-section-anchor">
       <Card title={selectedGroup ? `إدخال البيانات — ${selectedGroup.name}` : 'الإدخال اليدوي'} subtitle="تعريفات النماذج والحقول تُقرأ من قاعدة البيانات؛ الحفظ ينشئ مسودة ومصدراً وسجل تغيير لكل تعديل.">
         {initialEntry.recordId && !editingRecord ? (
           <div className="quote">فُتح سجل المشروع المركزي المحدد. راجع حالته في قائمة السجلات أدناه؛ إذا كان معتمداً، أعد فتحه للتصحيح ثم اختر «تعديل المسودة». كل تعديل يُحفظ للمراجعة ولا يغيّر سجل المشاريع قبل الاعتماد.</div>
@@ -395,6 +591,16 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
           <div className="quote"><ShieldAlert size={17} /> لم يُنشر نموذج جمع لهذه المجموعة بعد. نقص المنهجيات أو المراجع لا يمنع إنشاء نموذج أولي؛ المتاح حالياً هما السكان حسب العمر والجنس وسجل المنشآت التعليمية.</div>
         ) : (
           <form className="stack" onSubmit={submit}>
+            <div className="data-entry-form-tools">
+              <div className="data-entry-mode-toggle" role="group" aria-label="طريقة الإدخال">
+                <button type="button" className={entryMode === 'single' ? 'active' : ''} onClick={() => setEntryMode('single')}><FileText size={14} /> سجل مفصل</button>
+                <button type="button" className={entryMode === 'repeat' ? 'active' : ''} onClick={() => setEntryMode('repeat')}><Plus size={14} /> إدخال متكرر</button>
+              </div>
+              <button type="button" className="btn ghost small" onClick={() => setShowOptionalFields((current) => !current)} disabled={!optionalFieldCount}>{showOptionalFields ? 'إخفاء الحقول الاختيارية' : `إظهار الحقول الاختيارية (${optionalFieldCount})`}</button>
+              <span className={`data-entry-autosave state-${autoSaveState}`} aria-live="polite">{({ pending:'سيُحفظ بعد التوقف عن الكتابة',saving:'جارٍ حفظ المسودة...',saved:'المسودة محفوظة تلقائياً',incomplete:'استكمل الحقول المطلوبة للحفظ',reason:'أدخل سبب التعديل للحفظ',error:'تعذر الحفظ التلقائي' })[autoSaveState] ?? 'الحفظ التلقائي للمسودة مفعّل'}</span>
+              {autoSaveError && <div className="data-entry-autosave-error" role="alert">{autoSaveError}</div>}
+            </div>
+            {draftRecordId && !editingRecord && <div className="data-entry-draft-banner"><Check size={15} /><span>حُفظت هذه المسودة تلقائياً. أكمل التعديل هنا، أو أرسل أحدث نسخة منها للمراجعة.</span><button type="button" className="btn small ghost" onClick={saveAndSubmitDraft} disabled={saving}><Send size={13} /> إرسال للمراجعة</button></div>}
             <div className="form-grid">
               <Field label="النموذج" required>
                 <SelectInput value={formVersionId} onChange={(value) => { cancelEdit(); setFormVersionId(value); }} options={formOptions} />
@@ -437,10 +643,10 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
                 <TextInput value={recordLabel} onChange={setRecordLabel} />
               </Field>
             </div>
-            <div className="quote">يشمل هذا النموذج {fmtNumber(entryFields.length, 0)} حقلًا موزعًا على مجموعات موضوعية. تُدخل القيم المعروفة يدويًا، وتُترك الحقول غير المتاحة أو غير المتحقق منها بحالتها المناسبة.</div>
-            {groupedFields.map((group) => (
+            <div className="data-entry-form-summary">النموذج {selectedForm?.name_ar ?? 'غير محدد'} · {fmtNumber(entryFields.length, 0)} حقلاً. تُعرض الحقول المطلوبة أولاً؛ يمكن إظهار الاختيارية عند الحاجة.</div>
+            {renderedGroups.map((group) => (
               <section className="card data-entry-section" key={group.id}>
-                <header className="card-head"><div className="head-text"><h2>{group.title}</h2>{group.hint && <p>{group.hint}</p>}</div></header>
+                <header className="card-head"><div className="head-text"><h2>{group.title}</h2>{group.hint && <p>{group.hint}</p>}</div><span className="chip">{group.fields.length} حقلاً</span></header>
                 <div className="card-body"><div className="form-grid">
                   {group.fields.map((field) => <DefinitionField key={field.form_field_id} field={field} value={values[field.field_code] ?? ''} state={valueStates[field.field_code] ?? 'known'} sourceLocator={valueSources[field.field_code] ?? ''}
                     dimensionValues={dimensionValues[field.field_code] ?? {}} editingRecord={Boolean(editingRecord)}
@@ -453,14 +659,17 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
                 </div></div>
               </section>
             ))}
+            {!showOptionalFields && optionalFieldCount > 0 && <button type="button" className="data-entry-optional-callout" onClick={() => setShowOptionalFields(true)}>إظهار {optionalFieldCount} حقلاً اختيارياً إضافياً</button>}
             <Field label="ملاحظات السجل"><textarea className="textarea" value={notes} onChange={(event) => setNotes(event.target.value)} /></Field>
             {(editingRecord || Object.values(valueStates).includes('clear')) && <Field label="سبب التعديل أو الحذف الصريح" required><TextInput required value={changeReason} onChange={setChangeReason} placeholder="اذكر سبب التغيير أو حذف القيمة" /></Field>}
-            <div className="btn-row"><button type="submit" className="btn primary" disabled={saving}><Check size={15} />{saving ? 'جارٍ الحفظ...' : editingRecord ? 'حفظ التعديلات' : 'حفظ كمسودة'}</button>
+            <div className="btn-row"><button type="submit" className="btn primary" disabled={saving}><Check size={15} />{saving ? 'جارٍ الحفظ...' : editingRecord ? 'حفظ التعديلات' : entryMode === 'repeat' ? 'حفظ وبدء سجل آخر' : 'حفظ كمسودة والانتقال للسجلات'}</button>
               {editingRecord && <button type="button" className="btn" onClick={cancelEdit} disabled={saving}>إلغاء التعديل</button>}</div>
           </form>
         )}
       </Card>
+      </section>
 
+      <section id="data-entry-records" className="data-entry-section-anchor">
       <Card title="السجلات والمراجعة" subtitle="ابحث في جميع النماذج، وضيّق النتائج حسب الحالة أو النموذج؛ المسودات لا تدخل البيانات المعتمدة قبل المراجعة.">
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); setRecordOffset(0); setRecordSearch(recordSearchInput.trim().slice(0,120)); }}>
           <div className="search-box" style={{ flex: 1, minWidth: 220 }}><Search size={16} /><input className="input" value={recordSearchInput} onChange={(event) => setRecordSearchInput(event.target.value)} placeholder="بحث بعنوان السجل أو الموقع أو النموذج" /></div>
@@ -473,13 +682,15 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
           <button className="btn primary" type="submit"><Search size={15} /> بحث</button>
           <button type="button" className="btn ghost" onClick={() => { setRecordSearchInput(''); setRecordSearch(''); setRecordStatus('all'); setRecordFormVersionId(''); setRecordOffset(0); }} disabled={!recordSearch && recordStatus === 'all' && !recordFormVersionId}>مسح المرشحات</button>
         </form>
-        <div className="table-wrap"><table className="data"><thead><tr><th>السجل</th><th>النموذج</th><th>الموقع</th><th>الفترة</th><th>الحالة</th><th>القيم</th><th>الإجراءات</th></tr></thead>
+        <div className={`data-entry-records-layout ${viewingRecord ? 'with-detail' : ''}`}>
+        {!viewingRecord && <div className="table-wrap"><table className="data"><thead><tr><th>السجل</th><th>النموذج</th><th>الموقع</th><th>الفترة</th><th>الحالة</th><th>القيم</th><th>توثيق المصدر</th><th>آخر تحديث</th><th>الإجراءات</th></tr></thead>
           <tbody>{records.map((record) => (
             <tr key={record.form_record_id}>
               <td className="strong">{record.record_label || `سجل ${record.form_record_id}`}</td>
               <td>{record.form_name || '—'}</td>
               <td>{record.geo_name || '—'}</td><td>{record.period_label || 'غير محددة'}</td>
-              <td>{STATUS_LABELS[record.record_status] ?? record.record_status}</td><td className="num">{record.value_count}</td>
+              <td><span className={`data-entry-status status-${record.record_status}`}>{STATUS_LABELS[record.record_status] ?? record.record_status}</span></td><td className="num">{record.value_count}</td>
+              <td>{record.source_count > 0 ? 'موثق على مستوى القيم' : 'مصدر عام للسجل'}</td><td>{record.updated_at ? new Date(record.updated_at).toLocaleString('ar') : '—'}</td>
               <td><div className="cell-actions">
                 {['draft','rejected'].includes(record.record_status) && <button className="btn small" onClick={() => beginEdit(record.form_record_id)}>تعديل المسودة</button>}
                 <button className="btn small" onClick={() => openRecord(record.form_record_id)}>تفاصيل ومصادر</button>
@@ -490,9 +701,10 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
               </div></td>
             </tr>
           ))}</tbody>
-        </table></div>
-        {viewingRecord && viewingDefinition && <Card title={`تفاصيل السجل — ${viewingRecord.record.record_label || viewingRecord.record.form_record_id}`} subtitle="القيمة المسجلة وحالتها، والقيمة الخام والمعيارية، ومصدرها وموضعها، ومن أدخلها وتاريخ الإدخال.">
-          <div className="row between"><span className="muted">{STATUS_LABELS[viewingRecord.record.record_status] ?? viewingRecord.record.record_status} · {viewingRecord.record.geo_name || 'دون موقع'} · {viewingRecord.record.period_label || 'دون فترة'}</span><button type="button" className="btn small" onClick={() => { setViewingRecord(null); setViewingDefinition(null); }}>إغلاق التفاصيل</button></div>
+        </table></div>}
+        {viewingRecord && viewingDefinition && <aside id="data-entry-detail" className="card data-entry-detail-panel">
+          <header className="card-head"><div className="head-text"><span className="eyebrow">تفاصيل السجل ومصدر البيانات</span><h2>{viewingRecord.record.record_label || `سجل ${viewingRecord.record.form_record_id}`}</h2><p>{viewingRecord.record.form_name} · القيمة الخام والمعيارية ومصدرها وموضعها وسجل إدخالها.</p></div><button type="button" className="btn" onClick={() => { setViewingRecord(null); setViewingDefinition(null); }}>العودة إلى السجلات</button></header>
+          <div className="row between" style={{ padding:'0 16px 12px' }}><span className="muted">{STATUS_LABELS[viewingRecord.record.record_status] ?? viewingRecord.record.record_status} · {viewingRecord.record.geo_name || 'دون موقع'} · {viewingRecord.record.period_label || 'دون فترة'}</span></div>
           <div className="table-wrap"><table className="data"><thead><tr><th>الحقل</th><th>القيمة / الحالة</th><th>الأبعاد</th><th>القيمة الخام</th><th>القيمة المعيارية</th><th>المصدر وموضعه</th><th>الإدخال والتوقيت</th></tr></thead>
             <tbody>{viewingDefinition.fields.map((field) => {
               const item = viewingRecord.values[field.field_code];
@@ -508,10 +720,12 @@ export default function DataEntry({ notify, refreshKey = 0, onDataChanged, onSho
               </tr>;
             })}</tbody>
           </table></div>
-        </Card>}
-        {records.length === 0 && <div className="empty-state"><ClipboardList size={22} /><strong>لا توجد سجلات ضمن المرشحات</strong><span>جرّب تغيير النموذج أو الحالة أو عبارة البحث.</span></div>}
-        <div className="row between" style={{ marginTop: 12 }}><span className="muted">{recordTotal} سجلًا · صفحة {Math.floor(recordOffset / 30) + 1} من {Math.max(1,Math.ceil(recordTotal / 30))}</span><div className="btn-row"><button type="button" className="btn ghost small" onClick={() => setRecordOffset(Math.max(0,recordOffset-30))} disabled={recordOffset === 0}>السابق</button><button type="button" className="btn ghost small" onClick={() => setRecordOffset(recordOffset+30)} disabled={recordOffset+records.length>=recordTotal}>التالي</button><button type="button" className="btn ghost small" onClick={loadRecords}><RefreshCw size={13} /> تحديث</button></div></div>
+        </aside>}
+        </div>
+        {!viewingRecord && records.length === 0 && <div className="empty-state"><ClipboardList size={22} /><strong>لا توجد سجلات ضمن المرشحات</strong><span>جرّب تغيير النموذج أو الحالة أو عبارة البحث.</span></div>}
+        {!viewingRecord && <div className="row between" style={{ marginTop: 12 }}><span className="muted">{recordTotal} سجلًا · صفحة {Math.floor(recordOffset / 30) + 1} من {Math.max(1,Math.ceil(recordTotal / 30))}</span><div className="btn-row"><button type="button" className="btn ghost small" onClick={() => setRecordOffset(Math.max(0,recordOffset-30))} disabled={recordOffset === 0}>السابق</button><button type="button" className="btn ghost small" onClick={() => setRecordOffset(recordOffset+30)} disabled={recordOffset+records.length>=recordTotal}>التالي</button><button type="button" className="btn ghost small" onClick={loadRecords}><RefreshCw size={13} /> تحديث</button></div></div>}
       </Card>
+      </section>
     </div>
   );
 }

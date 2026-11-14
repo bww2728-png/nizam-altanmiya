@@ -1106,6 +1106,13 @@ function registerHandlers() {
     return result;
   });
 
+  ipcMain.handle('data:records:overview', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') return { restricted: true, total: 0, statusCounts: {}, latest: [] };
+    const result = recordService.getRecordOverview(requireDatabase(), request);
+    auditRead('data:records:overview', { entity: 'form_records', rowCount: result.latest.length, detail: `total=${result.total}` });
+    return result;
+  });
+
   ipcMain.handle('data:records:list', (_event, request = {}) => {
     if (currentProfile() !== 'owner') return { restricted: true, rows: [], total: 0 };
     const result = recordService.listRecords(requireDatabase(), request);
