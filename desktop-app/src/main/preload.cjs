@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('localApp', {
   extractDocument: (documentId) => ipcRenderer.invoke('documents:extract', documentId),
   documentFieldCandidates: (documentId) => ipcRenderer.invoke('documents:field-candidates', documentId),
   reviewDocumentFieldCandidate: (request) => ipcRenderer.invoke('documents:field-candidate:review', request),
+  reviewDocumentFieldCandidateGroups: (request) => ipcRenderer.invoke('documents:field-candidate-group:review', request),
   promoteDocumentFieldCandidates: (request) => ipcRenderer.invoke('documents:field-candidates:promote', request),
   searchDocuments: (request) => ipcRenderer.invoke('documents:search-local', request),
   indexDocumentInRagflow: (documentId) => ipcRenderer.invoke('documents:index-ragflow', documentId),

@@ -20,8 +20,9 @@ function compatibleFieldType(sourceType, targetType) {
 function candidateSourceLabel(candidate) {
   const source = candidate.sourceLocation?.source ?? {};
   const line = source.sheet_name ? `${source.sheet_name}!${(source.cells ?? []).map(cell => cell.address).join('، ')}`
-    : source.row_number ? `صف ${source.row_number}`
-      : candidate.page_number ? `الصفحة ${candidate.page_number}` : '';
+    : source.table_number && source.row_number ? `جدول ${source.table_number} · صف ${source.row_number}`
+      : source.row_number ? `صف ${source.row_number}`
+        : candidate.page_number ? `الصفحة ${candidate.page_number}` : '';
   return [candidate.source_file_name,line].filter(Boolean).join(' · ') || 'موضع المصدر غير متاح';
 }
 
@@ -29,6 +30,7 @@ function candidateGroupKey(candidate) {
   const source = candidate.sourceLocation?.source ?? {};
   const documentId = String(candidate.source_document_id ?? '');
   if (source.sheet_name && source.row_number) return `${documentId}:sheet:${source.sheet_name}:row:${source.row_number}`;
+  if (source.table_number && source.row_number) return `${documentId}:table:${source.table_number}:row:${source.row_number}`;
   if (candidate.page_number) return `${documentId}:page:${candidate.page_number}`;
   return `${documentId}:document`;
 }
@@ -58,14 +60,19 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
   const [query, setQuery] = useState('');
   const [searchMode, setSearchMode] = useState('knowledge');
   const [results, setResults] = useState(null);
-  const [candidateValues, setCandidateValues] = useState({});
-  const [candidateNotes, setCandidateNotes] = useState({});
+  const [reviewFieldValues, setReviewFieldValues] = useState({});
+  const [reviewNote, setReviewNote] = useState('');
+  const [selectedReviewGroups, setSelectedReviewGroups] = useState({});
+  const [selectedDomainCode, setSelectedDomainCode] = useState('');
+  const [selectedGroupCode, setSelectedGroupCode] = useState('');
+  const [selectedRecordKey, setSelectedRecordKey] = useState('');
   const [forms, setForms] = useState([]);
   const [catalog, setCatalog] = useState(null);
   const [geography, setGeography] = useState([]);
   const [periods, setPeriods] = useState([]);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState({});
   const [candidateMappings, setCandidateMappings] = useState({});
+  const [candidateDimensionValues, setCandidateDimensionValues] = useState({});
   const [promotionFormVersionId, setPromotionFormVersionId] = useState('');
   const [promotionDefinition, setPromotionDefinition] = useState(null);
   const [promotionGeoUnitId, setPromotionGeoUnitId] = useState('');
@@ -73,6 +80,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
   const [promotionPeriodYear, setPromotionPeriodYear] = useState('');
   const [promotionGroupContexts, setPromotionGroupContexts] = useState({});
   const [promotionRecordLabel, setPromotionRecordLabel] = useState('');
+  const [submitForReview, setSubmitForReview] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -124,6 +132,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
     setError('');
     setSelectedCandidateIds({});
     setCandidateMappings({});
+    setCandidateDimensionValues({});
     setPromotionFormVersionId('');
     setPromotionDefinition(null);
     setPromotionGeoUnitId('');
@@ -134,31 +143,68 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
     try {
       const details = await window.localApp.document(documentId);
       details.fieldReview = await window.localApp.documentFieldCandidates(documentId);
+      setSelectedRecordKey(details.fieldReview.records?.[0]?.key ?? '');
+      setSelectedDomainCode('');
+      setSelectedGroupCode('');
       setSelected(details);
     } catch (cause) { setError(errText(cause) || 'تعذر فتح الوثيقة.'); }
   };
 
-  const reviewCandidate = async (candidate, status) => {
+  const reviewFieldGroup = async (record, fieldGroup, status) => {
+    const value = reviewFieldValues[`${record.key}:${fieldGroup.fieldCode}`] ?? fieldGroup.reviewedValue?.value ?? fieldGroup.recommendedValue;
+    const selectedValueEvidence = fieldGroup.values.find(item => String(item.value) === String(value));
+    const primaryCandidateId = selectedValueEvidence?.candidateIds?.[0] ?? fieldGroup.recommendedCandidateIds?.[0] ?? fieldGroup.candidates[0]?.id;
+    const supportIds = status === 'reviewed'
+      ? (selectedValueEvidence?.candidateIds ?? [primaryCandidateId]).filter(Boolean)
+      : fieldGroup.candidates.map(candidate => candidate.id);
     setBusyId(selected.document.id);
     setError('');
     try {
-      await window.localApp.reviewDocumentFieldCandidate({
-        candidateId: candidate.id,
-        status,
-        value: status === 'reviewed' ? (candidateValues[candidate.id] ?? candidate.suggested_value ?? candidate.raw_value ?? '') : null,
-        note: candidateNotes[candidate.id] ?? '',
+      await window.localApp.reviewDocumentFieldCandidateGroups({
+        documentId:selected.document.id,
+        note:reviewNote,
+        groups:[{
+          status,candidateIds:fieldGroup.candidates.filter(candidate => candidate.review_status === 'pending').map(candidate => candidate.id),
+          evidenceIds:supportIds.filter(id => fieldGroup.candidates.some(candidate => candidate.id === id && candidate.review_status === 'pending')),primaryCandidateId,value,
+        }],
       });
       const fieldReview = await window.localApp.documentFieldCandidates(selected.document.id);
-      setSelected(current => ({ ...current, fieldReview }));
-      notify?.({ tone: 'ok', message: status === 'reviewed' ? 'حُفظت نتيجة المراجعة كمرشح فقط؛ لم تتغير البيانات الرسمية.' : 'رُفض المرشح؛ لم تتغير البيانات الرسمية.' });
-    } catch (cause) { setError(errText(cause) || 'تعذرت مراجعة المرشح.'); }
+      setSelected(current => ({ ...current,fieldReview }));
+      notify?.({ tone:'ok',message:status === 'reviewed' ? 'سُجل قرار الحقل مع تجميع أدلته؛ لم تتغير البيانات الرسمية.' : 'رُفضت أدلة الحقل؛ لم تتغير البيانات الرسمية.' });
+    } catch (cause) { setError(errText(cause) || 'تعذرت مراجعة الحقل.'); }
     finally { setBusyId(''); }
   };
+
+  const reviewSelectedFieldGroups = async (fieldGroups) => {
+    const groups = fieldGroups.filter(({ record,fieldGroup }) => selectedReviewGroups[`${record.key}:${fieldGroup.fieldCode}`]);
+    if (!groups.length || !reviewNote.trim()) return;
+    setBusyId(selected.document.id);
+    setError('');
+    try {
+      await window.localApp.reviewDocumentFieldCandidateGroups({
+        documentId:selected.document.id,note:reviewNote,
+        groups:groups.map(({ record,fieldGroup }) => {
+          const key = `${record.key}:${fieldGroup.fieldCode}`;
+          const value = reviewFieldValues[key] ?? fieldGroup.recommendedValue;
+          const primaryCandidateId = fieldGroup.values.find(item => String(item.value) === String(value))?.candidateIds?.[0] ?? fieldGroup.candidates[0]?.id;
+          const evidenceIds = fieldGroup.values.find(item => String(item.value) === String(value))?.candidateIds ?? [primaryCandidateId];
+          return { status:'reviewed',candidateIds:fieldGroup.candidates.map(candidate => candidate.id),evidenceIds,primaryCandidateId,value };
+        }),
+      });
+      const fieldReview = await window.localApp.documentFieldCandidates(selected.document.id);
+      setSelected(current => ({ ...current,fieldReview }));
+      setSelectedReviewGroups({});
+      notify?.({ tone:'ok',message:`تمت مراجعة ${fmtNumber(groups.length,0)} حقول مع أدلتها؛ لم تتغير البيانات الرسمية.` });
+    } catch (cause) { setError(errText(cause) || 'تعذرت المراجعة الجماعية.'); }
+    finally { setBusyId(''); }
+  };
+
 
   const choosePromotionForm = async (value) => {
     setPromotionFormVersionId(value);
     setPromotionDefinition(null);
     setCandidateMappings({});
+    setCandidateDimensionValues({});
     setPromotionGroupContexts({});
     if (!value) return;
     try {
@@ -167,6 +213,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
       const fields = new Map((definition.fields ?? []).map(field => [field.field_code,field]));
       const defaults = Object.fromEntries((selected?.fieldReview?.rows ?? [])
         .filter(candidate => candidate.review_status === 'reviewed' && !candidate.promoted_form_record_id)
+        .filter(candidate => !candidate.reviewedValue?.primaryCandidateId || candidate.reviewedValue.primaryCandidateId === candidate.id)
         .filter(candidate => {
           const field = fields.get(candidate.field_code);
           return field && compatibleFieldType(candidate.data_type,field.data_type_override ?? field.data_type) && field.is_importable && !field.is_derived;
@@ -184,12 +231,15 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
     try {
       const candidateGroups = selectedCandidateGroups.map(group => {
         const context = promotionGroupContexts[group.key] ?? {};
+        const contextSuggestion = selected.fieldReview?.contextSuggestions?.groups?.[group.key] ?? {};
+        const allowGlobalPeriod = !contextSuggestion.periodConflict && !selected.fieldReview?.contextSuggestions?.global?.periodConflict;
         return {
           candidateIds:group.candidates.map(candidate => candidate.id),
           fieldMappings:Object.fromEntries(group.candidates.map(candidate => [candidate.id,candidateMappings[candidate.id] ?? ''])),
+          dimensionValues:Object.fromEntries(group.candidates.map(candidate => [candidate.id,candidateDimensionValues[candidate.id] ?? {}])),
           geoUnitId:context.geoUnitId || promotionGeoUnitId || null,
-          periodId:context.periodId || (context.periodYear ? null : promotionPeriodId) || null,
-          periodYear:context.periodYear || (context.periodId ? null : promotionPeriodYear) || null,
+          periodId:context.periodId || (context.periodYear ? null : allowGlobalPeriod ? promotionPeriodId : null) || null,
+          periodYear:context.periodYear || (context.periodId || !allowGlobalPeriod ? null : promotionPeriodYear) || null,
           recordLabel:`${selected.document.file_name} · ${group.label}`.slice(0,240),
         };
       });
@@ -197,12 +247,15 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
         documentId:selected.document.id,
         formVersionId:Number(promotionFormVersionId),
         candidateGroups,
+        submitForReview,
         geoUnitId:promotionGeoUnitId || null,
         periodId:promotionPeriodId || null,
         periodYear:promotionPeriodYear.trim() || null,
         recordLabel:promotionRecordLabel.trim() || selected.document.file_name,
       });
-      notify?.({ tone:'ok',message:`أُنشئت ${fmtNumber(result.recordCount,0)} سجلات جديدة وأُرسلت للمراجعة؛ لم تصبح معتمدة بعد.` });
+      notify?.({ tone:'ok',message:submitForReview
+        ? `أُنشئت ${fmtNumber(result.recordCount,0)} سجلات جديدة وأُرسلت للمراجعة؛ لم تصبح معتمدة بعد.`
+        : `حُفظت ${fmtNumber(result.recordCount,0)} سجلات جديدة كمسودات غير مرسلة للمراجعة.` });
       setSelectedCandidateIds({});
       setPromotionRecordLabel('');
       await load();
@@ -263,7 +316,23 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
   const unmodeledCatalogFields = (catalog?.domains ?? []).flatMap(domain => domain.groups.flatMap(group => group.fields
     .filter(field => !group.publishedFields.some(published => published.code === field.code))
     .map(field => `${group.name} · ${field.name}`)));
-  const reviewedCandidates = (selected?.fieldReview?.rows ?? []).filter(candidate => candidate.review_status === 'reviewed' && !candidate.promoted_form_record_id);
+  const schemaFields = selected?.fieldReview?.fields ?? [];
+  const reviewRecords = selected?.fieldReview?.records ?? [];
+  const selectedRecord = reviewRecords.find(record => record.key === selectedRecordKey) ?? reviewRecords[0] ?? null;
+  const domainOptions = [...new Map(schemaFields.map(field => [field.domainCode,{ code:field.domainCode,name:field.domainName }])).values()];
+  const selectedDomain = domainOptions.find(domain => domain.code === selectedDomainCode) ?? domainOptions[0] ?? null;
+  const groupOptions = [...new Map(schemaFields.filter(field => field.domainCode === selectedDomain?.code).map(field => [field.groupCode,{ code:field.groupCode,name:field.groupName }])).values()];
+  const selectedGroup = groupOptions.find(group => group.code === selectedGroupCode) ?? groupOptions[0] ?? null;
+  const modelOptions = [...new Map(schemaFields.filter(field => field.domainCode === selectedDomain?.code && field.groupCode === selectedGroup?.code).map(field => [field.formVersionId,{ id:field.formVersionId,code:field.formCode,name:field.formName }])).values()];
+  const selectedModel = modelOptions.find(form => Number(form.id) === Number(promotionFormVersionId)) ?? null;
+  const visibleSchemaFields = schemaFields.filter(field => Number(field.formVersionId) === Number(selectedModel?.id));
+  const fieldReviewGroups = (selectedRecord?.fields ?? []).map(fieldGroup => ({
+    fieldGroup,field:schemaFields.find(field => field.fieldCode === fieldGroup.fieldCode),
+  })).filter(item => item.field && Number(item.field.formVersionId) === Number(selectedModel?.id));
+  const flattenedReviewedCandidates = reviewRecords.flatMap(record => record.fields.filter(fieldGroup => fieldGroup.status === 'reviewed')
+    .map(fieldGroup => (selected?.fieldReview?.rows ?? []).find(candidate => candidate.id === fieldGroup.reviewedValue?.primaryCandidateId))
+    .filter(Boolean));
+  const reviewedCandidates = flattenedReviewedCandidates.filter(candidate => candidate.review_status === 'reviewed' && !candidate.promoted_form_record_id);
   const selectedPromotionCandidates = reviewedCandidates.filter(candidate => selectedCandidateIds[candidate.id]);
   const selectedCandidateGroups = [...new Map(selectedPromotionCandidates.map(candidate => [candidateGroupKey(candidate),{
     key:candidateGroupKey(candidate),candidates:[],label:candidateSourceLabel(candidate),
@@ -277,13 +346,26 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
     return (promotionDefinition?.fields ?? []).filter(field => field.is_required && !mappedCodes.includes(field.field_code))
       .map(field => `${group.label}: ${field.label_ar}`);
   });
+  const missingRequiredDimensions = selectedPromotionCandidates.flatMap(candidate => {
+    const field = promotionDefinition?.fields?.find(item => item.field_code === candidateMappings[candidate.id]);
+    return (field?.dimensions ?? []).filter(dimension => dimension.required && !candidateDimensionValues[candidate.id]?.[dimension.code])
+      .map(dimension => `${candidate.field_label_ar} — ${dimension.name}`);
+  });
   const selectedRequiresPeriod = selectedCandidateGroups.some(group => group.candidates.some(candidate =>
     promotionDefinition?.fields?.find(field => field.field_code === candidateMappings[candidate.id])?.storage_class === 'measurement'));
-  const groupsMissingPeriod = selectedCandidateGroups.filter(group => group.candidates.some(candidate =>
-    promotionDefinition?.fields?.find(field => field.field_code === candidateMappings[candidate.id])?.storage_class === 'measurement')
-    && !(promotionGroupContexts[group.key]?.periodId || promotionGroupContexts[group.key]?.periodYear || promotionPeriodId || promotionPeriodYear));
+  const groupsMissingPeriod = selectedCandidateGroups.filter(group => {
+    const hasMeasurements = group.candidates.some(candidate => promotionDefinition?.fields?.find(field => field.field_code === candidateMappings[candidate.id])?.storage_class === 'measurement');
+    const context = promotionGroupContexts[group.key] ?? {};
+    const suggestion = selected?.fieldReview?.contextSuggestions?.groups?.[group.key] ?? {};
+    const periodConflicted = suggestion.periodConflict || selected?.fieldReview?.contextSuggestions?.global?.periodConflict;
+    return hasMeasurements && (periodConflicted
+      ? !(context.periodId || context.periodYear)
+      : !(context.periodId || context.periodYear || promotionPeriodId || promotionPeriodYear));
+  });
   const hasPromotionPeriod = groupsMissingPeriod.length === 0;
   const hasUnmappedSelectedCandidates = selectedPromotionCandidates.some(candidate => !candidateMappings[candidate.id]);
+  const bulkReviewGroups = fieldReviewGroups.filter(({ fieldGroup }) => fieldGroup.status === 'pending').map(item => ({ ...item,record:selectedRecord }));
+  const selectedBulkCount = bulkReviewGroups.filter(({ fieldGroup }) => selectedReviewGroups[`${selectedRecord?.key}:${fieldGroup.fieldCode}`]).length;
   const totalPages = Math.max(1, Math.ceil((documents.total ?? 0) / PAGE_SIZE));
   const page = Math.floor((documents.offset ?? 0) / PAGE_SIZE) + 1;
 
@@ -358,18 +440,50 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
             <p className="muted">لن تُحوّل الاقتراحات لهذه المجموعات أو الحقول إلى سجلات حتى يُنشر نموذج إدخال مناسب.</p>
             <div className="chip-row">{unsupportedCatalogGroups.map(label => <Badge key={label} tone="warn">{label}</Badge>)}{unmodeledCatalogFields.map(label => <Badge key={label} tone="warn">{label}</Badge>)}</div>
           </details>}
-          {(selected.fieldReview.rows ?? []).filter(candidate => candidate.review_status === 'pending').map(candidate => <article className="quote stack tight" key={candidate.id}>
-            <div className="row between" style={{ flexWrap: 'wrap' }}><strong>{candidate.field_label_ar}</strong><Badge>{candidateStatusLabel(candidate.review_status)}</Badge></div>
-            <div className="chip-row"><Badge>{candidate.entity_type} · {candidate.field_key}</Badge><Badge>{candidateSourceLabel(candidate)}</Badge>{candidate.confidence != null && <Badge tone="neutral">ثقة المطابقة {Math.round(candidate.confidence * 100)}٪</Badge>}</div>
-            {candidate.evidence_text && <p>{candidate.evidence_text}</p>}
-            <label className="stack tight"><span>القيمة المقترحة بعد التحقق من الدليل</span><input className="input" value={candidateValues[candidate.id] ?? candidate.suggested_value ?? candidate.raw_value ?? ''} onChange={event => setCandidateValues(current => ({ ...current, [candidate.id]: event.target.value }))} maxLength={1000} /></label>
-            <label className="stack tight"><span>سبب قرار المراجعة (مطلوب)</span><input className="input" value={candidateNotes[candidate.id] ?? ''} onChange={event => setCandidateNotes(current => ({ ...current, [candidate.id]: event.target.value }))} maxLength={1000} /></label>
-            <div className="row"><button className="btn small primary" onClick={() => reviewCandidate(candidate, 'reviewed')} disabled={busyId === selected.document.id || !(candidateNotes[candidate.id] ?? '').trim()}>تسجيل المراجعة</button><button className="btn small ghost" onClick={() => reviewCandidate(candidate, 'rejected')} disabled={busyId === selected.document.id || !(candidateNotes[candidate.id] ?? '').trim()}>رفض المرشح</button><span className="muted">لا يُرحّل إلى البيانات الرسمية تلقائيًا.</span></div>
-          </article>)}
+          <div className="grid-2">
+            <label className="stack tight"><span>المجال</span><select className="input" value={selectedDomain?.code ?? ''} onChange={event => { setSelectedDomainCode(event.target.value); setSelectedGroupCode(''); setPromotionFormVersionId(''); setPromotionDefinition(null); }}><option value="">— اختر المجال —</option>{domainOptions.map(domain => <option key={domain.code} value={domain.code}>{domain.name}</option>)}</select></label>
+            <label className="stack tight"><span>المجموعة</span><select className="input" value={selectedGroup?.code ?? ''} onChange={event => { setSelectedGroupCode(event.target.value); setPromotionFormVersionId(''); setPromotionDefinition(null); }}><option value="">— اختر المجموعة —</option>{groupOptions.map(group => <option key={group.code} value={group.code}>{group.name}</option>)}</select></label>
+            <label className="stack tight"><span>النموذج المنشور</span><select className="input" value={promotionFormVersionId} onChange={event => choosePromotionForm(event.target.value)}><option value="">— اختر نموذجًا —</option>{modelOptions.map(form => <option key={form.id} value={form.id}>{form.name}</option>)}</select></label>
+            <label className="stack tight"><span>السجل/الصف/الصفحة</span><select className="input" value={selectedRecord?.key ?? ''} onChange={event => { setSelectedRecordKey(event.target.value); setSelectedReviewGroups({}); }}><option value="">— اختر السجل —</option>{reviewRecords.map(record => <option key={record.key} value={record.key}>{record.sourceLabel}</option>)}</select></label>
+          </div>
+          <label className="stack tight"><span>سبب قرار المراجعة (مطلوب لكل الحقول المحددة)</span><input className="input" value={reviewNote} onChange={event => setReviewNote(event.target.value)} maxLength={1000} placeholder="مثال: طابقت القيمة مع الجدول الأصلي" /></label>
+          <div className="row" style={{ flexWrap:'wrap' }}>
+            <button type="button" className="btn small ghost" onClick={() => setSelectedReviewGroups(Object.fromEntries(bulkReviewGroups.map(({ fieldGroup }) => [`${selectedRecord?.key}:${fieldGroup.fieldCode}`,true])))} disabled={!bulkReviewGroups.length}>تحديد حقول هذا النموذج للمراجعة</button>
+            <button type="button" className="btn small primary" onClick={() => reviewSelectedFieldGroups(bulkReviewGroups)} disabled={busyId === selected.document.id || !selectedBulkCount || !reviewNote.trim()}>حفظ مراجعة {fmtNumber(selectedBulkCount,0)} حقول</button>
+            <span className="muted">كل حقل يظهر مرة واحدة؛ تُجمع الأدلة المتطابقة داخله، ولا تُخلط سجلات الصفحات أو الصفوف.</span>
+          </div>
           <section className="stack" style={{ marginBottom: 18 }}>
-            <div><h3>معاينة نموذج الإدخال وربط القيم المراجَعة</h3><p className="muted">اختر نموذجاً منشوراً لرؤية جميع حقوله ومقارنة ما عُثر عليه في الملف. سيُنشأ سجل جديد «قيد المراجعة» بعد اختيار القيم المراجَعة؛ لا يصبح معتمداً حتى يعتمد وفق المسار المركزي.</p></div>
-            <label className="stack tight"><span>النموذج المستهدف</span><select className="input" value={promotionFormVersionId} onChange={event => choosePromotionForm(event.target.value)}><option value="">— اختر نموذجًا منشورًا —</option>{forms.map(form => <option key={form.form_version_id} value={form.form_version_id}>{form.form_code} — {form.name_ar}</option>)}</select></label>
-            {promotionFormVersionId && promotionDefinition && <section className="stack" aria-label="معاينة نموذج الإدخال" style={{ marginBottom: 16 }}>
+            <div><h3>إنشاء مسودات من الحقول التي راجعتها</h3><p className="muted">المجال والمجموعة والنموذج والسجل محددة من عناصر الاختيار أعلاه. ستُنشأ سجلات جديدة دون استبدال سجلات قائمة.</p></div>
+            <section className="stack" aria-label="حقول النموذج حسب تنظيم الإدخال المركزي">
+              <div><h3>حقول النموذج — بنفس مجموعات الإدخال المركزي</h3><p className="muted">كل الحقول المؤهلة تظهر مرة واحدة. الأدلة المتطابقة مجمعة داخل الحقل، والقيم المختلفة تظهر كبدائل. لا يظهر المقتطف إلا عند فتح تفاصيل المصدر.</p></div>
+              {!selectedRecord && <div className="quote">لم تُنشأ سجلات قابلة للمراجعة بعد. شغّل الاستخراج المحلي أولًا.</div>}
+              {selectedRecord && !selectedModel && <div className="quote">اختر المجال والمجموعة والنموذج من الأعلى لعرض حقوله كاملة.</div>}
+              {[...new Set(visibleSchemaFields.map(field => field.sectionName))].map(sectionName => <section className="stack" key={`${selectedModel?.id}:${sectionName}`}>
+                <h4>{sectionName}</h4>
+                {visibleSchemaFields.filter(field => field.sectionName === sectionName).map(field => {
+                  const fieldGroup = fieldReviewGroups.find(item => item.fieldCode === field.fieldCode)?.fieldGroup;
+                  const key = `${selectedRecord?.key}:${field.fieldCode}`;
+                  const value = reviewFieldValues[key] ?? fieldGroup?.reviewedValue?.value ?? fieldGroup?.recommendedValue ?? '';
+                  const pending = fieldGroup?.status === 'pending';
+                  return <article className="quote stack tight" key={field.fieldCode}>
+                    <div className="row between" style={{ flexWrap:'wrap' }}><strong>{field.label}{field.isRequired ? ' · مطلوب' : ''}</strong><Badge tone={fieldGroup?.status === 'reviewed' ? 'ok' : fieldGroup?.status === 'rejected' ? 'bad' : fieldGroup?.status === 'pending' ? 'warn' : 'neutral'}>{fieldGroup ? candidateStatusLabel(fieldGroup.status) : 'لم يُعثر على دليل'}</Badge></div>
+                    {field.unit && <span className="muted">وحدة النموذج: {field.unit}</span>}
+                    {fieldGroup?.evidenceCount > 0 ? <>
+                      {fieldGroup.values.length > 1 && <div className="quote">تعارض: عُثر على {fmtNumber(fieldGroup.values.length,0)} قيم مختلفة. القيمة المقترحة مرتبة بحسب قوة المطابقة وتعدد الأدلة؛ راجع البدائل قبل القرار.</div>}
+                      <label className="stack tight"><span>القيمة المقترحة · ثقة المطابقة {fieldGroup.confidence == null ? 'غير محسوبة' : `${Math.round(fieldGroup.confidence * 100)}٪`} (ليست ضمانًا للصحة)</span>
+                        {field.referenceValues?.length > 0 ? <select className="input" value={value} onChange={event => setReviewFieldValues(current => ({ ...current,[key]:event.target.value }))} disabled={!pending}><option value="">— اختر قيمة مرجعية —</option>{!field.referenceValues.some(option => String(option.id) === String(value)) && value && <option value={value}>قيمة غير موجودة في القائمة: {value}</option>}{field.referenceValues.map(option => <option key={option.id} value={String(option.id)}>{option.label}</option>)}</select>
+                          : field.dataType === 'boolean' ? <select className="input" value={value} onChange={event => setReviewFieldValues(current => ({ ...current,[key]:event.target.value }))} disabled={!pending}><option value="">— اختر —</option><option value="true">نعم</option><option value="false">لا</option></select> : <input className="input" value={value} onChange={event => setReviewFieldValues(current => ({ ...current,[key]:event.target.value }))} disabled={!pending} maxLength={1000} />}
+                      </label>
+                      <div className="chip-row"><Badge>{fmtNumber(fieldGroup.evidenceCount,0)} أدلة مجمّعة</Badge><span className="muted">{fieldGroup.recommendationReason}</span></div>
+                      {fieldGroup.values.length > 1 && <details><summary>القيم البديلة ومصادرها</summary><div className="stack tight" style={{ marginTop:8 }}>{fieldGroup.values.map((item,index) => <div className="row" key={`${item.value}:${index}`}><button type="button" className="btn small ghost" disabled={!pending} onClick={() => setReviewFieldValues(current => ({ ...current,[key]:item.value }))}>استخدام {item.value}</button><span>{fmtNumber(item.evidenceCount,0)} أدلة · ثقة قصوى {Math.round(item.maxConfidence * 100)}٪</span></div>)}</div></details>}
+                      <details><summary>تفاصيل المصدر والأدلة ({fmtNumber(fieldGroup.candidates.length,0)})</summary><div className="stack tight" style={{ marginTop:8 }}>{fieldGroup.candidates.map(candidate => <div className="quote stack tight" key={candidate.id}><div className="chip-row"><Badge>{candidateSourceLabel(candidate)}</Badge>{candidate.retrieval_method === 'local-near-heading' && <Badge tone="warn">عنوان قريب غير مطابق حرفيًا؛ تأكيد الربط مطلوب</Badge>}{candidate.confidence != null && <Badge tone="neutral">ثقة المطابقة {Math.round(candidate.confidence * 100)}٪</Badge>}</div>{candidate.evidence_text && <p>{candidate.evidence_text}</p>}<span className="muted">الأصل: {candidate.raw_value ?? '—'}{candidate.suggested_value != null ? ` · المقترح المطبّع: ${candidate.suggested_value}` : ''}</span></div>)}</div></details>
+                      {pending && <div className="row"><label className="row"><input type="checkbox" checked={Boolean(selectedReviewGroups[key])} onChange={event => setSelectedReviewGroups(current => ({ ...current,[key]:event.target.checked }))} />ضمّ للمراجعة الجماعية</label><button type="button" className="btn small primary" onClick={() => reviewFieldGroup(selectedRecord,fieldGroup,'reviewed')} disabled={busyId === selected.document.id || !reviewNote.trim() || !String(value).trim()}>تسجيل مراجعة الحقل</button><button type="button" className="btn small ghost" onClick={() => reviewFieldGroup(selectedRecord,fieldGroup,'rejected')} disabled={busyId === selected.document.id || !reviewNote.trim()}>رفض أدلة الحقل</button></div>}
+                    </> : <span className="muted">لم يظهر دليل لهذا الحقل في هذا السجل.</span>}
+                  </article>;
+                })}
+              </section>)}
+            </section>
+            {false && promotionFormVersionId && promotionDefinition && <section className="stack" aria-label="معاينة نموذج الإدخال" style={{ marginBottom: 16 }}>
               <h4>معاينة نموذج الإدخال ونتائج البحث</h4>
               <div className="quote">درجة المطابقة تقدير أولي لمدى تطابق العنوان مع الحقل، وليست ضماناً لصحة الرقم. راجع المقتطف والمصدر؛ القيم البديلة لا تُعتمد تلقائياً.</div>
               <div className="table-wrap"><table className="data"><thead><tr><th>حقل النموذج</th><th>القيمة المقترحة / الحالة</th><th>المصدر والمقتطف</th><th>الثقة</th></tr></thead>
@@ -380,7 +494,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
                       {candidate.source_document_id ? <input className="input" aria-label={`القيمة المقترحة: ${field.label_ar}`} value={candidateValues[candidate.id] ?? candidate.reviewedValue?.value ?? candidate.suggested_value ?? candidate.raw_value ?? ''} onChange={event => setCandidateValues(current => ({ ...current, [candidate.id]: event.target.value }))} disabled={candidate.review_status !== 'pending'} maxLength={1000} /> : <span className="muted">لم يُعثر على قيمة في الملف</span>}
                       <Badge tone={candidate.review_status === 'reviewed' ? 'ok' : candidate.review_status === 'rejected' ? 'bad' : 'warn'}>{candidateStatusLabel(candidate.review_status)}</Badge>
                     </div>) : <span className="muted">لم يُعثر على قيمة مقترحة</span>}</td>
-                    <td>{evidence.length ? evidence.map(candidate => <div className="stack tight" key={candidate.id}><span>{candidateSourceLabel(candidate)}</span><small>{candidate.evidence_text}</small></div>) : '—'}</td>
+                    <td>{evidence.length ? evidence.map(candidate => <div className="stack tight" key={candidate.id}><span>{candidateSourceLabel(candidate)}</span>{candidate.evidence_text && <details><summary>تفاصيل المصدر</summary><small>{candidate.evidence_text}</small></details>}</div>) : '—'}</td>
                     <td>{evidence.length ? evidence.map(candidate => <span className="chip" key={candidate.id}>{candidate.confidence == null ? 'غير محسوبة' : `${Math.round(candidate.confidence * 100)}٪`}</span>) : '—'}</td>
                   </tr>;
                 })}</tbody>
@@ -389,25 +503,42 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
             {promotionFormVersionId && <form className="stack" onSubmit={event => { event.preventDefault(); promoteReviewedCandidates(); }}>
               {reviewedGroupSummaries.length > 0 && <div className="stack tight"><div className="quote stack tight"><strong>السجلات/الصفوف المكتشفة ({fmtNumber(reviewedGroupSummaries.length,0)}):</strong><div className="chip-row">{reviewedGroupSummaries.map(group => <Badge key={group.key} tone={selectedCandidateGroups.some(selectedGroup => selectedGroup.key === group.key) ? 'ok' : 'neutral'}>{group.label} · {fmtNumber(group.count,0)} حقول مراجعة</Badge>)}</div><span className="muted">يمكن إنشاء سجل مستقل لكل صف Excel أو صفحة أو وثيقة. لكل سجل موقعه وفترته؛ القيم العامة أدناه افتراضية، ويمكن تخصيصها لكل سجل.</span></div>{selectedCandidateGroups.map(group => {
                 const context = promotionGroupContexts[group.key] ?? {};
-                return <article className="quote stack tight" key={group.key}><strong>سياق السجل: {group.label}</strong><div className="grid-2"><label className="stack tight"><span>الوحدة الجغرافية لهذا السجل</span><select className="input" value={context.geoUnitId ?? ''} onChange={event => setPromotionGroupContexts(current => ({ ...current,[group.key]:{ ...(current[group.key] ?? {}),geoUnitId:event.target.value } }))}><option value="">استخدم الموقع العام أدناه</option>{geography.filter(unit => unit.is_active).map(unit => <option key={unit.geo_unit_id} value={unit.geo_unit_id}>{unit.type_name_ar} — {unit.name_ar}{unit.parent_name_ar ? ` / ${unit.parent_name_ar}` : ''}</option>)}</select></label><label className="stack tight"><span>الفترة لهذا السجل</span><select className="input" value={context.periodId ?? ''} onChange={event => setPromotionGroupContexts(current => ({ ...current,[group.key]:{ ...(current[group.key] ?? {}),periodId:event.target.value,periodYear:'' } }))}><option value="">استخدم الفترة العامة أدناه</option>{periods.map(period => <option key={period.period_id} value={period.period_id}>{period.label_ar}</option>)}</select></label><label className="stack tight"><span>أو سنة لهذا السجل</span><input className="input" type="number" min="1900" max="2200" step="1" value={context.periodYear ?? ''} onChange={event => setPromotionGroupContexts(current => ({ ...current,[group.key]:{ ...(current[group.key] ?? {}),periodYear:event.target.value,periodId:'' } }))} placeholder="استخدم السنة العامة أدناه" /></label></div></article>;
+                const suggestion = selected.fieldReview?.contextSuggestions?.groups?.[group.key] ?? {};
+                return <article className="quote stack tight" key={group.key}><strong>سياق السجل: {group.label}</strong>
+                  {(suggestion.geography || suggestion.periodYear || suggestion.periodConflict || suggestion.geography?.ambiguous) && <div className="row" style={{ flexWrap:'wrap' }}>
+                    {suggestion.geography?.id && <button type="button" className="btn small ghost" onClick={() => setPromotionGroupContexts(current => ({ ...current,[group.key]:{ ...(current[group.key] ?? {}),geoUnitId:String(suggestion.geography.id) } }))}>استخدام الموقع المقترح: {suggestion.geography.type} — {suggestion.geography.name}</button>}
+                    {suggestion.geography?.ambiguous && <span className="muted">تعددت المواقع المحتملة: {suggestion.geography.choices.map(choice => choice.name).join('، ')}؛ اختر الموقع يدويًا.</span>}
+                    {suggestion.periodYear && <button type="button" className="btn small ghost" onClick={() => setPromotionGroupContexts(current => ({ ...current,[group.key]:{ ...(current[group.key] ?? {}),periodYear:String(suggestion.periodYear),periodId:'' } }))}>استخدام سنة الصفحة/الصف: {suggestion.periodYear}</button>}
+                    {suggestion.periodConflict && <span className="muted">تعارضت السنوات في هذا السجل: {suggestion.periodAlternatives.join('، ')}؛ اترك الفترة فارغة أو اخترها يدويًا.</span>}
+                  </div>}
+                  <div className="grid-2"><label className="stack tight"><span>الوحدة الجغرافية لهذا السجل</span><select className="input" value={context.geoUnitId ?? ''} onChange={event => setPromotionGroupContexts(current => ({ ...current,[group.key]:{ ...(current[group.key] ?? {}),geoUnitId:event.target.value } }))}><option value="">استخدم الموقع العام أدناه</option>{geography.filter(unit => unit.is_active).map(unit => <option key={unit.geo_unit_id} value={unit.geo_unit_id}>{unit.type_name_ar} — {unit.name_ar}{unit.parent_name_ar ? ` / ${unit.parent_name_ar}` : ''}</option>)}</select></label><label className="stack tight"><span>الفترة لهذا السجل</span><select className="input" value={context.periodId ?? ''} onChange={event => setPromotionGroupContexts(current => ({ ...current,[group.key]:{ ...(current[group.key] ?? {}),periodId:event.target.value,periodYear:'' } }))}><option value="">استخدم الفترة العامة أدناه</option>{periods.map(period => <option key={period.period_id} value={period.period_id}>{period.label_ar}</option>)}</select></label><label className="stack tight"><span>أو سنة لهذا السجل</span><input className="input" type="number" min="1900" max="2200" step="1" value={context.periodYear ?? ''} onChange={event => setPromotionGroupContexts(current => ({ ...current,[group.key]:{ ...(current[group.key] ?? {}),periodYear:event.target.value,periodId:'' } }))} placeholder="استخدم السنة العامة أدناه" /></label></div></article>;
               })}</div>}
               {reviewedCandidates.map(candidate => {
                 const compatibleFields = (promotionDefinition?.fields ?? []).filter(field => field.field_code === candidate.field_code && compatibleFieldType(candidate.data_type,field.data_type_override ?? field.data_type) && field.is_importable && !field.is_derived && field.storage_class !== 'ignored_derived');
                 return <article className="quote stack tight" key={candidate.id}>
                   <label className="row"><input type="checkbox" checked={Boolean(selectedCandidateIds[candidate.id])} onChange={event => setSelectedCandidateIds(current => ({ ...current,[candidate.id]:event.target.checked }))} /><strong>{candidate.field_label_ar}</strong><Badge>{candidate.data_type}</Badge></label>
                   <label className="stack tight"><span>العمود/الحقل المعياري المطابق</span><select className="input" value={candidateMappings[candidate.id] ?? ''} onChange={event => setCandidateMappings(current => ({ ...current,[candidate.id]:event.target.value }))}><option value="">— اختر الحقل المطابق —</option>{compatibleFields.map(field => <option key={field.form_field_id} value={field.field_code}>{field.label_ar} · {field.field_code}</option>)}</select></label>
+                  {(promotionDefinition?.fields ?? []).find(field => field.field_code === candidateMappings[candidate.id])?.dimensions?.map(dimension => <label className="stack tight" key={`${candidate.id}:${dimension.code}`}><span>{dimension.name}{dimension.required ? ' · مطلوب' : ''}</span><select className="input" value={candidateDimensionValues[candidate.id]?.[dimension.code] ?? ''} onChange={event => setCandidateDimensionValues(current => ({ ...current,[candidate.id]:{ ...(current[candidate.id] ?? {}),[dimension.code]:event.target.value } }))}><option value="">— اختر البعد —</option>{dimension.values.map(option => <option key={option.id ?? option.code} value={option.code}>{option.label}</option>)}</select></label>)}
                   <div><span className="muted">القيمة المؤكدة: </span><strong>{candidate.reviewedValue?.value ?? '—'}</strong>{candidate.source_file_name && <span className="muted"> · المصدر: {candidate.source_file_name}{candidate.page_number ? `، صفحة ${fmtNumber(candidate.page_number,0)}` : ''}</span>}</div>
                 </article>;
               })}
+              <div className="row" style={{ flexWrap:'wrap' }}>
+                {selected.fieldReview?.contextSuggestions?.global?.geography?.id && <button type="button" className="btn small ghost" onClick={() => setPromotionGeoUnitId(String(selected.fieldReview.contextSuggestions.global.geography.id))}>استخدام الموقع المقترح للملف: {selected.fieldReview.contextSuggestions.global.geography.type} — {selected.fieldReview.contextSuggestions.global.geography.name}</button>}
+                {selected.fieldReview?.contextSuggestions?.global?.periodYear && <button type="button" className="btn small ghost" onClick={() => { setPromotionPeriodYear(String(selected.fieldReview.contextSuggestions.global.periodYear)); setPromotionPeriodId(''); }}>استخدام سنة الملف المقترحة: {selected.fieldReview.contextSuggestions.global.periodYear}</button>}
+                {selected.fieldReview?.contextSuggestions?.global?.periodConflict && <span className="muted">وجدت سنوات متعددة في الملف: {selected.fieldReview.contextSuggestions.global.periodAlternatives.join('، ')}؛ لن تُستخدم فترة عامة تلقائيًا.</span>}
+                {selected.fieldReview?.contextSuggestions?.global?.geography?.ambiguous && <span className="muted">الموقع العام ملتبس؛ اختره من القائمة دون اعتماد تخمين.</span>}
+              </div>
               <div className="grid-2" style={{ alignItems:'end' }}>
                 <label className="stack tight"><span>الوحدة الجغرافية</span><select className="input" value={promotionGeoUnitId} onChange={event => setPromotionGeoUnitId(event.target.value)}><option value="">— دون ربط جغرافي —</option>{geography.filter(unit => unit.is_active).map(unit => <option key={unit.geo_unit_id} value={unit.geo_unit_id}>{unit.type_name_ar} — {unit.name_ar}{unit.parent_name_ar ? ` / ${unit.parent_name_ar}` : ''}</option>)}</select></label>
                 <label className="stack tight"><span>الفترة المرجعية</span><select className="input" value={promotionPeriodId} onChange={event => { setPromotionPeriodId(event.target.value); setPromotionPeriodYear(''); }}><option value="">— فترة غير محددة —</option>{periods.map(period => <option key={period.period_id} value={period.period_id}>{period.label_ar}</option>)}</select></label>
                 <label className="stack tight"><span>أو سنة ميلادية جديدة</span><input className="input" type="number" min="1900" max="2200" step="1" value={promotionPeriodYear} onChange={event => { setPromotionPeriodYear(event.target.value); setPromotionPeriodId(''); }} placeholder="2025" /></label>
                 <label className="stack tight"><span>عنوان السجل</span><input className="input" value={promotionRecordLabel} onChange={event => setPromotionRecordLabel(event.target.value)} maxLength={240} placeholder={selected.document.file_name} /></label>
               </div>
+              <fieldset className="stack tight"><legend>طريقة الحفظ</legend><label className="row"><input type="radio" name="submission-mode" checked={submitForReview} onChange={() => setSubmitForReview(true)} />إنشاء سجل وإرساله للمراجعة المركزية</label><label className="row"><input type="radio" name="submission-mode" checked={!submitForReview} onChange={() => setSubmitForReview(false)} />حفظ كمسودة غير مرسلة</label></fieldset>
               {selectedPromotionCandidates.length > 0 && missingRequiredFields.length > 0 && <div className="quote">النموذج يتطلب حقولًا لم تُربط بمرشحين مراجَعين: {missingRequiredFields.join('، ')}.</div>}
+              {missingRequiredDimensions.length > 0 && <div className="quote">اختر أبعاد القياس المطلوبة: {missingRequiredDimensions.join('، ')}.</div>}
               {selectedRequiresPeriod && !hasPromotionPeriod && <div className="quote">اختر فترة مرجعية أو سنة للقياسات المختارة.</div>}
-              <button className="btn small primary" type="submit" disabled={busyId === selected.document.id || selectedPromotionCandidates.length === 0 || hasUnmappedSelectedCandidates || missingRequiredFields.length > 0 || (selectedRequiresPeriod && !hasPromotionPeriod)}><Check size={14} /> إنشاء السجل وإرساله للمراجعة ({fmtNumber(selectedPromotionCandidates.length,0)})</button>
+              <button className="btn small primary" type="submit" disabled={busyId === selected.document.id || selectedPromotionCandidates.length === 0 || hasUnmappedSelectedCandidates || missingRequiredFields.length > 0 || missingRequiredDimensions.length > 0 || (selectedRequiresPeriod && !hasPromotionPeriod)}><Check size={14} />{submitForReview ? 'إنشاء السجل وإرساله للمراجعة' : 'حفظ السجل كمسودة'} ({fmtNumber(selectedPromotionCandidates.length,0)})</button>
             </form>}
           </section>
           {(selected.fieldReview.rows ?? []).some(candidate => ['reviewed','rejected'].includes(candidate.review_status)) && <details><summary>قرارات المراجعة السابقة ({fmtNumber((selected.fieldReview.rows ?? []).filter(candidate => ['reviewed','rejected'].includes(candidate.review_status)).length, 0)})</summary><div className="stack" style={{ marginTop: 10 }}>{(selected.fieldReview.rows ?? []).filter(candidate => ['reviewed','rejected'].includes(candidate.review_status)).map(candidate => <article className="quote stack tight" key={candidate.id}><div className="row between"><strong>{candidate.field_label_ar}</strong><Badge>{candidateStatusLabel(candidate.review_status)}</Badge></div>{candidate.promoted_form_record_id && <Badge tone="ok">مرتبطة بالسجل المعياري {fmtNumber(candidate.promoted_form_record_id,0)}</Badge>}{candidate.reviewedValue?.value && <span>القيمة التي راجعها المستخدم: {candidate.reviewedValue.value}</span>}<span>السبب: {candidate.review_note}</span><span className="muted">المراجع: {candidate.reviewed_by ?? 'غير مسجل'} · {fmtDateTime(candidate.reviewed_at)}</span></article>)}</div></details>}
@@ -415,7 +546,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
         </section>}
         {selected.fieldReview?.run?.status === 'failed' && <div className="quote">تعذر إنشاء قائمة المرشحين: {selected.fieldReview.run.error_text}</div>}
         {(selected.artifacts ?? []).map(artifact => artifact.artifact_type === 'markdown' ? <details key={artifact.artifact_type}><summary>النص Markdown المستخرج (للمراجعة فقط)</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 500, overflow: 'auto' }}>{artifact.content}</pre></details> : <details key={artifact.artifact_type}><summary>بيانات {artifact.artifact_type}</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 500, overflow: 'auto' }}>{artifact.content.slice(0, 20000)}</pre></details>)}
-        <div className="stack" style={{ marginTop: 16 }}>{(selected.elements ?? []).map(element => <article className="quote" key={element.id}><div className="chip-row"><Badge>{element.element_type}</Badge>{element.page_number && <Badge>صفحة {element.page_number}</Badge>}{element.confidence !== null && <Badge>ثقة OCR {Number(element.confidence).toFixed(3)}</Badge>}</div>{element.heading && <strong>{element.heading}</strong>}<p>{element.content}</p><span className="muted">مصدر العنصر: {element.source_json}</span></article>)}</div>
+        <details style={{ marginTop: 16 }}><summary>عناصر النص المستخرج ({fmtNumber((selected.elements ?? []).length,0)})</summary><div className="stack" style={{ marginTop: 10 }}>{(selected.elements ?? []).map(element => <article className="quote" key={element.id}><div className="chip-row"><Badge>{element.element_type}</Badge>{element.page_number && <Badge>صفحة {element.page_number}</Badge>}{element.confidence !== null && <Badge>ثقة OCR {Number(element.confidence).toFixed(3)}</Badge>}</div>{element.heading && <strong>{element.heading}</strong>}<p>{element.content}</p><span className="muted">مصدر العنصر: {element.source_json}</span></article>)}</div></details>
         {(selected.ragflowReferences ?? []).map(reference => <div className="muted" key={reference.dataset_id}>حالة الفهرسة في محرك المعرفة: {reference.status} · {fmtDateTime(reference.updated_at)}</div>)}
       </Card>}
     </>

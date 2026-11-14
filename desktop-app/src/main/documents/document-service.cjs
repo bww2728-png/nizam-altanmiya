@@ -340,33 +340,73 @@ function extractDocxXml(xml, fileName) {
   let paragraph = '';
   let inParagraph = false;
   let inText = false;
+  let tableDepth = 0;
+  let tableNumber = 0;
+  let currentTable = null;
+  let currentRow = null;
+  let currentCell = '';
   const parser = new SaxesParser({ xmlns: true });
   parser.on('opentag', (tag) => {
     if (tag.uri !== 'http://schemas.openxmlformats.org/wordprocessingml/2006/main') return;
-    if (tag.local === 'p') {
+    if (tag.local === 'tbl') {
+      tableDepth += 1;
+      if (tableDepth === 1) currentTable = { tableNumber: ++tableNumber, rows: [] };
+    } else if (tag.local === 'tr' && currentTable && tableDepth === 1) currentRow = [];
+    else if (tag.local === 'tc' && currentRow) currentCell = '';
+    else if (tag.local === 'p') {
       inParagraph = true;
       paragraph = '';
     } else if (inParagraph && tag.local === 't') inText = true;
-    else if (inParagraph && tag.local === 'tab') paragraph += '\\t';
-    else if (inParagraph && (tag.local === 'br' || tag.local === 'cr')) paragraph += '\\n';
+    else if (inParagraph && tag.local === 'tab') { paragraph += '\\t'; if (currentRow) currentCell += '\\t'; }
+    else if (inParagraph && (tag.local === 'br' || tag.local === 'cr')) { paragraph += '\\n'; if (currentRow) currentCell += '\\n'; }
   });
-  parser.on('text', (value) => { if (inText) paragraph += value; });
+  parser.on('text', (value) => { if (inText) { paragraph += value; if (currentRow) currentCell += value; } });
   parser.on('closetag', (tag) => {
     if (tag.uri !== 'http://schemas.openxmlformats.org/wordprocessingml/2006/main') return;
     if (tag.local === 't') inText = false;
     else if (tag.local === 'p') {
       const content = paragraph.trim();
-      if (content) {
+      if (content && !currentRow) {
         if (elements.length >= MAX_ELEMENTS) throw new Error('تجاوز عدد فقرات Word الحد المسموح به.');
         elements.push({ type: 'paragraph', content, source: { file_name: fileName } });
       }
       paragraph = '';
       inParagraph = false;
+    } else if (tag.local === 'tc' && currentRow) {
+      currentRow.push(currentCell.trim());
+      currentCell = '';
+    } else if (tag.local === 'tr' && currentTable && tableDepth === 1) {
+      if (currentRow?.some(value => value)) currentTable.rows.push(currentRow);
+      currentRow = null;
+    } else if (tag.local === 'tbl') {
+      if (tableDepth === 1 && currentTable) {
+        const rows = currentTable.rows;
+        const firstRow = rows[0] ?? [];
+        const keyValueTable = firstRow.length === 2
+          && /^(?:الحقل|اسم الحقل|البند|البيان|المتغير|field|item|name)$/i.test(normalizeSearchText(firstRow[0]))
+          && /^(?:القيمة|المحتوى|value|content)$/i.test(normalizeSearchText(firstRow[1]));
+        const hasHeaders = firstRow.length > 1 && !keyValueTable;
+        for (let rowIndex = hasHeaders ? 1 : 0; rowIndex < rows.length; rowIndex += 1) {
+          const row = rows[rowIndex];
+          const lines = hasHeaders
+            ? row.map((value, cellIndex) => firstRow[cellIndex] && value ? `${firstRow[cellIndex]}: ${value}` : '').filter(Boolean)
+            : row.length === 2 && row[0] && row[1] ? [`${row[0]}: ${row[1]}`] : row.filter(Boolean).map((value, cellIndex) => `الخلية ${cellIndex + 1}: ${value}`);
+          if (!lines.length) continue;
+          if (elements.length >= MAX_ELEMENTS) throw new Error('تجاوز عدد صفوف جداول Word الحد المسموح به.');
+          elements.push({
+            type: 'table-row',
+            content: lines.join('\n'),
+            source: { file_name: fileName, table_number: currentTable.tableNumber, row_number: rowIndex + 1, cells: row.map((value, cellIndex) => ({ header: hasHeaders ? firstRow[cellIndex] ?? null : null, value })) },
+          });
+        }
+        currentTable = null;
+      }
+      tableDepth = Math.max(0, tableDepth - 1);
     }
   });
   parser.write(xml).close();
   if (!elements.length) throw new Error('لم يُعثر على نص قابل للاستخراج في ملف Word.');
-  const markdown = elements.map((element) => element.content).join('\\n\\n');
+  const markdown = elements.map((element) => element.content).join('\n\n');
   return {
     engine: { name: 'Local DOCX parser', version: '1' },
     structured: { elements },

@@ -72,7 +72,7 @@ function zipFiles(files) {
 test('DOCX extraction runs locally without a Python installation', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'document-docx-'));
   const filePath = path.join(directory, 'report.docx');
-  const xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>اسم المديرية: الحديدة &amp; صنعاء</w:t></w:r></w:p><w:p><w:r><w:t>عدد السكان: ١٢٣٤</w:t></w:r></w:p></w:body></w:document>';
+  const xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>اسم المديرية: الحديدة &amp; صنعاء</w:t></w:r></w:p><w:p><w:r><w:t>عدد السكان: ١٢٣٤</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>اسم المديرية</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>عدد السكان</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>الحديدة</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>١٢٣٤</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>';
   fs.writeFileSync(filePath, zipFiles({
     '[Content_Types].xml': '<Types/>',
     '_rels/.rels': '<Relationships/>',
@@ -82,8 +82,11 @@ test('DOCX extraction runs locally without a Python installation', async () => {
     await documents.inspectFile(filePath);
     const result = await documents.runWorker(filePath, { python: 'python-command-that-is-not-installed' });
     assert.equal(result.engine.name, 'Local DOCX parser');
-    assert.deepEqual(result.elements.map(element => element.content), ['اسم المديرية: الحديدة & صنعاء', 'عدد السكان: ١٢٣٤']);
+    assert.deepEqual(result.elements.map(element => element.content), ['اسم المديرية: الحديدة & صنعاء', 'عدد السكان: ١٢٣٤', 'اسم المديرية: الحديدة\nعدد السكان: ١٢٣٤']);
     assert.equal(result.elements[0].source.file_name, 'report.docx');
+    assert.equal(result.elements[2].type, 'table-row');
+    assert.equal(result.elements[2].source.table_number,1);
+    assert.equal(result.elements[2].source.row_number,2);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -118,10 +121,18 @@ test('document center maps reviewed candidates through protected IPC without exp
   assert.doesNotMatch(interfaceSource, /RAGFlow|API key|مفتاح API|Bearer API|معرّف مجموعة/);
   assert.match(interfaceSource, /promoteDocumentFieldCandidates/);
   assert.match(interfaceSource, /candidateGroups/);
-  assert.match(interfaceSource, /لا يصبح معتمداً حتى يعتمد وفق المسار المركزي/);
+  assert.match(interfaceSource, /submitForReview \? 'إنشاء السجل وإرساله للمراجعة'/);
+  assert.match(interfaceSource, /كل الحقول المؤهلة تظهر مرة واحدة/);
+  assert.match(interfaceSource, /reviewDocumentFieldCandidateGroups/);
+  assert.match(interfaceSource, /لا يظهر المقتطف إلا عند فتح تفاصيل المصدر/);
   assert.match(interfaceSource, /!form\.form_code\.startsWith\('raw_collection_v1_'\)/);
+  assert.match(interfaceSource, /<summary>تفاصيل المصدر<\/summary>/);
+  assert.match(interfaceSource, /contextSuggestions/);
+  assert.match(interfaceSource, /candidateDimensionValues/);
   assert.match(preloadSource, /promoteDocumentFieldCandidates: \(request\) => ipcRenderer\.invoke\('documents:field-candidates:promote', request\)/);
+  assert.match(preloadSource, /reviewDocumentFieldCandidateGroups: \(request\) => ipcRenderer\.invoke\('documents:field-candidate-group:review', request\)/);
   assert.match(mainSource, /ipcMain\.handle\('documents:field-candidates:promote'[\s\S]*currentProfile\(\) !== 'owner'/);
+  assert.match(mainSource, /documents:field-candidate-group:review/);
   assert.match(mainSource, /promoteReviewedCandidateGroups/);
   assert.doesNotMatch(preloadSource, /saveRagflowConfig|ragflow:save-config/);
 });
