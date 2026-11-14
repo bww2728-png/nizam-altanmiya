@@ -1054,6 +1054,7 @@ function saveManualDirectorate(database, request = {}) {
         timestamp,
       );
 
+    require('../database/manual-entry-workflow.cjs').ensureDirectorateGeography(database,district,governorate,timestamp);
     canonicalData.syncLegacyDirectorate(database,targetId);
     require('../database/architecture.cjs').syncLegacyDirectorateRecord(database,targetId);
     return { id: targetId, created };

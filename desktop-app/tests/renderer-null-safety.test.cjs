@@ -36,16 +36,26 @@ test('a nullable form definition is never dereferenced for its fields', () => {
   assert.deepStrictEqual(offenders, [], `use definition?.fields because the definition is null until the catalogue loads:\n${offenders.join('\n')}`);
 });
 
-test('the draft signature computed during render is guarded by the definition', () => {
+test('manual-entry rendering never dereferences unavailable field definitions', () => {
   const source = pageSource();
-  const assignment = source.match(/^[ \t]*latestDraftSignatureRef\.current[ \t]*=[ \t]*(.+)$/m);
-  assert.ok(assignment, 'DataEntry.jsx should still track the latest draft signature');
-  const expression = assignment[1].trim();
-  assert.match(expression, /definition\s*\?/, `render-time signature must be conditional, found: ${expression}`);
+  const offenders = [];
+  const pattern = /(^|[^?\w$.])definition\.fields/gm;
+  for (const match of source.matchAll(pattern)) {
+    const line = source.slice(0, match.index).split('\n').length;
+    offenders.push(`line ${line}: definition.fields`);
+  }
+  assert.deepStrictEqual(offenders, [], `field access must tolerate an unavailable definition:\n${offenders.join('\n')}`);
+  assert.match(source, /definition\?\.fields/);
 });
 
-test('the draft signature is still rebuilt when a definition is present', () => {
+test('draft autosave waits for loaded definitions and encrypted storage', () => {
   const source = pageSource();
-  assert.match(source, /definition\s*\?\s*buildDraftSignature\(\)/, 'guarded branch must call buildDraftSignature()');
-  assert.match(source, /const buildDraftSignature = \(payload = buildRecordPayload\(\)\)/, 'buildDraftSignature keeps its default payload');
+  assert.match(source, /if \(!catalog \|\| !hasDraftChanges \|\| !draftAvailable\) return undefined;/);
+  assert.match(source, /window\.localApp\.manualEntryDraft\.save\(snapshot\)/);
+});
+
+test('draft snapshots retain the current workflow and entered data', () => {
+  const source = pageSource();
+  assert.match(source, /const makeDraftSnapshot = useCallback\(\(\) => \(\{[^}]*selectedGeoUnitId[^}]*stepIndex[^}]*valuesByForm[^}]*dimensionsByForm[^}]*editing/s);
+  assert.match(source, /window\.localApp\.manualEntryDraft\.save\(snapshot\)/);
 });

@@ -219,12 +219,13 @@ test('raw collection forms make all unresolved requirements collectable without 
     assert.equal(form.collection_mode,'primary_collection');
     assert.equal(form.analysis_eligible,0);
     const officialCount = db.prepare('SELECT COUNT(*) AS count FROM indicator_observations').get().count;
+    const geoUnitId = require('../src/main/database/manual-entry-workflow.cjs').ensureDirectorateGeography(db,'اختبار الجمع','تعز','2026-01-01T00:00:00.000Z').geoUnitId;
     const firstSource = 'استمارة أولية، الصفحة 1';
-    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,actor:'collector',
+    const created = recordService.saveRecord(db,{ formVersionId:form.form_version_id,geoUnitId,actor:'collector',
       values:{ [fieldCode]:{ value:'إجابة خام للمراجعة',state:'known' } },
       valueSources:{ [fieldCode]:firstSource } });
     assert.equal(recordService.getRecord(db,created.formRecordId).values[fieldCode].sourceLocator,firstSource);
-    recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,actor:'collector',
+    recordService.saveRecord(db,{ formVersionId:form.form_version_id,formRecordId:created.formRecordId,geoUnitId,actor:'collector',
       changeReason:'تصحيح النص الخام.',values:{ [fieldCode]:{ value:'إجابة خام مصححة',state:'known' } },
       valueSources:{ [fieldCode]:'استمارة أولية، الصفحة 2' } });
     assert.equal(recordService.getRecord(db,created.formRecordId).values[fieldCode].value,'إجابة خام مصححة');

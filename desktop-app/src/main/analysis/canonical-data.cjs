@@ -637,6 +637,7 @@ function promoteProjectRegion(database, request = {}) {
     columnMap[field] = column;
   }
   if (!columnMap.project_name) throw new Error('اربط عمود «اسم المشروع» قبل الاعتماد.');
+  if (!columnMap.governorate || !columnMap.district) throw new Error('اربط عمودي المحافظة والمديرية لتأكيد الإسناد الجغرافي قبل الاعتماد.');
   if (new Set(Object.values(columnMap)).size !== Object.values(columnMap).length) throw new Error('لا يمكن ربط العمود نفسه بأكثر من حقل.');
 
   const region = database.prepare('SELECT r.*,s.name AS sheet_name,s.state AS sheet_state,b.source_id,b.file_name FROM workbook_import_regions r JOIN workbook_import_sheets s ON s.id = r.sheet_id JOIN workbook_import_batches b ON b.id = r.batch_id WHERE r.id = ? AND r.batch_id = ?')
@@ -701,13 +702,12 @@ function promoteProjectRegion(database, request = {}) {
     if (code) seenCodes.add(code);
     else if (batch.source_id) seenSourceNames.add(name);
 
-    let geographicUnitId = null;
     const district = (values.district ?? '').trim(), governorate = (values.governorate ?? '').trim();
-    if (district) {
-      const matches = database.prepare("SELECT child.id FROM geographic_units child LEFT JOIN geographic_units parent ON parent.id = child.parent_id WHERE child.unit_type IN ('district','directorate') AND child.normalized_name = ? AND (? = '' OR parent.normalized_name = ?) LIMIT 2")
-        .all(normalizeLabel(district), governorate, normalizeLabel(governorate));
-      if (matches.length === 1) geographicUnitId = matches[0].id;
-    }
+    if (!district || !governorate) { refuse('اسم المديرية والمحافظة مطلوبان لتأكيد الإسناد الجغرافي.'); continue; }
+    const matches = database.prepare("SELECT child.id FROM geographic_units child LEFT JOIN geographic_units parent ON parent.id = child.parent_id WHERE child.unit_type IN ('district','directorate') AND child.normalized_name = ? AND parent.normalized_name = ? LIMIT 2")
+      .all(normalizeLabel(district), normalizeLabel(governorate));
+    if (matches.length !== 1) { refuse('تعذر ربط المديرية بمحافظة واحدة معتمدة بالاسم؛ لم يُحفظ المشروع بلا مديرية.'); continue; }
+    const geographicUnitId = matches[0].id;
     let sectorId = null;
     const sector = (values.sector ?? '').trim();
     if (sector) {

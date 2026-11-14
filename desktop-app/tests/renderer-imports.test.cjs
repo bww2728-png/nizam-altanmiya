@@ -76,6 +76,6 @@ test('every lib/format helper used by the renderer is imported or declared local
 test('the central manual-entry page imports the helper it renders', () => {
   const page = path.join(RENDERER_ROOT, 'pages', 'DataEntry.jsx');
   const source = fs.readFileSync(page, 'utf8');
-  assert.ok(/fmtNumber\s*\(/.test(source), 'DataEntry should still render a formatted count');
-  assert.ok(importsHelper(source, 'fmtNumber'), 'DataEntry.jsx must import fmtNumber from lib/format.js');
+  assert.ok(/errText\s*\(/.test(source), 'DataEntry should still render user-facing errors');
+  assert.ok(importsHelper(source, 'errText'), 'DataEntry.jsx must import errText from lib/format.js');
 });

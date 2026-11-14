@@ -650,8 +650,8 @@ const PROJECT_REVIEW_FIELDS = [
   { key: 'currency_code', label: 'رمز العملة' },
   { key: 'start_date', label: 'تاريخ البداية' },
   { key: 'end_date', label: 'تاريخ النهاية' },
-  { key: 'governorate', label: 'المحافظة' },
-  { key: 'district', label: 'المديرية' },
+  { key: 'governorate', label: 'المحافظة (تأكيد الإسناد)', required: true },
+  { key: 'district', label: 'المديرية (تأكيد الإسناد)', required: true },
   { key: 'sector', label: 'القطاع' },
   { key: 'funding_partner', label: 'جهة التمويل' },
   { key: 'funding_amount', label: 'مبلغ التمويل' },
@@ -823,6 +823,11 @@ function ProjectRegionReview({ staging }) {
         </Notice>
       )}
       {projectRegions.length > 0 && (
+        <Notice tone="info" title="تأكيد المديرية قبل اعتماد كل مشروع">
+          يجب ربط عمودي المحافظة والمديرية، ومراجعة القيم الظاهرة في كل صف. لن يُحفظ مشروع إذا لم يطابق الاسم مديرية واحدة معتمدة.
+        </Notice>
+      )}
+      {projectRegions.length > 0 && (
         <>
           <div className="row between" style={{ gap: 12, flexWrap: 'wrap' }}>
             <div className="stack tight">
@@ -913,6 +918,8 @@ function ProjectRegionReview({ staging }) {
                       </div>
                       <div className="chip-row" style={{ marginTop: 8 }}>
                         <span className="chip"><strong>المشروع:</strong> {stagedCellValue(row, columnMap.project_name) || '—'}</span>
+                        {columnMap.governorate && <span className="chip"><strong>المحافظة المقترحة:</strong> {stagedCellValue(row, columnMap.governorate) || '—'}</span>}
+                        {columnMap.district && <span className="chip"><strong>المديرية المقترحة:</strong> {stagedCellValue(row, columnMap.district) || '—'}</span>}
                         {columnMap.project_code && <span className="chip"><strong>الرمز:</strong> {stagedCellValue(row, columnMap.project_code) || '—'}</span>}
                         {columnMap.estimated_cost && <span className="chip"><strong>التكلفة:</strong> {stagedCellValue(row, columnMap.estimated_cost) || '—'}</span>}
                         {columnMap.status && <span className="chip"><strong>الحالة:</strong> {stagedCellValue(row, columnMap.status) || '—'}</span>}
@@ -958,7 +965,7 @@ function ProjectRegionReview({ staging }) {
                   id="promote-projects"
                   className="btn primary"
                   onClick={promote}
-                  disabled={busy || !columnMap.project_name || selectedCount === 0}
+                  disabled={busy || !columnMap.project_name || !columnMap.governorate || !columnMap.district || selectedCount === 0}
                 >
                   {busy ? 'جارٍ الاعتماد...' : 'اعتماد المشاريع المحددة في قاعدة البيانات'}
                 </button>
