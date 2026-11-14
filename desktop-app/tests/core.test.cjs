@@ -12,7 +12,9 @@ const silentLog = { info() {} };
 
 function withTemporaryDirectory(callback) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'local-development-intelligence-'));
-  const cleanup = () => fs.rmSync(directory, { recursive: true, force: true });
+  // Windows keeps a directory busy for a moment after the last handle closes, so
+  // removal is retried instead of failing the test with a spurious EPERM.
+  const cleanup = () => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   try {
     const result = callback(directory);
     if (result && typeof result.then === 'function') return result.finally(cleanup);
@@ -85,6 +87,9 @@ const Module = require('node:module');
 
 function createElectronStub(userDataPath, handlers) {
   const noop = () => {};
+  // Real lifecycle listeners are recorded so a test can drive `before-quit`
+  // and let main.cjs release the SQLite handle before the temp dir is removed.
+  const appListeners = new Map();
   class BrowserWindowStub {
     constructor() {
       this.webContents = {
@@ -112,7 +117,14 @@ function createElectronStub(userDataPath, handlers) {
       isPackaged: false,
       requestSingleInstanceLock: () => true,
       whenReady: () => ({ then: (callback) => { callback(); return { catch() {} }; }, catch() {} }),
-      on: noop,
+      on: (event, listener) => {
+        const registered = appListeners.get(event) ?? [];
+        registered.push(listener);
+        appListeners.set(event, registered);
+      },
+      emit: (event, payload) => {
+        for (const listener of appListeners.get(event) ?? []) listener(payload);
+      },
       quit: noop,
     },
     BrowserWindow: BrowserWindowStub,
@@ -147,6 +159,9 @@ function loadMainHandlers(userDataPath) {
   } finally {
     Module._load = originalLoad;
   }
+  // The stub is attached so a test can drive lifecycle events that release
+  // resources held by main.cjs for the app lifetime.
+  handlers.electron = electron;
   return handlers;
 }
 
@@ -254,5 +269,8 @@ test('database browser IPC enforces owner access and records overview reads', ()
     } finally {
       database.close();
     }
+    // main.cjs keeps the store open for the app lifetime; closing it through the
+    // real quit path is what allows the temporary directory to be removed.
+    handlers.electron.app.emit('before-quit', { preventDefault() {} });
   });
 });
