@@ -1315,7 +1315,7 @@ table.data .cell-actions { display: flex; gap: 6px; justify-content: flex-start;
   border-radius: var(--r-lg);
   background: var(--glass);
 }
-.data-entry-catalog { position: sticky; top: 12px; display: grid; gap: 14px; max-height: calc(100vh - 32px); }
+.data-entry-catalog { position: sticky; top: 12px; display: grid; gap: 14px; grid-template-rows: auto auto auto auto minmax(0, 1fr); max-height: calc(100vh - 32px); overflow: hidden; }
 .data-entry-catalog-head .chip { white-space: nowrap; }
 .data-entry-catalog .search-box { min-width: 0; }
 .data-entry-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -1334,7 +1334,7 @@ table.data .cell-actions { display: flex; gap: 6px; justify-content: flex-start;
 }
 .data-entry-favorites-toggle.active,
 .data-entry-favorite[aria-pressed='true'] { color: var(--gold); }
-.data-entry-domain-list { display: grid; gap: 4px; overflow: auto; min-height: 140px; padding-inline-end: 4px; }
+.data-entry-domain-list { display: grid; gap: 4px; min-height: 0; overflow: auto; padding-inline-end: 4px; }
 .data-entry-domain { border-bottom: 1px solid var(--line); }
 .data-entry-domain-toggle {
   display: grid;
@@ -1432,10 +1432,16 @@ table.data .cell-actions { display: flex; gap: 6px; justify-content: flex-start;
 @media (max-width: 860px) {
   .data-entry-layout { grid-template-columns: 1fr; }
   .data-entry-records-layout.with-detail { grid-template-columns: 1fr; }
-  .data-entry-catalog { position: static; max-height: none; }
+  .data-entry-catalog { position: static; max-height: none; overflow: visible; grid-template-rows: auto; }
   .data-entry-detail-panel { position: static; max-height: 70vh; }
-  .data-entry-domain-list { max-height: 360px; }
+  .data-entry-domain-list { max-height: 360px; min-height: 140px; }
   .data-entry-recent-list { grid-template-columns: 1fr 1fr; }
+}
+/* A short window cannot hold the pinned catalogue; let the page scroll instead of
+   clipping the last groups inside the sticky column. */
+@media (max-height: 820px) and (min-width: 861px) {
+  .data-entry-catalog { position: static; max-height: none; }
+  .data-entry-domain-list { max-height: none; }
 }
 @media (max-width: 600px) {
   .data-entry-page { gap: 12px; }
