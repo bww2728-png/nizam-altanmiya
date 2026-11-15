@@ -27,7 +27,7 @@ export const NAV_GROUPS = [
   {
     caption: 'البيانات',
     items: [
-      { id: 'documents', label: 'الوثائق والبحث والاستيراد', icon: FileSearch },
+      { id: 'documents', label: 'مركز الملفات', icon: FileSearch },
       { id: 'data-entry', label: 'الإدخال اليدوي المركزي', icon: PenLine },
       { id: 'projects', label: 'سجل المشاريع', icon: Briefcase },
       { id: 'sources', label: 'مصادر البيانات', icon: Files },

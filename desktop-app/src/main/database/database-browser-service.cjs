@@ -500,9 +500,12 @@ function sourceTypeLabels(db, rows) {
 }
 
 function listGroup(db, request = {}) {
+  return listGroupFromOverview(db, request, getOverview(db));
+}
+
+function listGroupFromOverview(db, request = {}, overview) {
   const code = String(request.groupCode ?? '').trim();
   const sourceKey = String(request.sourceKey ?? '').trim();
-  const overview = getOverview(db);
   const group = overview.domains.flatMap(domain => domain.groups).find(item => item.code === code);
   if (!group) throw new Error('المجموعة المطلوبة غير موجودة في كتالوج الإدخال.');
   const source = group.sources.find(item => item.key === sourceKey);
@@ -562,6 +565,142 @@ function listGroup(db, request = {}) {
         : sourceLabels.length > 1 ? `مصادر موثقة متعددة: ${[...new Set(sourceLabels)].join('، ')}` : 'المصدر غير موثق';
       return { ...row, ...values, _sourceType: sourceLabel };
     }),
+  };
+}
+
+function listDirectorateTable(db, request = {}) {
+  const geoUnitId = Number(request.geoUnitId);
+  if (!Number.isSafeInteger(geoUnitId) || geoUnitId <= 0) throw new Error('اختر المديرية قبل استعراض بياناتها.');
+  const geo = db.prepare(`SELECT unit.geo_unit_id,unit.name_ar,parent.name_ar AS parent_name_ar FROM geographic_units unit
+    LEFT JOIN geographic_units parent ON parent.geo_unit_id=unit.parent_geo_unit_id WHERE unit.geo_unit_id=? AND unit.is_active=1
+    AND unit.geo_unit_type_id=(SELECT geo_unit_type_id FROM geo_unit_types WHERE type_code='directorate')`).get(geoUnitId);
+  if (!geo) throw new Error('المديرية المطلوبة غير موجودة أو غير نشطة.');
+  const limitNumber = Number(request.limit);
+  const limit = Number.isFinite(limitNumber) ? Math.min(MAX_LIMIT, Math.max(1, Math.trunc(limitNumber))) : 50;
+  const offsetNumber = Number(request.offset);
+  const offset = Number.isFinite(offsetNumber) ? Math.min(1000000, Math.max(0, Math.trunc(offsetNumber))) : 0;
+  const search = String(request.search ?? '').trim().slice(0, 120);
+  const periodNumber = Number(request.periodId);
+  const periodId = Number.isSafeInteger(periodNumber) && periodNumber > 0 ? periodNumber : undefined;
+  const catalog = manualEntryCatalog.listCatalog(db);
+  const overview = getOverview(db);
+  const overviewGroups = new Map(overview.domains.flatMap(domain => domain.groups.map(group => [group.code, group])));
+  const columnsByKey = new Map();
+  const rows = [];
+  let total = 0;
+  let skipped = 0;
+
+  const addColumn = column => {
+    if (!columnsByKey.has(column.key)) columnsByKey.set(column.key, column);
+  };
+
+  for (const domain of catalog.domains) {
+    for (const group of domain.groups) {
+      for (const field of group.fields) {
+        addColumn({
+          key: `${group.code}::${field.code}`,
+          domainCode: domain.code,
+          domainName: domain.name,
+          groupCode: group.code,
+          groupName: group.name,
+          fieldCode: field.code,
+          fieldName: field.name,
+          unit: field.unit ?? null,
+          hierarchyLabel: `${domain.name} › ${group.name} › ${field.name}`,
+          fieldType: field.dataType ?? null,
+          sourceKey: null,
+        });
+      }
+    }
+  }
+
+  for (const domain of catalog.domains) {
+    for (const group of domain.groups) {
+      const summary = overviewGroups.get(group.code);
+      for (const source of summary?.sources ?? []) {
+        const sourceRequest = { groupCode: group.code, sourceKey: source.key, geoUnitId, periodId, search, limit: 1, offset: 0 };
+        const probe = listGroupFromOverview(db, sourceRequest, overview);
+        const mappings = (probe.fields ?? []).map(field => {
+          const canonicalCode = field.name.startsWith('value:') ? field.name.slice('value:'.length) : null;
+          const canonicalField = canonicalCode ? group.fields.find(item => item.code === canonicalCode) : null;
+          const isSharedRecordMetadata = ['record_label', 'geo_name', 'period_label'].includes(field.name);
+          const key = canonicalField
+            ? `${group.code}::${canonicalCode}`
+            : isSharedRecordMetadata
+              ? `${group.code}::metadata:${field.name}`
+              : `${group.code}::${source.formCode ?? source.key}::${field.name}`;
+          addColumn({
+            key,
+            domainCode: domain.code,
+            domainName: domain.name,
+            groupCode: group.code,
+            groupName: group.name,
+            fieldCode: canonicalField?.code ?? field.name,
+            fieldName: canonicalField?.name ?? field.labelAr ?? field.name,
+            unit: canonicalField?.unit ?? null,
+            hierarchyLabel: `${domain.name} › ${group.name} › ${canonicalField?.name ?? field.labelAr ?? field.name}`,
+            fieldType: canonicalField?.dataType ?? field.type ?? null,
+            sourceKey: source.key,
+            sourceName: source.label,
+            dbFieldName: field.name,
+          });
+          return { sourceName: field.name, columnKey: key };
+        });
+        const sourceTotal = probe.requiresApproval || probe.requiresGeography ? 0 : Number(probe.total ?? 0);
+        total += sourceTotal;
+        if (!sourceTotal) continue;
+        const sourceOffset = Math.max(0, offset - skipped);
+        skipped += sourceTotal;
+        if (sourceOffset >= sourceTotal || rows.length >= limit) continue;
+        const count = Math.min(limit - rows.length, sourceTotal - sourceOffset);
+        const page = sourceOffset === 0 && count === 1
+          ? probe
+          : listGroupFromOverview(db, { ...sourceRequest, limit: count, offset: sourceOffset }, overview);
+        for (const row of page.rows ?? []) {
+          const recordId = row.form_record_id ?? row.welfare_record_id ?? row.project_id ?? row.id ?? rows.length;
+          const rowValues = Object.fromEntries(mappings.map(mapping => [mapping.columnKey, row[mapping.sourceName] ?? '']));
+          const recordLabel = row.record_label ?? row.project_name ?? row.name_ar ?? row.name ?? `سجل ${recordId}`;
+          rows.push({
+            ...rowValues,
+            _rowKey: `${group.code}:${source.key}:${recordId}`,
+            _recordLabel: recordLabel,
+            _domainName: domain.name,
+            _groupName: group.name,
+            _sourceType: row._sourceType ?? 'المصدر غير موثق',
+            _periodLabel: row.period_label ?? '',
+          });
+        }
+      }
+    }
+  }
+
+  const columns = [
+    { key: '_recordLabel', fieldName: 'اسم السجل', hierarchyLabel: 'بيانات السجل › اسم السجل' },
+    { key: '_domainName', fieldName: 'المجال', hierarchyLabel: 'بيانات السجل › المجال' },
+    { key: '_groupName', fieldName: 'المجموعة', hierarchyLabel: 'بيانات السجل › المجموعة' },
+    { key: '_periodLabel', fieldName: 'الفترة', hierarchyLabel: 'بيانات السجل › الفترة' },
+    { key: '_sourceType', fieldName: 'مصدر القيمة', hierarchyLabel: 'بيانات السجل › مصدر القيمة' },
+    ...columnsByKey.values(),
+  ];
+  const selectedFields = Array.isArray(request.columns) ? new Set(request.columns.map(String)) : null;
+  return {
+    directorate: geo,
+    periodId: periodId ?? null,
+    rows,
+    columns: selectedFields ? columns.filter(column => selectedFields.has(column.key)) : columns,
+    allColumns: columns,
+    groups: catalog.domains.flatMap(domain => domain.groups.map(group => ({
+      domainCode: domain.code,
+      domainName: domain.name,
+      groupCode: group.code,
+      groupName: group.name,
+      fieldCount: group.fields.length,
+      state: overviewGroups.get(group.code)?.state ?? 'unlinked',
+    }))),
+    total,
+    limit,
+    offset,
+    search,
   };
 }
 
@@ -653,4 +792,4 @@ function listGroupDataset(db, datasetKey, request = {}) {
   return domainService.list(db, { dataset: datasetKey, search: String(request.search ?? '').slice(0, 120), limit, offset });
 }
 
-module.exports = { GROUP_DATASETS, FORM_LEGACY_LINKS, OPERATIONAL_TABLES, OPERATIONAL_COLUMNS, COUNT_ONLY_TABLES, getOverview, listGroup, listOperationalTable, listUnclassifiedDataset, listUnclassifiedTable };
+module.exports = { GROUP_DATASETS, FORM_LEGACY_LINKS, OPERATIONAL_TABLES, OPERATIONAL_COLUMNS, COUNT_ONLY_TABLES, getOverview, listGroup, listDirectorateTable, listOperationalTable, listUnclassifiedDataset, listUnclassifiedTable };

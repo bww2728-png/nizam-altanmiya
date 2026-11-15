@@ -258,10 +258,13 @@ test('database browser IPC enforces owner access and records overview reads', ()
     assert.equal(handlers.get('db:open')().success, true);
     handlers.get('security:profile:set')(null, { profile: 'shared' });
     assert.throws(() => handlers.get('database-browser:overview')(), /وضع المالك فقط/);
+    assert.throws(() => handlers.get('database-browser:directorate-table')(null, {}), /وضع المالك فقط/);
+    assert.equal(handlers.get('files:inbox')(null, {}).restricted, true);
     handlers.get('security:profile:set')(null, { profile: 'owner' });
     const overview = handlers.get('database-browser:overview')();
     assert.equal(overview.totals.domains, 18);
     assert.equal(overview.totals.groups, 86);
+    assert.equal(handlers.get('files:inbox')(null, {}).total, 0);
     const database = new Database(path.join(directory, 'development-data.db'));
     try {
       const audit = database.prepare("SELECT channel,row_count,result FROM audit_reads WHERE channel='database-browser:overview' ORDER BY id DESC LIMIT 1").get();

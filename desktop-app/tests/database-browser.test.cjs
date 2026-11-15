@@ -189,6 +189,52 @@ test('manual entry is approved, reread from its directorate, and exported with t
   assert.ok(summary.getColumn(2).values.includes('المديرية: المعافر'));
 });
 
+test('directorate table shows hierarchical catalog fields and only approved records for the selected directorate', () => {
+  const db = openDatabase();
+  try {
+    const catalog = manualEntryCatalog.listCatalog(db);
+    const group = catalog.domains.flatMap(domain => domain.groups)
+      .find(item => item.code === 'administrative-geography.current-directorate-compatibility');
+    const form = group.forms.find(item => item.code === 'legacy_directorate_v1');
+    const selectedGeoUnitId = addDirectorate(db, 'المعافر', 'تعز');
+    const otherGeoUnitId = addDirectorate(db, 'جبل حبشي', 'إب');
+    const save = (geoUnitId, population, year) => recordService.saveRecord(db, {
+      formVersionId: form.versionId,
+      geoUnitId,
+      periodYear: year,
+      actor: 'database-browser-test',
+      values: {
+        'directorate.districtName': { value: geoUnitId === selectedGeoUnitId ? 'المعافر' : 'جبل حبشي' },
+        'directorate.governorate': { value: 'تعز' },
+        'directorate.population': { value: population },
+      },
+      valueSources: { 'directorate.population': 'مواصفة اختبارية' },
+    });
+    const approved = save(selectedGeoUnitId, '5000', '2025');
+    const otherDirectorateRecord = save(otherGeoUnitId, '9000', '2025');
+    const pending = save(selectedGeoUnitId, '7000', '2026');
+    for (const record of [approved, otherDirectorateRecord]) {
+      recordService.submitForReview(db, record.formRecordId, 'database-browser-reviewer');
+      recordService.decideRecord(db, record.formRecordId, { decision: 'approve', actor: 'database-browser-reviewer' });
+    }
+    recordService.submitForReview(db, pending.formRecordId, 'database-browser-reviewer');
+
+    const result = browser.listDirectorateTable(db, { geoUnitId: selectedGeoUnitId, limit: 50 });
+    const populationColumn = result.allColumns.find(column => column.groupCode === group.code && column.dbFieldName === 'value:directorate.population');
+    assert.equal(populationColumn.key, `${group.code}::${form.code}::value:directorate.population`);
+    assert.equal(result.total, 1);
+    assert.equal(result.rows.length, 1);
+    assert.equal(result.rows[0][populationColumn.key], '5000');
+    assert.ok(populationColumn.hierarchyLabel.includes('›'));
+    assert.equal(result.rows[0]._sourceType, 'إدخال يدوي موثق');
+    assert.ok(result.allColumns.some(column => column.groupCode === group.code && column.fieldCode === 'value:directorate.population'));
+    assert.throws(() => browser.listDirectorateTable(db, {}), /اختر المديرية/);
+    assert.ok(pending.formRecordId > 0);
+  } finally {
+    db.close();
+  }
+});
+
 test('all physical tables are explicitly cataloged, safely browsed, or count-only', () => {
   const db = openDatabase();
   try {

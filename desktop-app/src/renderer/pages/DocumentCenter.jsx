@@ -50,7 +50,7 @@ function candidateStatusLabel(status) {
   return ({ pending: 'بانتظار المراجعة', reviewed: 'رُوجع — غير معتمد رسميًا', rejected: 'مرفوض', no_evidence: 'لم يُعثر على دليل' })[status] ?? status;
 }
 
-export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
+export default function DocumentCenter({ notify, accessProfile = 'owner', initialDocumentId, reviewOnly = false, onBack, onUpdated }) {
   const [documents, setDocuments] = useState({ rows: [], total: 0, offset: 0, limit: PAGE_SIZE });
   const [selected, setSelected] = useState(null);
   const [ragflow, setRagflow] = useState(null);
@@ -124,6 +124,7 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
         setDocuments(current => ({ ...current, offset: 0 }));
         setSelected(null);
         await load();
+        onUpdated?.();
       }
     } catch (cause) { setError(errText(cause) || 'تعذر حفظ الوثيقة.'); }
   };
@@ -149,6 +150,8 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
       setSelected(details);
     } catch (cause) { setError(errText(cause) || 'تعذر فتح الوثيقة.'); }
   };
+
+  useEffect(() => { if (initialDocumentId) openDocument(initialDocumentId); }, [initialDocumentId]);
 
   const reviewFieldGroup = async (record, fieldGroup, status) => {
     const value = reviewFieldValues[`${record.key}:${fieldGroup.fieldCode}`] ?? fieldGroup.reviewedValue?.value ?? fieldGroup.recommendedValue;
@@ -377,7 +380,9 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
 
   return (
     <>
-      <Card title="مركز الوثائق والبحث المعرفي" subtitle="احفظ الوثائق محليًا، واستخرج محتواها للمراجعة، أو ابحث عن أدلة نصية داخل محرك المعرفة المحلي. لا تُرحّل مخرجات الاستخراج تلقائيًا إلى بيانات التنمية المعتمدة." icon={FileSearch}
+      {reviewOnly && !selected && <Card><Loading label="جارٍ فتح مراجعة الملف…" /></Card>}
+      {reviewOnly && error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
+      {!reviewOnly && <><Card title="مركز الوثائق والبحث المعرفي" subtitle="احفظ الوثائق محليًا، واستخرج محتواها للمراجعة، أو ابحث عن أدلة نصية داخل محرك المعرفة المحلي. لا تُرحّل مخرجات الاستخراج تلقائيًا إلى بيانات التنمية المعتمدة." icon={FileSearch}
         actions={<button className="btn small primary" onClick={stage}><Upload size={15} /> إضافة وثيقة</button>}>
         <div className="stat-strip">
           <div className="mini-stat"><strong>{fmtNumber(documents.total ?? 0, 0)}</strong><span>وثيقة أصلية محفوظة</span></div>
@@ -431,9 +436,9 @@ export default function DocumentCenter({ notify, accessProfile = 'owner' }) {
           </article>)}
           <div className="row between"><span className="muted">صفحة {page} من {totalPages}</span><div className="btn-row"><button className="btn small ghost" disabled={loading || documents.offset === 0} onClick={() => setDocuments(current => ({ ...current, offset: Math.max(0, current.offset - PAGE_SIZE) }))}>السابق</button><button className="btn small ghost" disabled={loading || documents.offset + rows.length >= documents.total} onClick={() => setDocuments(current => ({ ...current, offset: current.offset + PAGE_SIZE }))}>التالي</button></div></div>
         </div>}
-      </Card>
+      </Card></>}
 
-      {selected && <Card title={`مراجعة: ${selected.document.file_name}`} subtitle={`الأصل SHA-256: ${selected.document.sha256} · المحرك: ${selected.document.engine_name ?? 'لم يُشغّل'} ${selected.document.engine_version ?? ''}`} actions={selected.ragflowReferences?.length > 0 ? <button className="btn small ghost" onClick={() => syncIndexStatus(selected.document.id)} disabled={busyId === selected.document.id || !ragflow?.configured}><RefreshCw size={14} /> فحص حالة الفهرسة</button> : null}>
+      {selected && <Card title={`مراجعة: ${selected.document.file_name}`} subtitle={`الأصل SHA-256: ${selected.document.sha256} · المحرك: ${selected.document.engine_name ?? 'لم يُشغّل'} ${selected.document.engine_version ?? ''}`} actions={<div className="btn-row">{onBack && <button type="button" className="btn small ghost" onClick={onBack}>العودة إلى قائمة الملفات</button>}{selected.ragflowReferences?.length > 0 && <button className="btn small ghost" onClick={() => syncIndexStatus(selected.document.id)} disabled={busyId === selected.document.id || !ragflow?.configured}><RefreshCw size={14} /> فحص حالة الفهرسة</button>}</div>}>
         {selected.document.processing_error && <div className="quote">{selected.document.processing_error}</div>}
         {selected.fieldReview?.run && <section className="stack" style={{ marginBottom: 18 }}>
           <div><h3>حقول مقترحة للمراجعة</h3><p className="muted">المقترحات مستخرجة من أدلة الوثائق فقط. مراجعتها هنا لا تعتمدها ولا تغيّر قاعدة البيانات الرسمية.</p>

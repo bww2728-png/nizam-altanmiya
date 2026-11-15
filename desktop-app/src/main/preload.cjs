@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('localApp', {
   databaseBrowser: {
     overview: () => ipcRenderer.invoke('database-browser:overview'),
     group: (request) => ipcRenderer.invoke('database-browser:group', request),
+    directorateTable: (request) => ipcRenderer.invoke('database-browser:directorate-table', request),
     operational: (request) => ipcRenderer.invoke('database-browser:operational', request),
     unclassified: (request) => ipcRenderer.invoke('database-browser:unclassified', request),
     legacyTable: (request) => ipcRenderer.invoke('database-browser:legacy-table', request),
@@ -54,6 +55,8 @@ contextBridge.exposeInMainWorld('localApp', {
   // Excel import: scan -> plan -> apply
   scanWorkbook: (request) => ipcRenderer.invoke('import:scan', request),
   importPlan: () => ipcRenderer.invoke('import:plan'),
+  importBatch: (batchId) => ipcRenderer.invoke('import:batch', batchId),
+  fileInbox: (request) => ipcRenderer.invoke('files:inbox', request),
   canonicalProjects: (request) => ipcRenderer.invoke('projects:list', request),
   canonicalProject: (projectId) => ipcRenderer.invoke('projects:get', projectId),
   canonicalProjectReferences: () => ipcRenderer.invoke('projects:references'),
@@ -63,7 +66,7 @@ contextBridge.exposeInMainWorld('localApp', {
   dataSources: (request) => ipcRenderer.invoke('sources:list', request),
   archiveFiles: (targets) => ipcRenderer.invoke('files:archive', { targets }),
   restoreFiles: (targets) => ipcRenderer.invoke('files:restore', { targets }),
-  stageDocument: () => ipcRenderer.invoke('documents:stage'),
+  stageDocument: (request) => ipcRenderer.invoke('documents:stage', request),
   documents: (request) => ipcRenderer.invoke('documents:list', request),
   document: (documentId) => ipcRenderer.invoke('documents:get', documentId),
   extractDocument: (documentId) => ipcRenderer.invoke('documents:extract', documentId),

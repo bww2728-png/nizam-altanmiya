@@ -102,7 +102,11 @@ test('reader inventories all sheets and does not silently import hidden/addition
   try {
     await makeWorkbook(filePath);
     const read = await readDirectorateWorkbook(filePath);
+    const restoredRead = await readDirectorateWorkbook(fs.readFileSync(filePath), { fileName: 'restored.xlsx' });
 
+    assert.equal(restoredRead.fileName, 'restored.xlsx');
+    assert.equal(restoredRead.sheetName, read.sheetName);
+    assert.deepEqual(restoredRead.rows.map(row => row.rowNumber), read.rows.map(row => row.rowNumber));
     assert.equal(read.sheetName, 'البيانات الأساسية');
     assert.deepEqual(read.rows.map((row) => row.rowNumber), [3, 30, 40]);
     assert.equal(read.totalRows, 3, 'sparse row gaps must not stop reading, hidden rows are surfaced for review, and the second table must not be mixed in');

@@ -39,7 +39,7 @@ const defaultDecision = () => 'skip';
 
 const PREVIEW_LIMIT = 250;
 
-export default function ImportPage({ onNavigate, notify, onApplied }) {
+export default function ImportPage({ onNavigate, notify, onApplied, onStaged, initialBatchId, onBack }) {
   const [step, setStep] = useState('idle');
   const [plan, setPlan] = useState(null);
   const [fullPlan, setFullPlan] = useState(null);
@@ -56,11 +56,28 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
   const rows = useMemo(() => (fullPlan?.preview ?? plan?.preview ?? []), [fullPlan, plan]);
 
   useEffect(() => {
-    // The main process pushes `import:progress` while it scans; the banner below
-    // is therefore driven by real events, never by a client-side timer.
     const unsubscribe = window.localApp.onImportProgress?.((message) => setProgress(message));
     return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
   }, []);
+
+  useEffect(() => {
+    if (!initialBatchId) return;
+    let active = true;
+    setBusy(true);
+    setError('');
+    window.localApp.importBatch(initialBatchId).then(restored => {
+      if (!active) return;
+      setPlan(restored);
+      setFullPlan(null);
+      setResult(null);
+      setDecisions({});
+      setPage(0);
+      setStep('plan');
+    }).catch(cause => {
+      if (active) setError(errText(cause) || 'تعذر إعادة فتح مراجعة الملف المحفوظ.');
+    }).finally(() => { if (active) setBusy(false); });
+    return () => { active = false; };
+  }, [initialBatchId]);
 
   const chooseFile = useCallback(async () => {
     setBusy(true);
@@ -73,6 +90,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
         return;
       }
       setPlan(scanned);
+      onStaged?.(scanned.staging);
       setFullPlan(null);
       setResult(null);
       setDecisions({});
@@ -89,7 +107,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
       setProgress(null);
       setBusy(false);
     }
-  }, [notify]);
+  }, [notify, onStaged]);
 
   const loadAllRows = useCallback(async () => {
     setBusy(true);
@@ -159,6 +177,7 @@ export default function ImportPage({ onNavigate, notify, onApplied }) {
 
   return (
     <>
+      {onBack && <Card title={plan?.fileName ? `مراجعة الملف: ${plan.fileName}` : 'مراجعة ملف Excel'} subtitle="تظل محتويات الملف في المراجعة حتى تؤكد استيرادها." actions={<button type="button" className="btn small ghost" onClick={onBack}><ArrowLeft size={14} /> العودة إلى قائمة الملفات</button>} />}
       <Card flush>
         <div style={{ padding: '16px 20px' }}>
           <Stepper step={step} />

@@ -152,9 +152,10 @@ function safeWorksheetInventory(worksheet, detection, selectedSheetName, workboo
  * @returns {Promise<{sheetName:string, headerRow:number, firstDataRow:number, columnMap:object,
  *   matched:Array, unmatched:Array, duplicates:Array, rows:Array, warnings:Array, totalRows:number}>}
  */
-async function readDirectorateWorkbook(filePath) {
+async function readDirectorateWorkbook(filePath, options = {}) {
   const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.readFile(filePath);
+  if (Buffer.isBuffer(filePath)) await workbook.xlsx.load(filePath);
+  else await workbook.xlsx.readFile(filePath);
 
   const analyses = workbook.worksheets.map((worksheet) => ({
     worksheet,
@@ -334,7 +335,7 @@ async function readDirectorateWorkbook(filePath) {
   if (mapping.duplicates.length) warnings.push({ row: null, code: 'duplicate-headers', message: `أعمدة مكرّرة الدلالة: ${mapping.duplicates.length}.` });
 
   const result = {
-    fileName: path.basename(filePath),
+    fileName: options.fileName ?? path.basename(String(filePath)),
     sheetName: worksheet.name,
     headerRow: detection.headerRow,
     firstDataRow: detection.headerRow + 1,

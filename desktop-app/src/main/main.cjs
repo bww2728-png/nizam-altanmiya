@@ -681,12 +681,13 @@ function registerHandlers() {
     };
   });
 
-  ipcMain.handle('documents:stage', async () => {
+  ipcMain.handle('documents:stage', async (_event, request = {}) => {
     if (currentProfile() !== 'owner') throw new Error('إدارة الوثائق تتطلب وضع المالك.');
+    const wordOnly = request.type === 'word';
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'إضافة وثيقة إلى المكتبة المحلية',
+      title: wordOnly ? 'إضافة ملف Word للمراجعة' : 'إضافة وثيقة إلى المكتبة المحلية',
       properties: ['openFile'],
-      filters: [{ name: 'Excel وPDF وWord وصور', extensions: ['xlsx', 'xlsm', 'pdf', 'docx', 'png', 'jpg', 'jpeg', 'tif', 'tiff'] }],
+      filters: [{ name: wordOnly ? 'ملفات Word' : 'Excel وPDF وWord وصور', extensions: wordOnly ? ['docx'] : ['xlsx', 'xlsm', 'pdf', 'docx', 'png', 'jpg', 'jpeg', 'tif', 'tiff'] }],
     });
     if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
     const staged = await documentService.stageFile(requireDatabase(), result.filePaths[0]);
@@ -703,6 +704,33 @@ function registerHandlers() {
     const result = documentService.listDocuments(requireDatabase(), request);
     auditRead('documents:list', { entity: 'document_records', rowCount: result.rows.length, detail: `offset=${result.offset};limit=${result.limit}` });
     return result;
+  });
+  ipcMain.handle('files:inbox', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') return { restricted: true, rows: [], total: 0 };
+    const db = requireDatabase();
+    const limit = Math.max(1, Math.min(100, Math.trunc(Number(request.limit) || 50)));
+    const offset = Math.max(0, Math.trunc(Number(request.offset) || 0));
+    const filesQuery = `
+      SELECT 'document:' || document.id AS id, document.id AS resourceId, 'document' AS resourceType,
+        document.file_name AS fileName, document.mime_type AS storedMimeType, document.file_size AS fileSize,
+        document.sha256, document.status, document.created_at AS createdAt, document.updated_at AS updatedAt,
+        NULL AS rowCount, NULL AS sheetCount
+      FROM document_records document
+      WHERE NOT EXISTS (SELECT 1 FROM file_archive archive WHERE archive.resource_type='document' AND archive.resource_id=document.id)
+        AND NOT EXISTS (SELECT 1 FROM workbook_import_batches batch WHERE batch.sha256=document.sha256)
+      UNION ALL
+      SELECT 'workbook:' || batch.id AS id, batch.id AS resourceId, 'workbook' AS resourceType,
+        batch.file_name AS fileName, NULL AS storedMimeType,
+        batch.file_size AS fileSize, batch.sha256, batch.status, batch.created_at AS createdAt, batch.updated_at AS updatedAt,
+        batch.row_count AS rowCount, batch.sheet_count AS sheetCount
+      FROM workbook_import_batches batch
+      WHERE NOT EXISTS (SELECT 1 FROM file_archive archive WHERE archive.resource_type='workbook_import' AND archive.resource_id=CAST(batch.id AS TEXT))
+    `;
+    const total = Number(db.prepare(`SELECT COUNT(*) AS total FROM (${filesQuery}) files`).get().total ?? 0);
+    const rows = db.prepare(`SELECT * FROM (${filesQuery}) files ORDER BY createdAt DESC,id DESC LIMIT ? OFFSET ?`).all(limit, offset)
+      .map(file => ({ ...file, fileType: path.extname(file.fileName).slice(1).toUpperCase() || 'FILE' }));
+    auditRead('files:inbox', { entity: 'uploaded_files', rowCount: rows.length, detail: `offset=${offset};limit=${limit}` });
+    return { rows, total, offset, limit };
   });
 
   ipcMain.handle('documents:get', (_event, documentId) => {
@@ -1080,6 +1108,63 @@ function registerHandlers() {
     auditRead('import:plan', { entity: 'workbook', entityId: pendingPlan.filePath, rowCount: pendingPlan.plan.totalRows });
     return security.redactPlanSummary(summarizePlan(pendingPlan.plan, 5000), currentProfile());
   });
+  ipcMain.handle('import:batch', (_event, batchId) => {
+    if (currentProfile() !== 'owner') throw new Error('مراجعة ملفات Excel تتطلب وضع المالك.');
+    const id = Number(batchId);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('معرّف دفعة الاستيراد غير صالح.');
+    const db = requireDatabase();
+    const batch = db.prepare(`SELECT id,file_name,file_size,sha256,original_file,sheet_count,row_count,cell_count,media_count,media_stored_count,truncated,status,created_at,updated_at
+      FROM workbook_import_batches WHERE id=?`).get(id);
+    if (!batch) throw new Error('ملف Excel المطلوب غير موجود.');
+    const regions = canonicalData.listWorkbookImportRegions(db, id).regions;
+    const sheetRows = db.prepare(`SELECT id,sheet_index,name,state,max_row,max_column,nonempty_row_count,cell_count,formula_count,hidden_row_count,merged_ranges_json,tables_json,image_count,truncated
+      FROM workbook_import_sheets WHERE batch_id=? ORDER BY sheet_index`).all(id);
+    const staging = {
+      batchId: id, fileName: batch.file_name, fileSize: batch.file_size, sha256: batch.sha256,
+      sheetCount: batch.sheet_count, rowCount: batch.row_count, cellCount: batch.cell_count,
+      formulaCount: sheetRows.reduce((sum, sheet) => sum + Number(sheet.formula_count ?? 0), 0),
+      hiddenRowCount: sheetRows.reduce((sum, sheet) => sum + Number(sheet.hidden_row_count ?? 0), 0),
+      mediaCount: batch.media_count, mediaStoredCount: batch.media_stored_count, truncated: Boolean(batch.truncated), status: batch.status,
+      limits: canonicalData.LIMITS,
+      sheets: sheetRows.map(sheet => ({ id: sheet.id, index: sheet.sheet_index, name: sheet.name, state: sheet.state,
+        rowCount: sheet.max_row, columnCount: sheet.max_column, nonemptyRows: sheet.nonempty_row_count,
+        cellCount: sheet.cell_count, formulaCount: sheet.formula_count, hiddenRowCount: sheet.hidden_row_count,
+        imageCount: sheet.image_count, tableCount: JSON.parse(sheet.tables_json || '[]').length,
+        mergedRangeCount: JSON.parse(sheet.merged_ranges_json || '[]').length, truncated: Boolean(sheet.truncated),
+        regions: regions.filter(region => Number(region.sheetId) === Number(sheet.id)).map(region => ({
+          headerRow: region.headerRow, candidateType: region.candidateType, matchedCount: region.matchCount,
+        })),
+      })),
+    };
+    let read;
+    let readError = null;
+    try {
+      if (!batch.original_file) throw new Error('النسخة الأصلية غير متاحة لإعادة بناء خطة الاستيراد.');
+      read = require('./analysis/template-reader.cjs').readDirectorateWorkbook(Buffer.from(batch.original_file), { fileName: batch.file_name });
+    } catch (error) {
+      readError = error;
+    }
+    return Promise.resolve(read).catch(error => {
+      readError = error;
+      return null;
+    }).then(parsed => {
+      let plan;
+      let stagingOnly = false;
+      let stagingMessage = null;
+      if (!parsed) {
+        stagingOnly = true;
+        stagingMessage = String(readError?.message ?? 'تعذر قراءة النسخة الأصلية مجددًا.');
+        parsed = { fileName: batch.file_name, sheetName: null, rows: [], warnings: [{ code: 'stored-review-only', message: stagingMessage }] };
+      }
+      plan = buildImportPlan(db, parsed, { fileName: batch.file_name, sheetName: parsed.sheetName });
+      if (Object.prototype.hasOwnProperty.call(parsed, 'workbook')) delete parsed.workbook;
+      pendingPlan = { filePath: `stored-workbook:${id}`, read: parsed, plan, staging };
+      const result = { ...security.redactPlanSummary(summarizePlan(plan), currentProfile()), fileName: batch.file_name,
+        staging, stagingOnly, stagingMessage, stagingStatus: batch.status, restored: true };
+      auditRead('import:batch', { entity: 'workbook_import_batches', entityId: id, rowCount: plan.totalRows, result: 'restored' });
+      return result;
+    });
+  });
 
   ipcMain.handle('import:sheet-preview', (_event, request = {}) => {
     if (currentProfile() !== 'owner') {
@@ -1150,6 +1235,13 @@ function registerHandlers() {
       detail: `source=${request.sourceKey ?? ''};offset=${result.offset ?? 0};limit=${result.limit ?? 0}` });
     return result;
   });
+  ipcMain.handle('database-browser:directorate-table', (_event, request = {}) => {
+    if (currentProfile() !== 'owner') throw new Error('قاعدة البيانات الشاملة متاحة في وضع المالك فقط.');
+    const result = databaseBrowser.listDirectorateTable(requireDatabase(), request);
+    auditRead('database-browser:directorate-table', { entity: 'directorates', rowCount: result.rows.length,
+      detail: `geoUnitId=${request.geoUnitId ?? ''};offset=${result.offset};limit=${result.limit}` });
+    return result;
+  });
   ipcMain.handle('database-browser:operational', (_event, request = {}) => {
     if (currentProfile() !== 'owner') throw new Error('قراءة الجداول التشغيلية متاحة في وضع المالك فقط.');
     const result = databaseBrowser.listOperationalTable(requireDatabase(), request);
@@ -1176,38 +1268,37 @@ function registerHandlers() {
     const format = request.format === 'excel' ? 'xlsx' : String(request.format ?? 'xlsx');
     if (!['xlsx','csv','pdf'].includes(format)) throw new Error('صيغة التصدير غير مدعومة.');
     const section = String(request.section ?? '');
-    if (section !== 'catalog') throw new Error('التصدير الرسمي متاح من عرض المجالات والمجموعات بعد اختيار مديرية.');
+    if (!['catalog', 'directorate-table'].includes(section)) throw new Error('التصدير الرسمي متاح من جدول قاعدة البيانات بعد اختيار مديرية.');
     const search = String(request.search ?? '').trim().slice(0, 120);
-    const scopedRequest = { groupCode: request.groupCode, sourceKey: request.sourceKey, geoUnitId: request.geoUnitId, periodId: request.periodId, search };
-    const load = databaseBrowser.listGroup;
     const db = requireDatabase();
+    const scopedRequest = section === 'directorate-table'
+      ? { geoUnitId: request.geoUnitId, periodId: request.periodId, search, columns: request.columns }
+      : { groupCode: request.groupCode, sourceKey: request.sourceKey, geoUnitId: request.geoUnitId, periodId: request.periodId, search };
+    const load = section === 'directorate-table' ? databaseBrowser.listDirectorateTable : databaseBrowser.listGroup;
     const firstPage = load(db, { ...scopedRequest, limit: 200, offset: 0 });
     if (firstPage.requiresApproval) throw new Error('لا يمكن تصدير هذا المصدر قبل وجود حالة اعتماد موثقة.');
     if (firstPage.requiresGeography) throw new Error('لا يمكن تصدير هذا المصدر دون رابط موثق للمديرية.');
     const rowLimit = 10000;
-    if (firstPage.total > rowLimit) throw new Error(`عدد النتائج يتجاوز حد التصدير الآمن (${rowLimit.toLocaleString('ar')}). أضف عبارة بحث أو اختر مجموعة أصغر.`);
+    if (firstPage.total > rowLimit) throw new Error(`عدد النتائج يتجاوز حد التصدير الآمن (${rowLimit.toLocaleString('ar')}). أضف عبارة بحث أو اختر فترة أصغر.`);
     const rows = [...firstPage.rows];
     for (let offset = rows.length; offset < firstPage.total; offset += 200) {
       rows.push(...load(db, { ...scopedRequest, limit: 200, offset }).rows);
     }
-    const baseFields = firstPage.fields ?? [];
-    const columns = baseFields.map(field => ({ key: field.name, dbColumn: field.name, header: field.labelAr ?? field.name, type: field.type }));
-    if (rows.some(row => Object.hasOwn(row, '_sourceType'))) columns.push({ key: '_sourceType', dbColumn: '_sourceType', header: 'المصدر' });
-    for (const [key, header] of [['record_status','حالة السجل'],['quality_status','حالة الجودة'],['row_status','حالة الصف']]) {
-      if (rows.some(row => Object.hasOwn(row, key)) && !columns.some(column => column.key === key)) columns.push({ key, dbColumn: key, header });
-    }
-    const directorate = section === 'catalog'
-      ? recordService.listGeoUnits(db, '').find(unit => Number(unit.geo_unit_id) === Number(request.geoUnitId))
-      : null;
-    const period = section === 'catalog' ? recordService.listPeriods(db).find(item => Number(item.period_id) === Number(request.periodId)) : null;
+    const baseFields = section === 'directorate-table' ? firstPage.columns : firstPage.fields ?? [];
+    const columns = baseFields.map(field => ({ key: section === 'directorate-table' ? field.key : field.name,
+      dbColumn: section === 'directorate-table' ? field.key : field.name,
+      header: section === 'directorate-table' ? field.hierarchyLabel ?? field.fieldName : field.labelAr ?? field.name,
+      type: field.type ?? field.fieldType }));
+    const directorate = recordService.listGeoUnits(db, '').find(unit => Number(unit.geo_unit_id) === Number(request.geoUnitId));
+    const period = recordService.listPeriods(db).find(item => Number(item.period_id) === Number(request.periodId));
     const filters = {
       search,
       directorate: directorate ? `${directorate.name_ar}${directorate.parent_name_ar ? ` — ${directorate.parent_name_ar}` : ''}` : '',
       period: period?.label_ar ?? 'كل الفترات',
-      group: request.groupCode ?? '',
+      group: section === 'catalog' ? request.groupCode ?? '' : '',
     };
     const report = {
-      title: section === 'catalog' ? `قاعدة البيانات — ${request.groupCode}` : firstPage.labelAr ?? firstPage.table,
+      title: section === 'directorate-table' ? `قاعدة البيانات الشاملة — ${directorate?.name_ar ?? ''}` : `${request.groupCode}`,
       generatedAt: new Date().toISOString(),
       rows,
       columns,

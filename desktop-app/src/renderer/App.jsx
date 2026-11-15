@@ -11,7 +11,7 @@ import DataSources from './pages/DataSources.jsx';
 import Correction from './pages/Correction.jsx';
 import Indicators from './pages/Indicators.jsx';
 import Ranking from './pages/Ranking.jsx';
-import Database from './pages/Database.jsx';
+import Database from './pages/UnifiedDatabase.jsx';
 import DirectorateCard from './pages/DirectorateCard.jsx';
 import DomainRecords from './pages/DomainRecords.jsx';
 import DevelopmentAnalysis from './pages/DevelopmentAnalysis.jsx';
@@ -329,7 +329,7 @@ export default function App() {
       case 'sources':
         return <DataSources refreshKey={refreshKey} notify={notify} />;
       case 'documents':
-        return <DocumentsHub initialTab={params.tab} onNavigate={navigate} notify={notify} onApplied={refresh} accessProfile={status?.accessProfile ?? 'owner'} />;
+        return <DocumentsHub onNavigate={navigate} notify={notify} onApplied={refresh} accessProfile={status?.accessProfile ?? 'owner'} />;
       case 'domain-records':
         return <DomainRecords notify={notify} refreshKey={refreshKey} />;
       case 'development-analysis':
