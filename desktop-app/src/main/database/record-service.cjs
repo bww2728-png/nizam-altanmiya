@@ -834,12 +834,21 @@ function decideRecord(db,recordId,request = {}) {
         ?? syncApprovedProjectFunding(db,id,actor,now) ?? syncApprovedIndicatorObservation(db,id,actor,now))
       : null;
     const revision = previous.revision_number + 1;
-    db.prepare(`UPDATE form_records SET record_status=?,revision_number=?,submitted_by=CASE WHEN ?='pending_review' THEN ? ELSE submitted_by END,
-      reviewed_by=CASE WHEN ? IN ('approved','rejected','draft') THEN ? ELSE reviewed_by END,
-      approved_by=CASE WHEN ?='reopen' THEN NULL WHEN ?='approved' THEN ? ELSE approved_by END,
-      submitted_at=CASE WHEN ?='pending_review' THEN ? ELSE submitted_at END,
-      approved_at=CASE WHEN ?='reopen' THEN NULL WHEN ?='approved' THEN ? ELSE approved_at END,updated_at=? WHERE form_record_id=?`)
-      .run(next,revision,next,actor,next,actor,request.decision,request.decision,actor,next,now,request.decision,request.decision,now,now,id);
+    // Audit columns are written from the decision itself: comparing the decision
+    // string against the resulting status ('approve' vs 'approved') silently left
+    // submitted_by/approved_by and their timestamps empty.
+    const isSubmission = request.decision === 'submit';
+    const isApproval = request.decision === 'approve';
+    const isReopen = request.decision === 'reopen';
+    const isReviewDecision = ['approve','reject','return','reopen'].includes(request.decision);
+    db.prepare(`UPDATE form_records SET record_status=?,revision_number=?,
+      submitted_by=CASE WHEN ?=1 THEN ? ELSE submitted_by END,
+      reviewed_by=CASE WHEN ?=1 THEN ? ELSE reviewed_by END,
+      approved_by=CASE WHEN ?=1 THEN NULL WHEN ?=1 THEN ? ELSE approved_by END,
+      submitted_at=CASE WHEN ?=1 THEN ? ELSE submitted_at END,
+      approved_at=CASE WHEN ?=1 THEN NULL WHEN ?=1 THEN ? ELSE approved_at END,updated_at=? WHERE form_record_id=?`)
+      .run(next,revision,Number(isSubmission),actor,Number(isReviewDecision),actor,Number(isReopen),Number(isApproval),actor,
+        Number(isSubmission),now,Number(isReopen),Number(isApproval),now,now,id);
     const reviewDecision = request.decision === 'submit' ? 'submitted' : request.decision === 'return' ? 'returned' : request.decision === 'reopen' ? 'reopened' : request.decision;
     db.prepare('INSERT INTO record_reviews(form_record_id,review_stage,decision,reviewer_id,decision_reason,reviewed_at) VALUES(?,?,?,?,?,?)')
       .run(id,request.decision==='submit'?'submission':'review',reviewDecision,actor,request.reason ?? null,now);
