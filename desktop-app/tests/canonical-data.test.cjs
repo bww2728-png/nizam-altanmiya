@@ -208,6 +208,12 @@ test('central record writes validate values and keep revisions, provenance and r
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM value_provenance WHERE observation_id IN (SELECT observation_id FROM observations WHERE form_record_id=?) AND source_locator IN ('استمارة حصر 2025، ورقة السكان، الخلية C4','إفادة مكتب الإحصاء، الصفحة 2')").get(created.formRecordId).n,2);
     assert.equal(recordService.submitForReview(db,created.formRecordId,'reviewer').status,'pending_review');
     assert.equal(recordService.decideRecord(db,created.formRecordId,{ decision:'approve',actor:'reviewer' }).status,'approved');
+    const reviewAudit = db.prepare('SELECT submitted_by,submitted_at,reviewed_by,approved_by,approved_at FROM form_records WHERE form_record_id=?').get(created.formRecordId);
+    assert.equal(reviewAudit.submitted_by,'reviewer','the submitter is recorded on submit');
+    assert.ok(reviewAudit.submitted_at,'the submission timestamp is recorded');
+    assert.equal(reviewAudit.reviewed_by,'reviewer','the reviewer is recorded on the decision');
+    assert.equal(reviewAudit.approved_by,'reviewer','the approver is recorded on approval');
+    assert.ok(reviewAudit.approved_at,'the approval timestamp is recorded');
     const approvedOverview = recordService.getRecordOverview(db);
     assert.equal(approvedOverview.total,1);
     assert.equal(approvedOverview.statusCounts.approved,1);
