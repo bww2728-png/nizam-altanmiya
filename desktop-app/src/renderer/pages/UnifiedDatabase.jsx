@@ -169,7 +169,7 @@ export default function UnifiedDatabase({ accessProfile, notify, refreshKey }) {
       {!geoUnitId ? <Empty icon={DatabaseZap} title="اختر مديرية للبدء" hint="ستظهر هنا بياناتها المعتمدة فقط، مع أعمدة المجالات والمجموعات والحقول المتاحة." /> : (
         <Card title="الجدول الشامل" subtitle={`${selectedDirectorate?.name_ar ?? ''}${periodId ? ' · حسب الفترة المحددة' : ' · جميع الفترات'}`} flush>
           {loading && !result ? <div style={{ padding: 20 }}><Loading label="جارٍ تحميل البيانات المعتمدة…" /></div> : result?.rows?.length && shownColumns.length ? (
-            <div className="table-wrap" style={{ maxHeight: '68vh' }}><table className="data"><thead><tr>{shownColumns.map(column => <th key={column.key} title={column.hierarchyLabel}>{column.hierarchyLabel}</th>)}</tr></thead>
+            <div className="table-wrap unified-database-table"><table className="data"><thead><tr>{shownColumns.map(column => <th key={column.key} title={column.hierarchyLabel}>{column.hierarchyLabel}</th>)}</tr></thead>
               <tbody>{result.rows.map((row, index) => <tr key={row._rowKey ?? index}>{shownColumns.map(column => <td key={column.key}>{displayValue(row[column.key])}</td>)}</tr>)}</tbody>
             </table></div>
           ) : result?.rows?.length ? <Empty icon={Columns3} title="أخفَيت كل الأعمدة" hint="افتح اختيار الأعمدة وأظهر الحقول التي تريدها." />
